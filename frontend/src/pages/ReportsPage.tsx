@@ -139,21 +139,21 @@ export default function ReportsPage() {
                 <button
                   key={p.days}
                   onClick={() => setPreset(p.days)}
-                  className={`chip ${filters.days === p.days ? "bg-amber2/20 text-amber2" : "bg-ink-700 text-ink-300 hover:text-ink-100"}`}
+                  className={`chip ${filters.days === p.days ? "bg-amber2/20 text-amber2" : "bg-white/5 border border-white/10 text-ink-300 hover:text-ink-100"}`}
                 >
                   {p.label}
                 </button>
               ))}
               <input
                 type="date"
-                className="bg-ink-900 border border-ink-600 rounded px-2 py-1 text-xs num text-ink-100"
+                className="field-mini"
                 value={filters.from}
                 onChange={(e) => setFilters((f) => ({ ...f, from: e.target.value, days: 0 }))}
               />
-              <span className="text-ink-400 text-xs">—</span>
+              <span className="text-ink-300 text-xs">—</span>
               <input
                 type="date"
-                className="bg-ink-900 border border-ink-600 rounded px-2 py-1 text-xs num text-ink-100"
+                className="field-mini"
                 value={filters.to}
                 onChange={(e) => setFilters((f) => ({ ...f, to: e.target.value, days: 0 }))}
               />
@@ -174,12 +174,12 @@ export default function ReportsPage() {
                 <button
                   key={w.id}
                   onClick={() => toggleWarehouse(w.id)}
-                  className={`chip ${filters.warehouses.includes(w.id) ? "bg-amber2/20 text-amber2" : "bg-ink-700 text-ink-300 hover:text-ink-100"}`}
+                  className={`chip ${filters.warehouses.includes(w.id) ? "bg-amber2/20 text-amber2" : "bg-white/5 border border-white/10 text-ink-300 hover:text-ink-100"}`}
                 >
                   <span className="num">{w.code}</span> {w.name}
                 </button>
               ))}
-              {warehouses.length === 0 && <span className="text-xs text-ink-400">нет доступных складов</span>}
+              {warehouses.length === 0 && <span className="text-xs text-ink-300">нет доступных складов</span>}
             </div>
           </div>
         </div>
@@ -190,13 +190,13 @@ export default function ReportsPage() {
               key={t.id}
               onClick={() => setTab(t.id)}
               className={`rounded-md px-3 py-1.5 text-sm transition ${
-                tab === t.id ? "bg-ink-700 text-ink-100" : "text-ink-400 hover:text-ink-100"
+                tab === t.id ? "bg-ink-700 text-ink-100" : "text-ink-300 hover:text-ink-100"
               }`}
             >
               {t.label}
             </button>
           ))}
-          {busy && <span className="ml-auto text-xs text-ink-400">загрузка…</span>}
+          {busy && <span className="ml-auto text-xs text-ink-300">загрузка…</span>}
         </div>
       </section>
 
@@ -219,7 +219,7 @@ export default function ReportsPage() {
                 {dayLabel(filters.from)} — {dayLabel(filters.to)}
               </span>
             </h2>
-            <span className="text-[11px] text-ink-400 num">
+            <span className="text-[11px] text-ink-300 num">
               строк: {tab === "daily" ? (daily?.rows.length ?? 0) : (daily?.per_warehouse.length ?? 0)}
             </span>
           </div>
@@ -227,7 +227,7 @@ export default function ReportsPage() {
           {tab === "daily" ? (
             <table className="w-full text-sm mt-3">
               <thead>
-                <tr className="text-left text-[11px] uppercase tracking-wider text-ink-400">
+                <tr className="text-left text-[11px] uppercase tracking-wider text-ink-300">
                   {([
                     ["bucket_date", "Дата"],
                     ["warehouse", "Склад"],
@@ -254,7 +254,7 @@ export default function ReportsPage() {
                   <tr key={`${r.bucket_date}-${r.warehouse_id}-${i}`} className="border-t border-ink-700">
                     <td className="py-2 pr-3 num">{dayLabel(r.bucket_date)}</td>
                     <td className="py-2 pr-3 text-ink-300">
-                      <span className="num text-ink-400 mr-2">{r.code}</span>
+                      <span className="num text-ink-300 mr-2">{r.code}</span>
                       {r.warehouse}
                     </td>
                     <td className="py-2 pr-3 num text-right">{nf(r.inbound_t, 1)}</td>
@@ -266,7 +266,7 @@ export default function ReportsPage() {
                 ))}
                 {!rows.length && (
                   <tr>
-                    <td colSpan={7} className="py-6 text-center text-ink-400">
+                    <td colSpan={7} className="py-6 text-center text-ink-300">
                       За этот период данных нет
                     </td>
                   </tr>
@@ -290,7 +290,7 @@ export default function ReportsPage() {
           ) : (
             <table className="w-full text-sm mt-3">
               <thead>
-                <tr className="text-left text-[11px] uppercase tracking-wider text-ink-400">
+                <tr className="text-left text-[11px] uppercase tracking-wider text-ink-300">
                   <th className="py-2 pr-3 font-medium">Склад</th>
                   <th className="py-2 pr-3 font-medium text-right">Обработано, т</th>
                   <th className="py-2 pr-3 font-medium text-right">Принято, т</th>
@@ -303,7 +303,7 @@ export default function ReportsPage() {
                 {(daily?.per_warehouse ?? []).map((r) => (
                   <tr key={r.warehouse_id} className="border-t border-ink-700">
                     <td className="py-2 pr-3">
-                      <span className="num text-ink-400 mr-2">{r.code}</span>
+                      <span className="num text-ink-300 mr-2">{r.code}</span>
                       {r.warehouse}
                     </td>
                     <td className="py-2 pr-3 num text-right font-medium">{nf(r.processed_t, 1)}</td>
@@ -323,14 +323,14 @@ export default function ReportsPage() {
         <section className="panel p-4">
           <div className="flex items-baseline justify-between">
             <h2 className="panel-title">Остатки грузов на срез</h2>
-            <span className="text-[11px] text-ink-400 num">
+            <span className="text-[11px] text-ink-300 num">
               {cargo?.totals.positions ?? 0} позиций · {nf(cargo?.totals.weight_t ?? 0, 1)} т · просрочено{" "}
               {nf(cargo?.totals.overdue_weight_t ?? 0, 1)} т
             </span>
           </div>
           <table className="w-full text-sm mt-3">
             <thead>
-              <tr className="text-left text-[11px] uppercase tracking-wider text-ink-400">
+              <tr className="text-left text-[11px] uppercase tracking-wider text-ink-300">
                 <th className="py-2 pr-3 font-medium">Склад</th>
                 <th className="py-2 pr-3 font-medium">Группа груза</th>
                 <th className="py-2 pr-3 font-medium text-right">Мест</th>
@@ -343,13 +343,13 @@ export default function ReportsPage() {
               {(cargo?.rows ?? []).map((r, i) => (
                 <tr key={`${r.warehouse_id}-${r.cargo_group}-${i}`} className="border-t border-ink-700">
                   <td className="py-2 pr-3 text-ink-300">
-                    <span className="num text-ink-400 mr-2">{r.code}</span>
+                    <span className="num text-ink-300 mr-2">{r.code}</span>
                     {r.warehouse}
                   </td>
                   <td className="py-2 pr-3">{r.cargo_group}</td>
                   <td className="py-2 pr-3 num text-right text-ink-300">{nf(r.qty)}</td>
                   <td className="py-2 pr-3 num text-right font-medium">{nf(r.weight_t, 1)}</td>
-                  <td className={`py-2 pr-3 num text-right ${r.overdue_weight_t > 0 ? "text-crit" : "text-ink-400"}`}>
+                  <td className={`py-2 pr-3 num text-right ${r.overdue_weight_t > 0 ? "text-crit" : "text-ink-300"}`}>
                     {r.overdue_weight_t > 0 ? nf(r.overdue_weight_t, 1) : "—"}
                   </td>
                   <td className="py-2 num text-right text-ink-300">{nf(r.avg_age_days, 1)}</td>
@@ -365,7 +365,7 @@ export default function ReportsPage() {
           <h2 className="panel-title">Загрузка складов по срезам</h2>
           <table className="w-full text-sm mt-3">
             <thead>
-              <tr className="text-left text-[11px] uppercase tracking-wider text-ink-400">
+              <tr className="text-left text-[11px] uppercase tracking-wider text-ink-300">
                 <th className="py-2 pr-3 font-medium">Срез</th>
                 <th className="py-2 pr-3 font-medium">Склад</th>
                 <th className="py-2 pr-3 font-medium text-right">Занято</th>
@@ -378,7 +378,7 @@ export default function ReportsPage() {
                 <tr key={`${r.snapshot_at}-${r.warehouse_id}-${i}`} className="border-t border-ink-700">
                   <td className="py-2 pr-3 num text-ink-300">{asOf(r.snapshot_at)}</td>
                   <td className="py-2 pr-3">
-                    <span className="num text-ink-400 mr-2">{r.code}</span>
+                    <span className="num text-ink-300 mr-2">{r.code}</span>
                     {r.warehouse}
                   </td>
                   <td className="py-2 pr-3 num text-right">{nf(r.used, 1)}</td>
@@ -397,7 +397,7 @@ export default function ReportsPage() {
         </section>
       )}
 
-      <p className="text-[11px] text-ink-400 leading-relaxed">
+      <p className="text-[11px] text-ink-300 leading-relaxed">
         CSV открывается в Excel: разделитель «;», десятичный «,», кириллица с BOM. Период
         ограничен годом — исторические срезы глубже 12 месяцев выгружаются по запросу.
         Фильтры запоминаются: в следующий раз кабинет откроет тот же период и склады.

@@ -7,21 +7,21 @@ import { dayFull, dayLabel, nf } from "../format";
  * чтобы SVG-оси не разъезжались с цветами панелей.
  */
 const CHART = {
-  grid: "#1d3050", // ink-600 — линии сетки
-  axis: "#2c4468", // ink-500 — базовая ось
-  muted: "#7d94b5", // ink-400 — подписи осей (читаются и на панели, и на фоне страницы)
-  barTop: "#f0a02c", // amber2 — столбцы обработки: тёплый янтарь контрастнее синих линий (7:1 против 4.7:1)
+  grid: "rgba(255,255,255,.10)", // линии сетки — светлая линия поверх стекла
+  axis: "rgba(127,151,189,.35)", // ink-400 полупрозрачный — базовая ось
+  muted: "#7f97bd", // ink-400 — подписи осей
+  barTop: "#f0a02c", // amber2 — обычные столбцы оставляем янтарными (6.8:1, синий даёт ~3:1)
   barBottom: "#c9781c", // низ столбца — тот же янтарь, только глубже (градиент сверху вниз)
-  selTop: "#4f8cff", // accent — выбранный столбец: подсветка синим (сигнал «мы здесь»)
-  selBottom: "#38bdf8", // accent2 — низ выбранного столбца
-  selStroke: "#b3c6e0", // ink-300 — тонкая рамка выбранного столбца
-  dwell: "#38bdf8", // accent2 — среднее время хранения
-  out: "#b3c6e0", // ink-300 — отгрузка
+  selTop: "#2fbaec", // accent — выбранный столбец: фирменный голубой сайта («мы здесь»)
+  selBottom: "#337ab7", // brand.mid — низ выбранного столбца (тот же голубой, глубже)
+  selStroke: "#b9c9e2", // ink-300 — тонкая рамка выбранного столбца
+  dwell: "#2fbaec", // accent — среднее время хранения
+  out: "#b9c9e2", // ink-300 — отгрузка
 } as const;
 
 /**
- * Полосы — объём обработки за сутки, пунктир — среднее время хранения,
- * светло-синяя черта — отгрузка, столбцы — янтарный градиент (тёплый акцент).
+ * Полосы — объём обработки за сутки (янтарь), голубой пунктир — среднее время
+ * хранения, светлая черта — отгрузка; выбранный столбец — фирменный голубой.
  *
  * SVG рисуется в реальных пикселях (viewBox = фактическая ширина контейнера),
  * поэтому текст не растягивается, когда плашку растягивают мышью.
@@ -40,7 +40,7 @@ export function DynamicsChart({
   height?: number;
   /** клик по столбцу (сутки); не передан — график неинтерактивный */
   onSelectDay?: (day: string) => void;
-  /** выбранные сутки: столбец подсвечивается синим */
+  /** выбранные сутки: столбец подсвечивается фирменным голубым (accent) */
   selectedDay?: string | null;
 }) {
   const boxRef = useRef<HTMLDivElement>(null);
@@ -74,7 +74,7 @@ export function DynamicsChart({
   const yT = (v: number) => pad.t + ih - (v / maxT) * ih;
   const yD = (v: number) => pad.t + ih - (v / maxD) * ih;
   const line = points.map((p, i) => `${pad.l + step * (i + 0.5)},${yD(p.avg_dwell_hours)}`).join(" ");
-  // синяя подсветка под линией хранения (замкнутый контур по нижней границе)
+  // голубая подсветка под линией хранения (замкнутый контур по нижней границе)
   const xFirst = pad.l + step * 0.5;
   const xLast = pad.l + step * (points.length - 0.5);
   const area = `${xFirst},${pad.t + ih} ${line} ${xLast},${pad.t + ih}`;
@@ -106,7 +106,7 @@ export function DynamicsChart({
             </text>
           </g>
         ))}
-        {/* базовая ось — чуть ярче сетки, синяя подсветка низа графика */}
+        {/* базовая ось — чуть ярче сетки; под ней голубая подсветка низа графика */}
         <line x1={pad.l} x2={W - pad.r} y1={pad.t + ih} y2={pad.t + ih} stroke={CHART.axis} strokeWidth={1.5} />
 
         {points.map((p, i) => {
@@ -218,13 +218,13 @@ export function DynamicsChart({
           <i className="inline-block w-3 h-3 rounded-sm bg-amber2" /> обработано, т
         </span>
         <span className="flex items-center gap-1.5">
-          <i className="inline-block w-3 h-[2px] bg-accent2" /> среднее время хранения, ч
+          <i className="inline-block w-3 h-[2px] bg-accent" /> среднее время хранения, ч
         </span>
         <span className="flex items-center gap-1.5">
           <i className="inline-block w-3 h-[2px] bg-ink-300" /> отгружено, т
         </span>
         {onSelectDay && (
-          <span className="ml-auto text-ink-400">клик по столбцу — детализация за день</span>
+          <span className="ml-auto text-ink-300">клик по столбцу — детализация за день</span>
         )}
       </div>
     </div>

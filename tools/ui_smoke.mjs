@@ -1,6 +1,6 @@
 import { chromium } from "playwright-core";
 
-const BASE = "http://localhost:4173";
+const BASE = process.env.BASE || "http://localhost:5173";
 const exe = process.env.PW_CHROMIUM;
 
 const browser = await chromium.launch({ executablePath: exe, headless: true });

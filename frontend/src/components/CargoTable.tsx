@@ -24,7 +24,7 @@ export function CargoTable({ rows }: { rows: CargoRow[] }) {
               <td className="py-2 pr-3">{r.cargo_group}</td>
               <td className="py-2 pr-3 num text-right text-ink-300">{nf(r.qty)}</td>
               <td className="py-2 pr-3 num text-right font-medium">{nf(r.weight_t, 1)}</td>
-              <td className={`py-2 pr-3 num text-right ${r.overdue_weight_t > 0 ? "text-crit" : "text-ink-400"}`}>
+              <td className={`py-2 pr-3 num text-right ${r.overdue_weight_t > 0 ? "text-crit" : "text-ink-300"}`}>
                 {r.overdue_weight_t > 0 ? nf(r.overdue_weight_t, 1) : "—"}
               </td>
               <td className="py-2 num text-right text-ink-300">{nf(r.avg_age_days, 1)}</td>

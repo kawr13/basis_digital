@@ -165,6 +165,10 @@ export function DrilldownPanel({
       .sort((a, b) => b.weight - a.weight);
   }, [cargo]);
 
+  // Строка, совпадающая с текущим выбором (ключи строк те же, что у измерений:
+  // w<id> / bucket_date) — подсвечиваем её фирменным голубым accent.
+  const selectedKey = warehouseId != null ? `w${warehouseId}` : day;
+
   const totals = proc?.totals;
   const state = busy ? "loading" : error ? "error" : rows.length ? "ready" : "empty";
   const title = day
@@ -190,7 +194,7 @@ export function DrilldownPanel({
       {...(day ? { "data-drilldown-day": day } : {})}
       {...(warehouseId != null ? { "data-drilldown-warehouse": String(warehouseId) } : {})}
       className={[
-        "dd-panel panel fixed z-30 outline-none",
+        "dd-panel panel glass-strong fixed z-30 outline-none",
         // мобильный: во всю ширину снизу, шапку не задеваем
         "inset-x-0 bottom-0 max-h-[72vh] overflow-y-auto p-4 rounded-b-none",
         // десктоп: фиксированная колонка справа
@@ -203,7 +207,7 @@ export function DrilldownPanel({
           <h3 id="drilldown-title" className="mt-1 text-sm font-medium truncate">
             {title}
           </h3>
-          <div className="mt-1 text-[11px] text-ink-400">
+          <div className="mt-1 text-[11px] text-ink-300">
             период <span className="num text-ink-300">{dmy(period.from)} — {dmy(period.to)}</span> · {scopeNote}
           </div>
         </div>
@@ -216,7 +220,7 @@ export function DrilldownPanel({
         <div className="mt-4 space-y-2" aria-live="polite">
           <div className="text-xs text-ink-300">загрузка…</div>
           {[0, 1, 2, 3].map((i) => (
-            <div key={i} className="h-4 rounded-sm bg-ink-700/80 animate-pulse" style={{ width: `${92 - i * 12}%` }} />
+            <div key={i} className="h-4 rounded-sm bg-white/10 animate-pulse" style={{ width: `${92 - i * 12}%` }} />
           ))}
         </div>
       )}
@@ -256,9 +260,14 @@ export function DrilldownPanel({
             </thead>
             <tbody>
               {rows.map((r) => (
-                <tr key={r.key} className="border-t border-ink-700">
+                <tr
+                  key={r.key}
+                  data-drilldown-row={r.key}
+                  data-selected={r.key === selectedKey ? "1" : "0"}
+                  className={`border-t border-ink-700 ${r.key === selectedKey ? "bg-accent/15" : ""}`}
+                >
                   <td className="py-1.5 pr-2 text-ink-100">
-                    {r.sub && <span className="num text-ink-400 mr-1.5">{r.sub}</span>}
+                    {r.sub && <span className="num text-ink-300 mr-1.5">{r.sub}</span>}
                     <span className="break-words">{r.label}</span>
                   </td>
                   <td className="py-1.5 pr-2 num text-right text-ink-300">{nf(r.inbound_t, 1)}</td>
@@ -275,7 +284,7 @@ export function DrilldownPanel({
                   <td className="py-1.5 pr-2 font-medium text-ink-100">Итого</td>
                   <td className="py-1.5 pr-2 num text-right text-ink-300">{nf(totals.inbound_t, 1)}</td>
                   <td className="py-1.5 pr-2 num text-right text-ink-300">{nf(totals.outbound_t, 1)}</td>
-                  <td className="py-1.5 pr-2 num text-right font-medium text-accent2">
+                  <td className="py-1.5 pr-2 num text-right font-medium text-accent">
                     {nf(totals.processed_t, 1)}
                   </td>
                   <td className="py-1.5 pr-2 num text-right text-ink-300">{nf(totals.docs_count)}</td>
@@ -284,7 +293,7 @@ export function DrilldownPanel({
               </tfoot>
             )}
           </table>
-          <div className="mt-1.5 text-[10px] text-ink-400">
+          <div className="mt-1.5 text-[10px] text-ink-300">
             вес — тонны, хранение — среднее время на складе в часах
           </div>
         </div>
@@ -293,7 +302,7 @@ export function DrilldownPanel({
       {!busy && !error && warehouseId != null && (
         <div className="mt-4" data-drilldown-cargo>
           <div className="panel-title">Чем загружен склад</div>
-          <div className="mt-0.5 text-[10px] text-ink-400">
+          <div className="mt-0.5 text-[10px] text-ink-300">
             остатки на <span className="num text-ink-300">{asOf(cargo?.snapshot_at ?? null)}</span>
           </div>
 
@@ -314,11 +323,11 @@ export function DrilldownPanel({
                   <tr key={g.group} className="border-t border-ink-700">
                     <td className="py-1.5 pr-2 break-words">
                       {g.group}
-                      <span className="num text-ink-400 ml-1.5">({nf(g.qty)} мест)</span>
+                      <span className="num text-ink-300 ml-1.5">({nf(g.qty)} мест)</span>
                     </td>
                     <td className="py-1.5 pr-2 num text-right font-medium">{nf(g.weight, 1)}</td>
                     <td
-                      className={`py-1.5 pr-2 num text-right ${g.overdue > 0 ? "text-crit" : "text-ink-400"}`}
+                      className={`py-1.5 pr-2 num text-right ${g.overdue > 0 ? "text-crit" : "text-ink-300"}`}
                     >
                       {g.overdue > 0 ? nf(g.overdue, 1) : "—"}
                     </td>
@@ -329,9 +338,9 @@ export function DrilldownPanel({
               <tfoot>
                 <tr className="border-t border-ink-500" data-drilldown-total>
                   <td className="py-1.5 pr-2 font-medium text-ink-100">Итого</td>
-                  <td className="py-1.5 pr-2 num text-right text-accent2">{nf(cargo.totals.weight_t, 1)}</td>
+                  <td className="py-1.5 pr-2 num text-right text-accent">{nf(cargo.totals.weight_t, 1)}</td>
                   <td className="py-1.5 pr-2 num text-right text-ink-300">{nf(cargo.totals.overdue_weight_t, 1)}</td>
-                  <td className="py-1.5 num text-right text-ink-400">—</td>
+                  <td className="py-1.5 num text-right text-ink-300">—</td>
                 </tr>
               </tfoot>
             </table>

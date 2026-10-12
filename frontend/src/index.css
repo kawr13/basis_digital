@@ -2,6 +2,14 @@
 @tailwind components;
 @tailwind utilities;
 
+/*
+ * Палитра — фирменная, снята с cab.basisport.ru: navy шапки #1b3360,
+ * голубой акцент #2fbaec, bootstrap-синие #337ab7 / #428bca / #66afe9.
+ *
+ * «Стекло» (liquid glass) работает только тогда, когда под ним есть что
+ * размывать: поэтому на фоне страницы не плоский цвет, а глубокий navy-градиент
+ * с несколькими мягкими цветными пятнами.
+ */
 @layer base {
   html,
   body,
@@ -10,24 +18,82 @@
   }
   body {
     @apply text-ink-100 font-sans antialiased;
-    /* мягкий тёмно-синий градиент + едва заметная радиальная подсветка сверху */
-    background-image: radial-gradient(1200px 600px at 50% -12%, rgba(79, 140, 255, 0.10), transparent 62%),
-      linear-gradient(180deg, #0a1220 0%, #0e1c33 45%, #0a1424 100%);
+    background-color: #060b16;
+    background-image: linear-gradient(180deg, #060b16 0%, #0d1a30 45%, #0a1526 100%);
     background-attachment: fixed;
-    background-color: #0a1424;
+    /* нативные контролы (date, скроллбар, календарь) — в тёмной теме */
+    color-scheme: dark;
+  }
+  /*
+   * Слой «под стеклом»: цветные орбы + тонкая сетка. Сетка обязательна —
+   * ровный градиент размывать нечем, и тогда blur не виден вовсе (панели
+   * выглядят просто тёмно-синими). По сетке размытие заметно сразу.
+   * Орбы медленно дрейфуют — отсюда «liquid».
+   */
+  body::before {
+    content: "";
+    position: fixed;
+    inset: -12%;
+    z-index: -1;
+    background: radial-gradient(closest-side, rgba(47, 186, 236, 0.2), transparent 72%) 6% 8% / 34rem 24rem no-repeat,
+      radial-gradient(closest-side, rgba(51, 122, 183, 0.26), transparent 72%) 88% 2% / 42rem 28rem no-repeat,
+      radial-gradient(closest-side, rgba(42, 74, 128, 0.45), transparent 72%) 62% 96% / 48rem 32rem no-repeat,
+      repeating-linear-gradient(0deg, rgba(185, 201, 226, 0.05) 0 1px, transparent 1px 46px),
+      repeating-linear-gradient(90deg, rgba(185, 201, 226, 0.05) 0 1px, transparent 1px 46px);
+    animation: orb-drift 28s ease-in-out infinite alternate;
+  }
+  @keyframes orb-drift {
+    from {
+      transform: translate3d(0, 0, 0) scale(1);
+    }
+    to {
+      transform: translate3d(-1.5rem, -2rem, 0) scale(1.05);
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    body::before {
+      animation: none;
+    }
   }
   input,
   button {
     font: inherit;
   }
+  /* ссылки — при наведении фирменный голубой сайта (accent) */
+  a {
+    color: inherit;
+  }
+  a:hover {
+    color: #2fbaec;
+  }
 }
 
 @layer components {
+  /*
+   * LIQUID GLASS. Полупрозрачная navy-подложка + световой градиент по диагонали,
+   * blur + saturate того, что под панелью, тонкая светлая рамка, внутренняя
+   * верхняя подсветка (в inset-тени) и мягкая внешняя тень. Скругление — как раньше.
+   */
   .panel {
     @apply rounded-lg shadow-panel;
-    /* полупрозрачная тёмно-синяя панель с мягким градиентом сверху вниз */
-    background-image: linear-gradient(180deg, rgba(30, 52, 86, 0.55), rgba(13, 23, 40, 0.78));
-    border: 1px solid rgba(88, 128, 190, 0.28);
+    background-color: rgba(27, 51, 96, 0.22); /* brand.navy */
+    background-image: linear-gradient(160deg, rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0.02) 46%, rgba(255, 255, 255, 0.05)),
+      radial-gradient(120% 90% at 0% 0%, rgba(255, 255, 255, 0.1), transparent 55%);
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    -webkit-backdrop-filter: blur(20px) saturate(165%);
+    backdrop-filter: blur(20px) saturate(165%);
+  }
+  /*
+   * Плотное стекло — шапка и панель детализации: под ними едет контент,
+   * поэтому размывание сильнее, а подложка насыщеннее.
+   */
+  .glass-strong {
+    @apply shadow-panel;
+    background-color: rgba(27, 51, 96, 0.42); /* brand.navy */
+    background-image: linear-gradient(160deg, rgba(255, 255, 255, 0.11), rgba(255, 255, 255, 0.02) 48%, rgba(255, 255, 255, 0.06));
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    -webkit-backdrop-filter: blur(26px) saturate(170%);
+    backdrop-filter: blur(26px) saturate(170%);
   }
   .panel-title {
     /* ink-300: заголовок панели читается увереннее, чем ink-400 на полупрозрачном синем */
@@ -37,20 +103,33 @@
     @apply font-num tabular-nums;
   }
   .field {
-    @apply w-full bg-ink-900/70 border border-ink-600 rounded-md px-3 py-2.5
-      text-ink-100 placeholder-ink-400 outline-none
-      focus:border-accent focus:ring-1 focus:ring-accent/40 transition;
+    @apply w-full rounded-md px-3 py-2.5 text-ink-100 placeholder-ink-400 outline-none transition
+      focus:border-accent focus:ring-1 focus:ring-accent/40;
+    /* стеклянная подложка: затемняем поле, чтобы оно не сливалось с панелью */
+    background-color: rgba(6, 11, 22, 0.45);
+    border: 1px solid rgba(255, 255, 255, 0.14);
+  }
+  /* то же стекло, но компактное — поля в панели фильтров */
+  .field-mini {
+    @apply rounded px-2 py-1 text-xs num text-ink-100 outline-none transition
+      focus:border-accent focus:ring-1 focus:ring-accent/40;
+    background-color: rgba(6, 11, 22, 0.45);
+    border: 1px solid rgba(255, 255, 255, 0.14);
   }
   .btn {
     @apply inline-flex items-center justify-center gap-2 rounded-md px-4 py-2.5
       font-medium transition disabled:opacity-50 disabled:cursor-not-allowed;
   }
   .btn-primary {
-    @apply btn text-ink-900 hover:brightness-110 active:brightness-95;
-    background-image: linear-gradient(135deg, #4f8cff 0%, #38bdf8 100%);
+    /* на голубом #2fbaec белый текст нечитаем (2.5:1) — кладём тёмный navy (8.5:1) */
+    @apply btn hover:brightness-110 active:brightness-95;
+    color: #06101f;
+    background-image: linear-gradient(135deg, #2fbaec 0%, #337ab7 100%);
   }
   .btn-ghost {
-    @apply btn border border-ink-600 text-ink-300 hover:text-ink-100 hover:border-accent/60;
+    @apply btn text-ink-300 hover:text-ink-100 hover:border-accent;
+    background-color: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.16);
   }
   .chip {
     @apply inline-flex items-center gap-1 rounded px-2 py-0.5 text-[11px] font-medium;
@@ -100,7 +179,8 @@
 }
 .rz:hover::after,
 .rz:active::after {
-  background: rgba(79, 140, 255, 0.45);
+  /* подсветка ручки — фирменный голубой сайта */
+  background: rgba(47, 186, 236, 0.45);
 }
 
 /*
@@ -112,16 +192,16 @@
   cursor: pointer;
 }
 .dc-hit:hover {
-  fill: rgba(79, 140, 255, 0.1);
+  fill: rgba(47, 186, 236, 0.1);
 }
 .dc-hit[data-selected="1"] {
-  fill: rgba(79, 140, 255, 0.16);
+  fill: rgba(47, 186, 236, 0.16);
 }
 .dc-hit:focus {
   outline: none;
 }
 .dc-hit:focus-visible {
-  outline: 2px dashed #38bdf8;
+  outline: 2px dashed #2fbaec;
   outline-offset: -2px;
 }
 
@@ -138,6 +218,16 @@
 }
 .dd-panel {
   animation: dd-in 0.16s ease-out;
+}
+/* тонкая голубая кромка сверху: панель деталей подсвечена фирменным голубым */
+.dd-panel::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, rgba(47, 186, 236, 0.6), transparent);
 }
 @media (prefers-reduced-motion: reduce) {
   .dd-panel {
