@@ -193,3 +193,18 @@ class SyncRun(Base):
     status: Mapped[str] = mapped_column(String(16), default="ok")  # ok | error
     rows: Mapped[int] = mapped_column(Integer, default=0)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class UserPreference(Base):
+    """Персональные настройки интерфейса: раскладка дашборда, фильтры отчётов.
+
+    value храним JSON-строкой: набор виджетов и их размеров со временем меняется,
+    а мигрировать таблицу под каждое изменение не нужно.
+    """
+
+    __tablename__ = "user_preferences"
+
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[str] = mapped_column(Text)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)

@@ -2,6 +2,7 @@ import { Navigate, Route, Routes } from "react-router-dom";
 import { useAuth } from "./auth";
 import DashboardPage from "./pages/DashboardPage";
 import LoginPage from "./pages/LoginPage";
+import ReportsPage from "./pages/ReportsPage";
 
 function Boot() {
   return (
@@ -28,6 +29,14 @@ export default function App() {
         element={
           <Protected>
             <DashboardPage />
+          </Protected>
+        }
+      />
+      <Route
+        path="/reports"
+        element={
+          <Protected>
+            <ReportsPage />
           </Protected>
         }
       />

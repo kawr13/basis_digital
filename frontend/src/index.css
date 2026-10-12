@@ -46,3 +46,10 @@
     @apply inline-flex items-center gap-1 rounded px-2 py-0.5 text-[11px] font-medium;
   }
 }
+
+/* На узких экранах плашки всегда во всю ширину: тянуть их мышью на телефоне неудобно */
+@media (max-width: 900px) {
+  .widget-grid > section {
+    grid-column: span 12 !important;
+  }
+}

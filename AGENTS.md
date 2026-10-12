@@ -30,16 +30,18 @@ statcab/
 │   │   ├── security.py      # scrypt-пароли, JWT, refresh-токены
 │   │   ├── deps.py          # current_user, require_roles, client_ip
 │   │   ├── seed.py          # администратор при первом запуске + демо-пользователи (dev)
-│   │   ├── api/             # auth.py, metrics.py, admin.py
+│   │   ├── api/             # auth.py, metrics.py, admin.py, settings.py (настройки), reports.py (отчёты+CSV)
 │   │   ├── services/metrics.py  # SQL-запросы витрины с фильтром по доступным складам
+│   │   ├── services/reports.py  # отчёты за произвольный период + итоги + тренд загрузки
 │   │   └── onec/            # base.py (контракт источника), mock.py, http_source.py, sync.py
-│   ├── tests/test_auth.py   # 12 тестов: вход, блокировки, ротация refresh, RBAC, scope
+│   ├── tests/               # test_auth.py, test_reports.py, test_settings.py (26 тестов)
 │   └── requirements*.txt    # prod (пин) / dev (свежие колёса) / prod+psycopg2
 ├── frontend/
 │   ├── src/api.ts           # fetch-клиент: access в памяти, refresh в cookie, авто-повтор 401
 │   ├── src/auth.tsx         # AuthProvider: восстановление сессии, login/logout
-│   ├── src/pages/           # LoginPage, DashboardPage
-│   ├── src/components/      # KpiCard, DynamicsChart (SVG), CapacityPanel, CargoTable
+│   ├── src/pages/           # LoginPage, DashboardPage, ReportsPage
+│   ├── src/components/      # AppShell (шапка+навигация), WidgetGrid (drag&drop плашек),
+│   │                        # KpiCard, DynamicsChart (SVG), CapacityPanel, CargoTable
 │   └── nginx.conf           # прод-фронт: SPA + прокси /api → backend
 ├── docker-compose.yml       # db + backend + web
 ├── docs/                    # 01 постановка и вопросы, 02 архитектура, 03 контракт 1С
@@ -52,6 +54,13 @@ statcab/
 - **Multi-warehouse scope**: пустой `UserWarehouseScope` = доступ ко всем складам (роль `top`);
   менеджер видит только назначенные. Любой эндпоинт метрик обязан фильтровать по scope.
 - **access-токен** живёт только в памяти браузера (не в localStorage), refresh — httpOnly-cookie.
+- **Персональные настройки** (`user_preferences`, JSON в TEXT): раскладка дашборда и фильтры
+  отчётов. Ключи белым списком (`KNOWN_KEYS`), размер значения ограничен. Храним на сервере,
+  а не в localStorage — настройка следует за пользователем между браузерами.
+- **Раскладка виджетов**: `mergeLayout()` склеивает сохранённый порядок с кодовым списком
+  виджетов — новые доезжают в конец, удалённые исчезают. Ширина — span в 12-колоночной сетке.
+- **Отчёты** фильтруются по тому же scope, что и метрики: чужой склад в параметре
+  `warehouses` = 403, а не чужие строки в ответе.
 - **Время** храним наивным UTC (`models.utcnow()`), чтобы SQLite и PG вели себя одинаково.
 - **Ошибки входа** — всегда один текст («Неверный логин или пароль»), чтобы не светить существование учётки.
 - **Пароли**: `scrypt$N$r$salt$hash` (stdlib, без нативных зависимостей).
@@ -67,6 +76,7 @@ statcab/
 | `docker compose up -d --build` | полный стек |
 | `curl -X POST .../api/sync/run -H "Authorization: Bearer <token>"` | ручной запуск загрузки из 1С |
 | `node tools/ui_smoke.mjs` | браузерная проверка входа и дашборда |
+| `node tools/ui_customization.mjs` | браузерная проверка drag&drop, отчётов и CSV |
 
 ## Definition of Done (фича готова, если)
 1. Бэкенд: есть тест на новый сценарий, `pytest` зелёный.

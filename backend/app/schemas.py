@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -133,3 +134,16 @@ class SummaryOut(BaseModel):
     processed_7d_t: float
     dwell_hours: float
     delta_pct: float | None
+
+
+# -------------------------------------------------------------- settings ----
+
+class PreferenceIn(BaseModel):
+    """Значение настройки — произвольный JSON (раскладка дашборда, фильтры)."""
+
+    value: Any
+
+
+class PreferenceOut(BaseModel):
+    key: str
+    value: Any

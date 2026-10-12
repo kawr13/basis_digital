@@ -8,7 +8,7 @@ from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from .api import admin, auth, metrics
+from .api import admin, auth, metrics, reports, settings
 from .config import get_settings
 from .db import SessionLocal, init_db
 from .deps import require_roles
@@ -75,6 +75,8 @@ app.add_middleware(
 app.include_router(auth.router)
 app.include_router(metrics.router)
 app.include_router(admin.router)
+app.include_router(settings.router)
+app.include_router(reports.router)
 
 
 @app.get("/healthz", tags=["service"])

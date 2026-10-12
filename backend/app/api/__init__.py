@@ -1,1 +1,1 @@
-from . import auth, metrics, admin  # noqa: F401
+from . import auth, metrics, admin, settings, reports  # noqa: F401

@@ -1,38 +1,7 @@
-"""Тесты авторизации и разграничения доступа.
-
-Запуск: cd backend && python -m pytest
-"""
+"""Тесты авторизации и разграничения доступа."""
 from __future__ import annotations
 
-import os
-import tempfile
-
-import pytest
-
-_tmpdir = tempfile.mkdtemp(prefix="statcab_test_")
-os.environ.update(
-    DATABASE_URL=f"sqlite:///{_tmpdir}/test.db",
-    ENVIRONMENT="dev",
-    SECRET_KEY="test-secret-key-0123456789abcdef-ABCDEF0123456789",
-    ADMIN_LOGIN="admin",
-    ADMIN_PASSWORD="Adm1n-Passw0rd",
-    SEED_DEMO_DATA="true",
-    ONE_C_SOURCE="mock",
-    SYNC_ENABLED="false",
-    SYNC_INTERVAL_MINUTES="999",
-)
-
-from fastapi.testclient import TestClient  # noqa: E402
-
-from app.main import app  # noqa: E402
-
-ADMIN = {"login": "admin", "password": "Adm1n-Passw0rd"}
-
-
-@pytest.fixture(scope="module")
-def client():
-    with TestClient(app) as c:
-        yield c
+from .conftest import ADMIN
 
 
 def _login(client, login, password):
@@ -96,20 +65,19 @@ def test_change_password_revokes_sessions(client):
     token, refresh = r.json()["access_token"], r.cookies["sc_refresh"]
     ch = client.post("/api/auth/change-password",
                      headers={"Authorization": f"Bearer {token}"},
-                     json={"old_password": "Adm1n-Passw0rd", "new_password": "N3w-Passw0rd!"})
+                     json={"old_password": ADMIN["password"], "new_password": "N3w-Passw0rd!"})
     assert ch.status_code == 204
     assert client.post("/api/auth/refresh", cookies={"sc_refresh": refresh}).status_code == 401
     assert _login(client, "admin", "N3w-Passw0rd!").status_code == 200
     # возвращаем пароль остальным тестам
     t2 = _login(client, "admin", "N3w-Passw0rd!").json()["access_token"]
     assert client.post("/api/auth/change-password", headers={"Authorization": f"Bearer {t2}"},
-                       json={"old_password": "N3w-Passw0rd!", "new_password": "Adm1n-Passw0rd"}).status_code == 204
+                       json={"old_password": "N3w-Passw0rd!", "new_password": ADMIN["password"]}).status_code == 204
 
 
 def test_lockout_after_failed_attempts(client):
     r = _login(client, **ADMIN)
-    token = r.json()["access_token"]
-    hdr = {"Authorization": f"Bearer {token}"}
+    hdr = {"Authorization": f"Bearer {r.json()['access_token']}"}
     created = client.post("/api/admin/users", headers=hdr, json={
         "login": "victor", "full_name": "Тестов Виктор", "password": "Str0ng-Pass",
         "role": "manager", "warehouse_ids": [],
@@ -123,38 +91,34 @@ def test_lockout_after_failed_attempts(client):
     assert "заблокирована" in locked.json()["detail"]
 
 
-def test_admin_can_create_and_disable_user(client):
-    r = _login(client, **ADMIN)
-    hdr = {"Authorization": f"Bearer {r.json()['access_token']}"}
-
-    lst = client.get("/api/admin/users", headers=hdr)
+def test_admin_can_create_disable_and_reenable_user(client, admin_hdr):
+    lst = client.get("/api/admin/users", headers=admin_hdr)
     assert lst.status_code == 200
     ids = {u["login"]: u["id"] for u in lst.json()}
 
-    off = client.patch(f"/api/admin/users/{ids['victor']}", headers=hdr, json={"is_active": False})
+    off = client.patch(f"/api/admin/users/{ids['victor']}", headers=admin_hdr, json={"is_active": False})
     assert off.status_code == 200
     assert _login(client, "victor", "Str0ng-Pass").status_code == 403
 
-
-def test_manager_cannot_use_admin_api(client):
-    r = _login(client, "petrov", "demo1234")
-    assert r.status_code == 200, r.text
-    hdr = {"Authorization": f"Bearer {r.json()['access_token']}"}
-    assert client.get("/api/admin/users", headers=hdr).status_code == 403
-    assert client.post("/api/sync/run", headers=hdr).status_code == 403
+    on = client.patch(f"/api/admin/users/{ids['victor']}", headers=admin_hdr, json={"is_active": True})
+    assert on.status_code == 200
+    # после отключения блокировка заодно снята
+    assert _login(client, "victor", "Str0ng-Pass").status_code == 200
 
 
-def test_metrics_scoped_by_warehouse(client):
-    admin_h = {"Authorization": f"Bearer {_login(client, **ADMIN).json()['access_token']}"}
-    mgr_h = {"Authorization": f"Bearer {_login(client, 'petrov', 'demo1234').json()['access_token']}"}
+def test_manager_cannot_use_admin_api(client, manager_hdr):
+    assert client.get("/api/admin/users", headers=manager_hdr).status_code == 403
+    assert client.post("/api/sync/run", headers=manager_hdr).status_code == 403
 
-    all_wh = client.get("/api/warehouses", headers=admin_h).json()
-    mgr_wh = client.get("/api/warehouses", headers=mgr_h).json()
+
+def test_metrics_scoped_by_warehouse(client, admin_hdr, manager_hdr):
+    all_wh = client.get("/api/warehouses", headers=admin_hdr).json()
+    mgr_wh = client.get("/api/warehouses", headers=manager_hdr).json()
     assert len(all_wh) >= 5
     assert len(mgr_wh) == 2, "менеджеру доступны только назначенные склады"
 
-    cap_all = client.get("/api/metrics/warehouse-capacity", headers=admin_h).json()
-    cap_mgr = client.get("/api/metrics/warehouse-capacity", headers=mgr_h).json()
+    cap_all = client.get("/api/metrics/warehouse-capacity", headers=admin_hdr).json()
+    cap_mgr = client.get("/api/metrics/warehouse-capacity", headers=manager_hdr).json()
     assert cap_all["rows"] and cap_all["snapshot_at"]
     assert len(cap_mgr["rows"]) == 2
     assert {r["warehouse_id"] for r in cap_mgr["rows"]} == {w["id"] for w in mgr_wh}
@@ -169,14 +133,13 @@ def test_metrics_need_auth(client):
         assert client.get(path).status_code == 401
 
 
-def test_dynamics_and_summary(client):
-    hdr = {"Authorization": f"Bearer {_login(client, **ADMIN).json()['access_token']}"}
-    dyn = client.get("/api/metrics/processing-dynamics?days=14", headers=hdr).json()
+def test_dynamics_and_summary(client, admin_hdr):
+    dyn = client.get("/api/metrics/processing-dynamics?days=14", headers=admin_hdr).json()
     assert len(dyn["points"]) >= 10
     assert dyn["processed_total"] > 0
     assert dyn["delta_pct"] is not None
 
-    summ = client.get("/api/metrics/summary", headers=hdr).json()
+    summ = client.get("/api/metrics/summary", headers=admin_hdr).json()
     assert summ["cargo_weight_t"] > 0
     assert summ["warehouses"] >= 5
     assert 0 < summ["utilization"] < 2

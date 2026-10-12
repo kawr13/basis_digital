@@ -1,29 +1,67 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  api, type Capacity, type CargoBalance, type Dynamics, type Summary,
+  api, type Capacity, type CargoBalance, type DashboardLayout, type Dynamics,
+  type Summary, type WidgetState,
 } from "../api";
 import { useAuth } from "../auth";
+import { AppShell } from "../components/AppShell";
 import { CargoTable } from "../components/CargoTable";
 import { CapacityPanel } from "../components/CapacityPanel";
 import { DynamicsChart } from "../components/DynamicsChart";
 import { KpiCard } from "../components/KpiCard";
-import { asOf, nf, pct, roleLabel, signed } from "../format";
+import { WidgetGrid, mergeLayout, type WidgetDef } from "../components/WidgetGrid";
+import { asOf, nf, pct, signed } from "../format";
 
-type Data = {
-  summary: Summary;
-  cargo: CargoBalance;
-  capacity: Capacity;
-  dynamics: Dynamics;
-};
+type Data = { summary: Summary; cargo: CargoBalance; capacity: Capacity; dynamics: Dynamics };
 
 const REFRESH_MS = 60_000;
+const LAYOUT_KEY = "dashboard_layout";
 
 export default function DashboardPage() {
-  const { user, logout } = useAuth();
+  const { user } = useAuth();
   const [data, setData] = useState<Data | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [edit, setEdit] = useState(false);
+  const [layout, setLayout] = useState<WidgetState[]>([]);
+  const [savedAt, setSavedAt] = useState<string | null>(null);
+  const saveTimer = useRef<number | undefined>(undefined);
 
+  // ---- раскладка -----------------------------------------------------------
+  useEffect(() => {
+    api
+      .preferences()
+      .then((prefs) => {
+        const stored = prefs?.[LAYOUT_KEY] as DashboardLayout | undefined;
+        setLayout(() => mergeLayout(WIDGETS_PLACEHOLDER, stored?.widgets ?? null));
+      })
+      .catch(() => setLayout(mergeLayout(WIDGETS_PLACEHOLDER, null)));
+  }, []);
+
+  const persist = useCallback((next: WidgetState[]) => {
+    window.clearTimeout(saveTimer.current);
+    saveTimer.current = window.setTimeout(() => {
+      api
+        .savePreference(LAYOUT_KEY, { version: 1, widgets: next } satisfies DashboardLayout)
+        .then(() => setSavedAt(new Date().toISOString()))
+        .catch(() => setError("Раскладку не удалось сохранить — изменения останутся только до перезагрузки"));
+    }, 400);
+  }, []);
+
+  const changeLayout = useCallback(
+    (next: WidgetState[]) => {
+      setLayout(next);
+      persist(next);
+    },
+    [persist],
+  );
+
+  const resetLayout = useCallback(() => {
+    setLayout(mergeLayout(WIDGETS_PLACEHOLDER, null));
+    api.resetPreference(LAYOUT_KEY).catch(() => undefined);
+  }, []);
+
+  // ---- данные --------------------------------------------------------------
   const load = useCallback(async () => {
     setBusy(true);
     try {
@@ -48,133 +86,163 @@ export default function DashboardPage() {
     return () => clearInterval(t);
   }, [load]);
 
-  const util = data?.summary.utilization ?? 0;
-  const utilTone = util >= 0.95 ? "crit" : util >= 0.85 ? "warn" : "ok";
-  const delta = data?.summary.delta_pct ?? null;
+  const defs: WidgetDef[] = useMemo(() => buildWidgets(data), [data]);
 
   return (
-    <div className="min-h-full">
-      <header className="sticky top-0 z-10 bg-ink-800/95 backdrop-blur border-b border-ink-600">
-        <div className="mx-auto max-w-[1400px] px-6 py-3 flex items-center gap-4">
-          <div>
-            <div className="text-[11px] uppercase tracking-[0.18em] text-ink-400">БазисПорт</div>
-            <div className="text-sm font-medium">Кабинет веб-статистики</div>
-          </div>
-
-          <div className="ml-4 hidden md:flex items-center gap-2 text-xs text-ink-400">
-            <span className="chip bg-ink-700 text-ink-300">
-              данные 1С на <span className="num ml-1 text-ink-100">{asOf(data?.summary.data_as_of ?? null)}</span>
-            </span>
-            <span className="chip bg-ink-700 text-ink-300">
-              {user?.all_warehouses ? "все склады" : `${user?.warehouse_ids.length} склада(ов)`}
-            </span>
-          </div>
-
-          <div className="ml-auto flex items-center gap-3">
-            <button className="btn-ghost text-xs" onClick={load} disabled={busy}>
-              {busy ? "Обновление…" : "Обновить"}
+    <AppShell
+      asOf={asOf(data?.summary.data_as_of ?? null)}
+      scopeLabel={user?.all_warehouses ? "все склады" : `${user?.warehouse_ids.length} склада(ов)`}
+      actions={
+        <>
+          {edit && savedAt && (
+            <span className="text-[11px] text-ok">раскладка сохранена ✓</span>
+          )}
+          {edit && (
+            <button className="btn-ghost text-xs" onClick={resetLayout}>
+              Сбросить
             </button>
-            <div className="text-right leading-tight">
-              <div className="text-sm">{user?.full_name}</div>
-              <div className="text-[11px] text-ink-400">{roleLabel[user?.role ?? ""]}</div>
-            </div>
-            <button className="btn-ghost text-xs" onClick={logout}>
-              Выйти
-            </button>
-          </div>
+          )}
+          <button className="btn-ghost text-xs" onClick={load} disabled={busy}>
+            {busy ? "Обновление…" : "Обновить"}
+          </button>
+          <button
+            className={`btn text-xs ${edit ? "btn-primary" : "btn-ghost"}`}
+            onClick={() => setEdit((v) => !v)}
+          >
+            {edit ? "Готово" : "Настроить"}
+          </button>
+        </>
+      }
+    >
+      {edit && (
+        <div className="panel p-3 text-xs text-ink-300 flex flex-wrap items-center gap-x-4 gap-y-1">
+          <span className="text-amber2">Режим настройки</span>
+          <span>тяни блок за ⠿, чтобы переставить; ← → — без мыши;</span>
+          <span>¼ ½ ⅔ во всю — ширина блока; «скрыть» — убрать, вернуть можно кнопкой внизу.</span>
+          <span className="text-ink-500">Раскладка сохраняется на пользователя и подтягивается в любом браузере.</span>
         </div>
-      </header>
+      )}
 
-      <main className="mx-auto max-w-[1400px] px-6 py-6 space-y-6">
-        {error && (
-          <div className="panel border-crit/40 p-3 text-sm text-crit">
-            {error}{" "}
-            <button className="underline underline-offset-2" onClick={load}>
-              повторить
-            </button>
-          </div>
-        )}
+      {error && (
+        <div className="panel border-crit/40 p-3 text-sm text-crit">
+          {error}{" "}
+          <button className="underline underline-offset-2" onClick={load}>
+            повторить
+          </button>
+        </div>
+      )}
 
-        <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-          <KpiCard
-            label="Остаток грузов"
-            value={nf(data?.summary.cargo_weight_t ?? 0, 0)}
-            unit="т"
-            sub={
-              <>
-                просрочено хранение:{" "}
-                <span className={data && data.summary.overdue_weight_t > 0 ? "text-crit num" : "num"}>
-                  {nf(data?.summary.overdue_weight_t ?? 0, 0)} т
-                </span>
-              </>
-            }
-          />
-          <KpiCard
-            label="Загрузка складов"
-            value={pct(util, 1)}
-            tone={utilTone}
-            sub={`${data?.summary.warehouses ?? 0} складов в контуре`}
-          />
-          <KpiCard
-            label="Обработано за 7 суток"
-            value={nf(data?.summary.processed_7d_t ?? 0, 0)}
-            unit="т"
-            sub={
-              delta === null ? (
-                "нет данных за предыдущий период"
-              ) : (
-                <span className={delta >= 0 ? "text-ok" : "text-crit"}>
-                  {signed(delta)} к предыдущим 14 суткам
-                </span>
-              )
-            }
-          />
-          <KpiCard
-            label="Среднее время хранения"
-            value={nf(data?.summary.dwell_hours ?? 0, 1)}
-            unit="ч"
-            sub={`сегодня обработано ${nf(data?.summary.processed_today_t ?? 0, 0)} т`}
-          />
-        </section>
+      <WidgetGrid defs={defs} state={layout} edit={edit} onChange={changeLayout} />
 
-        <section className="grid gap-4 xl:grid-cols-[1.55fr_1fr]">
-          <div className="panel p-4">
-            <div className="flex items-baseline justify-between">
-              <h2 className="panel-title">Динамика обработки · 14 суток</h2>
-              <span className="text-[11px] text-ink-400 num">
-                всего {nf(data?.dynamics.processed_total ?? 0, 0)} т
-              </span>
-            </div>
-            <div className="mt-3">
-              <DynamicsChart points={data?.dynamics.points ?? []} />
-            </div>
-          </div>
-
-          <div className="panel p-4">
-            <h2 className="panel-title">Ёмкость складов</h2>
-            <div className="mt-3">
-              <CapacityPanel rows={data?.capacity.rows ?? []} />
-            </div>
-          </div>
-        </section>
-
-        <section className="panel p-4">
-          <div className="flex items-baseline justify-between">
-            <h2 className="panel-title">Остатки грузов по складам</h2>
-            <span className="text-[11px] text-ink-400">
-              срез <span className="num text-ink-300">{asOf(data?.cargo.snapshot_at ?? null)}</span>
-            </span>
-          </div>
-          <div className="mt-3">
-            <CargoTable rows={data?.cargo.rows ?? []} />
-          </div>
-        </section>
-
-        <p className="text-[11px] text-ink-500 leading-relaxed">
-          Источник цифр — 1С, витрина кабинета обновляется автоматически. Если данные
-          расходятся с 1С, сообщите администратору кабинета: проверим выгрузку.
-        </p>
-      </main>
-    </div>
+      <p className="text-[11px] text-ink-500 leading-relaxed">
+        Источник цифр — 1С, витрина кабинета обновляется автоматически (последняя загрузка:{" "}
+        {asOf(data?.summary.data_as_of ?? null)}). Если данные расходятся с 1С, сообщите
+        администратору кабинета — проверим выгрузку.
+      </p>
+    </AppShell>
   );
 }
+
+/**
+ * Виджеты описаны кодом, а не конфигом: рендер живёт рядом с данными.
+ * Порядок и ширина — пользовательские, см. mergeLayout.
+ */
+function buildWidgets(data: Data | null): WidgetDef[] {
+  const s = data?.summary;
+  const util = s?.utilization ?? 0;
+  const utilTone = util >= 0.95 ? "crit" : util >= 0.85 ? "warn" : "ok";
+  const delta = s?.delta_pct ?? null;
+
+  return [
+    {
+      id: "kpi_cargo",
+      title: "Остаток грузов",
+      defaultSpan: 3,
+      render: () => (
+        <KpiCard
+          label="Остаток на складах"
+          value={nf(s?.cargo_weight_t ?? 0, 0)}
+          unit="т"
+          sub={
+            <>
+              просрочено хранение:{" "}
+              <span className={s && s.overdue_weight_t > 0 ? "text-crit num" : "num"}>
+                {nf(s?.overdue_weight_t ?? 0, 0)} т
+              </span>
+            </>
+          }
+        />
+      ),
+    },
+    {
+      id: "kpi_load",
+      title: "Загрузка складов",
+      defaultSpan: 3,
+      render: () => (
+        <KpiCard
+          label="Средняя загрузка"
+          value={pct(util, 1)}
+          tone={utilTone}
+          sub={`${s?.warehouses ?? 0} складов в контуре`}
+        />
+      ),
+    },
+    {
+      id: "kpi_processed",
+      title: "Обработка",
+      defaultSpan: 3,
+      render: () => (
+        <KpiCard
+          label="Обработано за 7 суток"
+          value={nf(s?.processed_7d_t ?? 0, 0)}
+          unit="т"
+          sub={
+            delta === null ? (
+              "нет данных за предыдущий период"
+            ) : (
+              <span className={delta >= 0 ? "text-ok" : "text-crit"}>
+                {signed(delta)} к предыдущим 14 суткам
+              </span>
+            )
+          }
+        />
+      ),
+    },
+    {
+      id: "kpi_dwell",
+      title: "Хранение",
+      defaultSpan: 3,
+      render: () => (
+        <KpiCard
+          label="Среднее время хранения"
+          value={nf(s?.dwell_hours ?? 0, 1)}
+          unit="ч"
+          sub={`сегодня обработано ${nf(s?.processed_today_t ?? 0, 0)} т`}
+        />
+      ),
+    },
+    {
+      id: "dynamics",
+      title: "Динамика обработки · 14 суток",
+      defaultSpan: 8,
+      hint: `всего ${nf(data?.dynamics.processed_total ?? 0, 0)} т`,
+      render: () => <DynamicsChart points={data?.dynamics.points ?? []} />,
+    },
+    {
+      id: "capacity",
+      title: "Ёмкость складов",
+      defaultSpan: 4,
+      render: () => <CapacityPanel rows={data?.capacity.rows ?? []} />,
+    },
+    {
+      id: "cargo_table",
+      title: "Остатки грузов по складам",
+      defaultSpan: 12,
+      hint: `срез ${asOf(data?.cargo.snapshot_at ?? null)}`,
+      render: () => <CargoTable rows={data?.cargo.rows ?? []} />,
+    },
+  ];
+}
+
+// Описание виджетов для начального слияния раскладки (до появления данных).
+const WIDGETS_PLACEHOLDER = buildWidgets(null);
