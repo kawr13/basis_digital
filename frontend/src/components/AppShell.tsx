@@ -12,17 +12,20 @@ export function AppShell({
   asOf,
   scopeLabel,
   actions,
+  contentClassName,
 }: {
   children: React.ReactNode;
   asOf?: string;
   scopeLabel?: string;
   actions?: React.ReactNode;
+  /** дополнительные классы для <main>: напр. отступ под фиксированную панель деталей */
+  contentClassName?: string;
 }) {
   const { user, logout } = useAuth();
 
   return (
     <div className="min-h-full">
-      <header className="sticky top-0 z-20 bg-ink-800/95 backdrop-blur border-b border-ink-600">
+      <header className="sticky top-0 z-20 bg-ink-800/95 backdrop-blur border-b border-ink-600 shadow-panel">
         <div className="mx-auto max-w-[1500px] px-6">
           <div className="flex items-center gap-4 pt-3">
             <div>
@@ -39,7 +42,7 @@ export function AppShell({
                   className={({ isActive }) =>
                     `rounded-md px-3 py-1.5 text-sm transition ${
                       isActive
-                        ? "bg-amber2/15 text-amber2"
+                        ? "bg-accent/15 text-accent"
                         : "text-ink-300 hover:text-ink-100 hover:bg-ink-700"
                     }`
                   }
@@ -72,7 +75,7 @@ export function AppShell({
         </div>
       </header>
 
-      <main className="mx-auto max-w-[1500px] px-6 py-6 space-y-5">{children}</main>
+      <main className={`mx-auto max-w-[1500px] px-6 py-6 space-y-5 ${contentClassName ?? ""}`}>{children}</main>
     </div>
   );
 }

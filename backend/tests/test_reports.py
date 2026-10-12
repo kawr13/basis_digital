@@ -30,6 +30,32 @@ def test_processing_report_period_filter(client, admin_hdr):
     assert body["totals"]["days"] <= 3
 
 
+def test_drilldown_day_and_warehouse_contract(client, admin_hdr, manager_hdr):
+    """Детализация дашборда: клик по столбцу (сутки) и по строке ёмкости (склад)."""
+    rows = client.get("/api/reports/processing", headers=admin_hdr).json()["rows"]
+    assert rows, "демо-витрина обязана отдать данные"
+    day = max(row["bucket_date"] for row in rows)
+
+    r = client.get(f"/api/reports/processing?from={day}&to={day}", headers=admin_hdr)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["period"] == {"from": day, "to": day}
+    assert {row["bucket_date"] for row in body["rows"]} == {day}
+    assert body["totals"]["days"] == 1
+    keys = ("inbound_t", "outbound_t", "processed_t", "docs_count", "avg_dwell_hours")
+    assert all(k in body["totals"] for k in keys)
+    assert body["per_warehouse"] and all(all(k in w for k in keys) for w in body["per_warehouse"])
+
+    # режим «склад»: менеджер видит только назначенный склад — и в обработке, и в остатках
+    mine = client.get("/api/reports/warehouses", headers=manager_hdr).json()
+    one = client.get(f"/api/reports/processing?warehouses={mine[0]['id']}", headers=manager_hdr)
+    assert one.status_code == 200
+    assert {row["warehouse_id"] for row in one.json()["rows"]} <= {mine[0]["id"]}
+    cargo = client.get(f"/api/reports/cargo?warehouses={mine[0]['id']}", headers=manager_hdr)
+    assert cargo.status_code == 200
+    assert {row["warehouse_id"] for row in cargo.json()["rows"]} <= {mine[0]["id"]}
+
+
 def test_report_period_is_capped(client, admin_hdr):
     """Нельзя вытащить «всю историю» одним запросом."""
     r = client.get("/api/reports/processing?from=2000-01-01", headers=admin_hdr)

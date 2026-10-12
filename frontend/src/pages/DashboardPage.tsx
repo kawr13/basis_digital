@@ -6,6 +6,7 @@ import {
 import { useAuth } from "../auth";
 import { AppShell } from "../components/AppShell";
 import { CargoTable } from "../components/CargoTable";
+import { DrilldownPanel, type DrilldownTarget } from "../components/DrilldownPanel";
 import { CapacityPanel } from "../components/CapacityPanel";
 import { DynamicsChart } from "../components/DynamicsChart";
 import { KpiCard } from "../components/KpiCard";
@@ -13,6 +14,15 @@ import { WidgetGrid, mergeLayout, type WidgetDef } from "../components/WidgetGri
 import { asOf, nf, pct, signed } from "../format";
 
 type Data = { summary: Summary; cargo: CargoBalance; capacity: Capacity; dynamics: Dynamics };
+
+// Клик по столбцу графика (сутки) или строке ёмкости (склад) открывает панель
+// детализации; состояние живёт на странице — панель вне сетки виджетов.
+type Selection = {
+  onSelectDay?: (day: string) => void;
+  onSelectWarehouse?: (id: number) => void;
+  selectedDay?: string | null;
+  selectedWarehouseId?: number | null;
+};
 
 const REFRESH_MS = 60_000;
 const LAYOUT_KEY = "dashboard_layout";
@@ -26,6 +36,27 @@ export default function DashboardPage() {
   const [layout, setLayout] = useState<WidgetState[]>([]);
   const [savedAt, setSavedAt] = useState<string | null>(null);
   const saveTimer = useRef<number | undefined>(undefined);
+
+  const [selectedDay, setSelectedDay] = useState<string | null>(null);
+  const [selectedWarehouseId, setSelectedWarehouseId] = useState<number | null>(null);
+
+  // склады, доступные пользователю: пусто = все склады (роль top) — как в остальных метриках
+  const scopeIds = useMemo<number[]>(() => (user?.all_warehouses ? [] : user?.warehouse_ids ?? []), [user]);
+
+  const selectDay = useCallback((day: string) => {
+    setSelectedWarehouseId(null);
+    setSelectedDay((cur) => (cur === day ? null : day));
+  }, []);
+
+  const selectWarehouse = useCallback((id: number) => {
+    setSelectedDay(null);
+    setSelectedWarehouseId((cur) => (cur === id ? null : id));
+  }, []);
+
+  const closeDrilldown = useCallback(() => {
+    setSelectedDay(null);
+    setSelectedWarehouseId(null);
+  }, []);
 
   // ---- раскладка -----------------------------------------------------------
   useEffect(() => {
@@ -86,12 +117,27 @@ export default function DashboardPage() {
     return () => clearInterval(t);
   }, [load]);
 
-  const defs: WidgetDef[] = useMemo(() => buildWidgets(data), [data]);
+  const defs: WidgetDef[] = useMemo(
+    () => buildWidgets(data, { onSelectDay: selectDay, onSelectWarehouse: selectWarehouse, selectedDay, selectedWarehouseId }),
+    [data, selectDay, selectWarehouse, selectedDay, selectedWarehouseId],
+  );
+
+  const drilldown: DrilldownTarget | null = selectedDay
+    ? { kind: "day", day: selectedDay }
+    : selectedWarehouseId != null
+      ? {
+          kind: "warehouse",
+          warehouseId: selectedWarehouseId,
+          warehouseName: data?.capacity.rows.find((r) => r.warehouse_id === selectedWarehouseId)?.warehouse,
+        }
+      : null;
 
   return (
     <AppShell
       asOf={asOf(data?.summary.data_as_of ?? null)}
       scopeLabel={user?.all_warehouses ? "все склады" : `${user?.warehouse_ids.length} склада(ов)`}
+      // при открытой панели деталей контент уходит влево: панель ничего не перекрывает
+      contentClassName={drilldown ? "md:pr-[404px]" : undefined}
       actions={
         <>
           {edit && savedAt && (
@@ -120,7 +166,7 @@ export default function DashboardPage() {
           <span>тяни блок за ⠿, чтобы переставить; ← → — без мыши;</span>
           <span>правый край — ширина, нижний край — высота, правый нижний угол — оба; двойной клик по заголовку — вернуть размер;</span>
           <span>«скрыть» — убрать блок, вернуть можно кнопкой внизу.</span>
-          <span className="text-ink-500">Раскладка сохраняется на пользователя и подтягивается в любом браузере.</span>
+          <span className="text-ink-300">Раскладка сохраняется на пользователя и подтягивается в любом браузере.</span>
         </div>
       )}
 
@@ -135,7 +181,12 @@ export default function DashboardPage() {
 
       <WidgetGrid defs={defs} state={layout} edit={edit} onChange={changeLayout} />
 
-      <p className="text-[11px] text-ink-500 leading-relaxed">
+      {/* Панель деталей — вне сетки виджетов: фиксированная, в drag/resize не участвует. */}
+      {drilldown && (
+        <DrilldownPanel target={drilldown} scopeIds={scopeIds} onClose={closeDrilldown} />
+      )}
+
+      <p className="text-[11px] text-ink-400 leading-relaxed">
         Источник цифр — 1С, витрина кабинета обновляется автоматически (последняя загрузка:{" "}
         {asOf(data?.summary.data_as_of ?? null)}). Если данные расходятся с 1С, сообщите
         администратору кабинета — проверим выгрузку.
@@ -147,8 +198,9 @@ export default function DashboardPage() {
 /**
  * Виджеты описаны кодом, а не конфигом: рендер живёт рядом с данными.
  * Порядок и ширина — пользовательские, см. mergeLayout.
+ * `sel` — состояние детализации: без него виджеты работают как раньше.
  */
-function buildWidgets(data: Data | null): WidgetDef[] {
+function buildWidgets(data: Data | null, sel: Selection = {}): WidgetDef[] {
   const s = data?.summary;
   const util = s?.utilization ?? 0;
   const utilTone = util >= 0.95 ? "crit" : util >= 0.85 ? "warn" : "ok";
@@ -229,7 +281,12 @@ function buildWidgets(data: Data | null): WidgetDef[] {
       defaultHeight: 240,
       hint: `всего ${nf(data?.dynamics.processed_total ?? 0, 0)} т`,
       render: ({ height }) => (
-        <DynamicsChart points={data?.dynamics.points ?? []} height={height ?? 240} />
+        <DynamicsChart
+          points={data?.dynamics.points ?? []}
+          height={height ?? 240}
+          onSelectDay={sel.onSelectDay}
+          selectedDay={sel.selectedDay ?? null}
+        />
       ),
     },
     {
@@ -237,7 +294,13 @@ function buildWidgets(data: Data | null): WidgetDef[] {
       title: "Ёмкость складов",
       defaultSpan: 4,
       defaultHeight: 300,
-      render: () => <CapacityPanel rows={data?.capacity.rows ?? []} />,
+      render: () => (
+        <CapacityPanel
+          rows={data?.capacity.rows ?? []}
+          onSelectWarehouse={sel.onSelectWarehouse}
+          selectedWarehouseId={sel.selectedWarehouseId ?? null}
+        />
+      ),
     },
     {
       id: "cargo_table",

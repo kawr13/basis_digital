@@ -150,7 +150,7 @@ export default function ReportsPage() {
                 value={filters.from}
                 onChange={(e) => setFilters((f) => ({ ...f, from: e.target.value, days: 0 }))}
               />
-              <span className="text-ink-500 text-xs">—</span>
+              <span className="text-ink-400 text-xs">—</span>
               <input
                 type="date"
                 className="bg-ink-900 border border-ink-600 rounded px-2 py-1 text-xs num text-ink-100"
@@ -349,7 +349,7 @@ export default function ReportsPage() {
                   <td className="py-2 pr-3">{r.cargo_group}</td>
                   <td className="py-2 pr-3 num text-right text-ink-300">{nf(r.qty)}</td>
                   <td className="py-2 pr-3 num text-right font-medium">{nf(r.weight_t, 1)}</td>
-                  <td className={`py-2 pr-3 num text-right ${r.overdue_weight_t > 0 ? "text-crit" : "text-ink-500"}`}>
+                  <td className={`py-2 pr-3 num text-right ${r.overdue_weight_t > 0 ? "text-crit" : "text-ink-400"}`}>
                     {r.overdue_weight_t > 0 ? nf(r.overdue_weight_t, 1) : "—"}
                   </td>
                   <td className="py-2 num text-right text-ink-300">{nf(r.avg_age_days, 1)}</td>
@@ -397,7 +397,7 @@ export default function ReportsPage() {
         </section>
       )}
 
-      <p className="text-[11px] text-ink-500 leading-relaxed">
+      <p className="text-[11px] text-ink-400 leading-relaxed">
         CSV открывается в Excel: разделитель «;», десятичный «,», кириллица с BOM. Период
         ограничен годом — исторические срезы глубже 12 месяцев выгружаются по запросу.
         Фильтры запоминаются: в следующий раз кабинет откроет тот же период и склады.

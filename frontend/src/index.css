@@ -9,7 +9,12 @@
     height: 100%;
   }
   body {
-    @apply bg-ink-900 text-ink-100 font-sans antialiased;
+    @apply text-ink-100 font-sans antialiased;
+    /* мягкий тёмно-синий градиент + едва заметная радиальная подсветка сверху */
+    background-image: radial-gradient(1200px 600px at 50% -12%, rgba(79, 140, 255, 0.10), transparent 62%),
+      linear-gradient(180deg, #0a1220 0%, #0e1c33 45%, #0a1424 100%);
+    background-attachment: fixed;
+    background-color: #0a1424;
   }
   input,
   button {
@@ -19,28 +24,33 @@
 
 @layer components {
   .panel {
-    @apply bg-ink-800 border border-ink-600 rounded-lg shadow-panel;
+    @apply rounded-lg shadow-panel;
+    /* полупрозрачная тёмно-синяя панель с мягким градиентом сверху вниз */
+    background-image: linear-gradient(180deg, rgba(30, 52, 86, 0.55), rgba(13, 23, 40, 0.78));
+    border: 1px solid rgba(88, 128, 190, 0.28);
   }
   .panel-title {
-    @apply text-[11px] uppercase tracking-[0.14em] text-ink-400 font-medium;
+    /* ink-300: заголовок панели читается увереннее, чем ink-400 на полупрозрачном синем */
+    @apply text-[11px] uppercase tracking-[0.14em] text-ink-300 font-medium;
   }
   .num {
     @apply font-num tabular-nums;
   }
   .field {
-    @apply w-full bg-ink-900 border border-ink-600 rounded-md px-3 py-2.5
-      text-ink-100 placeholder-ink-500 outline-none
-      focus:border-amber2 focus:ring-1 focus:ring-amber2/40 transition;
+    @apply w-full bg-ink-900/70 border border-ink-600 rounded-md px-3 py-2.5
+      text-ink-100 placeholder-ink-400 outline-none
+      focus:border-accent focus:ring-1 focus:ring-accent/40 transition;
   }
   .btn {
     @apply inline-flex items-center justify-center gap-2 rounded-md px-4 py-2.5
       font-medium transition disabled:opacity-50 disabled:cursor-not-allowed;
   }
   .btn-primary {
-    @apply btn bg-amber2 text-ink-900 hover:brightness-110 active:brightness-95;
+    @apply btn text-ink-900 hover:brightness-110 active:brightness-95;
+    background-image: linear-gradient(135deg, #4f8cff 0%, #38bdf8 100%);
   }
   .btn-ghost {
-    @apply btn border border-ink-600 text-ink-300 hover:text-ink-100 hover:border-ink-500;
+    @apply btn border border-ink-600 text-ink-300 hover:text-ink-100 hover:border-accent/60;
   }
   .chip {
     @apply inline-flex items-center gap-1 rounded px-2 py-0.5 text-[11px] font-medium;
@@ -90,5 +100,47 @@
 }
 .rz:hover::after,
 .rz:active::after {
-  background: rgba(240, 160, 44, 0.45);
+  background: rgba(79, 140, 255, 0.45);
+}
+
+/*
+ * Кликабельные столбцы графика: невидимая зона на всю колонку (легко попадать
+ * мышью), подсветка колонки при наведении/выборе и видимый фокус с клавиатуры.
+ */
+.dc-hit {
+  fill: transparent;
+  cursor: pointer;
+}
+.dc-hit:hover {
+  fill: rgba(79, 140, 255, 0.1);
+}
+.dc-hit[data-selected="1"] {
+  fill: rgba(79, 140, 255, 0.16);
+}
+.dc-hit:focus {
+  outline: none;
+}
+.dc-hit:focus-visible {
+  outline: 2px dashed #38bdf8;
+  outline-offset: -2px;
+}
+
+/* Панель детализации: мягкий выезд (справа на десктопе, снизу на мобильном) */
+@keyframes dd-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.dd-panel {
+  animation: dd-in 0.16s ease-out;
+}
+@media (prefers-reduced-motion: reduce) {
+  .dd-panel {
+    animation: none;
+  }
 }

@@ -25,13 +25,13 @@ export default function LoginPage() {
 
   return (
     <div className="grid h-full lg:grid-cols-[1.1fr_1fr]">
-      <aside className="relative hidden lg:block bg-ink-800 border-r border-ink-600 overflow-hidden">
-        <div className="absolute inset-0 opacity-[0.07] bg-[radial-gradient(circle_at_20%_20%,#f0a02c_0,transparent_45%),radial-gradient(circle_at_75%_70%,#3f9fae_0,transparent_40%)]" />
+      <aside className="relative hidden lg:block bg-gradient-to-b from-ink-800 via-ink-800 to-ink-900 border-r border-ink-600 overflow-hidden">
+        <div className="absolute inset-0 opacity-[0.12] bg-[radial-gradient(circle_at_20%_20%,#4f8cff_0,transparent_45%),radial-gradient(circle_at_75%_70%,#38bdf8_0,transparent_40%)]" />
         <div className="relative h-full flex flex-col justify-between p-12">
           <div className="text-[13px] tracking-[0.2em] uppercase text-ink-400">БазисПорт</div>
           <div>
             <h1 className="text-4xl leading-tight font-semibold max-w-md">
-              Кабинет <span className="text-amber2">веб-статистики</span>
+              Кабинет <span className="text-accent">веб-статистики</span>
             </h1>
             <p className="mt-4 text-ink-300 max-w-md">
               Остатки грузов, загрузка складов и динамика обработки — в одном окне,
@@ -50,7 +50,7 @@ export default function LoginPage() {
               ))}
             </dl>
           </div>
-          <p className="text-xs text-ink-500">
+          <p className="text-xs text-ink-400">
             Доступ выдаёт администратор кабинета. Вопросы по учёткам — служба поддержки.
           </p>
         </div>
@@ -98,7 +98,7 @@ export default function LoginPage() {
             {busy ? "Проверяем…" : "Войти"}
           </button>
 
-          <p className="mt-6 text-xs text-ink-500 leading-relaxed">
+          <p className="mt-6 text-xs text-ink-400 leading-relaxed">
             После 5 неверных попыток учётка блокируется на 15 минут. Если вход не
             получается — обратитесь к администратору.
           </p>

@@ -16,6 +16,18 @@ export function dayLabel(iso: string): string {
   return d.toLocaleDateString("ru-RU", { day: "2-digit", month: "short" });
 }
 
+/** «12 октября 2026» — заголовки панелей детализации. */
+export function dayFull(iso: string): string {
+  const d = new Date(`${iso}T00:00:00`);
+  return d.toLocaleDateString("ru-RU", { day: "numeric", month: "long", year: "numeric" });
+}
+
+/** «12.10.2026» — границы периода. */
+export function dmy(iso: string): string {
+  const d = new Date(`${iso}T00:00:00`);
+  return d.toLocaleDateString("ru-RU");
+}
+
 export const roleLabel: Record<string, string> = {
   admin: "Администратор",
   top: "Топ-менеджмент",

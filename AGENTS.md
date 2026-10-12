@@ -34,14 +34,15 @@ statcab/
 │   │   ├── services/metrics.py  # SQL-запросы витрины с фильтром по доступным складам
 │   │   ├── services/reports.py  # отчёты за произвольный период + итоги + тренд загрузки
 │   │   └── onec/            # base.py (контракт источника), mock.py, http_source.py, sync.py
-│   ├── tests/               # test_auth.py, test_reports.py, test_settings.py (26 тестов)
+│   ├── tests/               # test_auth.py, test_reports.py, test_settings.py (27 тестов)
 │   └── requirements*.txt    # prod (пин) / dev (свежие колёса) / prod+psycopg2
 ├── frontend/
 │   ├── src/api.ts           # fetch-клиент: access в памяти, refresh в cookie, авто-повтор 401
 │   ├── src/auth.tsx         # AuthProvider: восстановление сессии, login/logout
 │   ├── src/pages/           # LoginPage, DashboardPage, ReportsPage
 │   ├── src/components/      # AppShell (шапка+навигация), WidgetGrid (drag&drop плашек),
-│   │                        # KpiCard, DynamicsChart (SVG), CapacityPanel, CargoTable
+│   │                        # KpiCard, DynamicsChart (SVG, кликабельный), CapacityPanel,
+│   │                        # CargoTable, DrilldownPanel (детализация за день / по складу)
 │   └── nginx.conf           # прод-фронт: SPA + прокси /api → backend
 ├── docker-compose.yml       # db + backend + web
 ├── docs/                    # 01 постановка и вопросы, 02 архитектура, 03 контракт 1С
@@ -65,6 +66,10 @@ statcab/
   растягивании плашки текст не деформируется.
 - **Отчёты** фильтруются по тому же scope, что и метрики: чужой склад в параметре
   `warehouses` = 403, а не чужие строки в ответе.
+- **Детализация (drill-down)**: клик по столбцу графика (сутки) или строке ёмкости (склад)
+  открывает панель `DrilldownPanel` — данные берутся из тех же `/api/reports/*`, поэтому цифры
+  панели и отчёта всегда совпадают, а права фильтрует бэкенд. Панель вне сетки виджетов
+  (фиксированная справа / снизу на мобильном), закрывается повторным кликом, «Закрыть» и Esc.
 - **Время** храним наивным UTC (`models.utcnow()`), чтобы SQLite и PG вели себя одинаково.
 - **Ошибки входа** — всегда один текст («Неверный логин или пароль»), чтобы не светить существование учётки.
 - **Пароли**: `scrypt$N$r$salt$hash` (stdlib, без нативных зависимостей).
@@ -81,6 +86,7 @@ statcab/
 | `curl -X POST .../api/sync/run -H "Authorization: Bearer <token>"` | ручной запуск загрузки из 1С |
 | `node tools/ui_smoke.mjs` | браузерная проверка входа и дашборда |
 | `node tools/ui_customization.mjs` | браузерная проверка drag&drop, отчётов и CSV |
+| `node tools/ui_drilldown.mjs` | браузерная проверка кликабельных графиков и панели деталей |
 
 ## Definition of Done (фича готова, если)
 1. Бэкенд: есть тест на новый сценарий, `pytest` зелёный.
