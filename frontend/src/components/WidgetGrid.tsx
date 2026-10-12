@@ -160,7 +160,7 @@ export function WidgetGrid({
   return (
     <>
       {badge && (
-        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-30 chip bg-amber2 text-ink-900 num px-3 py-1.5 shadow-panel">
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-30 chip bg-amber2 text-ink-100 num px-3 py-1.5 shadow-panel">
           {badge}
         </div>
       )}
@@ -198,9 +198,9 @@ export function WidgetGrid({
 
                 {edit ? (
                   <div className="flex items-center gap-1">
-                    <button className="chip bg-white/5 border border-white/10 text-ink-300 hover:text-ink-100" title="левее"
+                    <button className="chip bg-ink-800 border border-ink-700 text-ink-300 hover:text-ink-100" title="левее"
                       onClick={() => onChange(shift(state, w.id, -1))}>←</button>
-                    <button className="chip bg-white/5 border border-white/10 text-ink-300 hover:text-ink-100" title="правее"
+                    <button className="chip bg-ink-800 border border-ink-700 text-ink-300 hover:text-ink-100" title="правее"
                       onClick={() => onChange(shift(state, w.id, 1))}>→</button>
                     <span className="mx-1 h-4 w-px bg-ink-600" />
                     {SPANS.map((s) => (
@@ -208,14 +208,14 @@ export function WidgetGrid({
                         key={s.v}
                         title={`ширина ${s.label}`}
                         onClick={() => patch(w.id, { span: s.v })}
-                        className={`chip ${w.span === s.v ? "bg-amber2/20 text-amber2" : "bg-white/5 border border-white/10 text-ink-300 hover:text-ink-100"}`}
+                        className={`chip ${w.span === s.v ? "bg-amber2/20 text-amber2" : "bg-ink-800 border border-ink-700 text-ink-300 hover:text-ink-100"}`}
                       >
                         {s.label}
                       </button>
                     ))}
                     <span className="mx-1 h-4 w-px bg-ink-600" />
                     <button
-                      className="chip bg-white/5 border border-white/10 text-ink-300 hover:text-crit"
+                      className="chip bg-ink-800 border border-ink-700 text-ink-300 hover:text-crit"
                       title="убрать с дашборда"
                       onClick={() => patch(w.id, { visible: false })}
                     >
@@ -280,7 +280,7 @@ export function WidgetGrid({
             {hidden.map((w) => (
               <button
                 key={w.id}
-                className="chip bg-white/5 border border-white/10 text-ink-300 hover:text-amber2"
+                className="chip bg-ink-800 border border-ink-700 text-ink-300 hover:text-amber2"
                 onClick={() => patch(w.id, { visible: true })}
               >
                 + {byId.get(w.id)!.title}

@@ -25,16 +25,15 @@ export default function LoginPage() {
 
   return (
     <div className="grid h-full lg:grid-cols-[1.1fr_1fr]">
-      {/* Левая панель — фирменный navy-градиент (nav шапки #1b3360) с голубыми подсветками */}
-      <aside className="relative hidden lg:block overflow-hidden border-r border-white/10 bg-[linear-gradient(165deg,#12203a_0%,#1b3360_52%,#0b1424_100%)]">
-        <div className="absolute inset-0 opacity-[0.16] bg-[radial-gradient(circle_at_20%_18%,#2fbaec_0,transparent_45%),radial-gradient(circle_at_78%_72%,#337ab7_0,transparent_42%)]" />
+      {/* Левая панель — ГЛУХОЙ фирменный navy (#1b3360): белый текст, акценты brand-sky. */}
+      <aside className="relative hidden lg:block overflow-hidden bg-brand-navy text-white border-r border-brand-sky/30">
         <div className="relative h-full flex flex-col justify-between p-12">
-          <div className="text-[13px] tracking-[0.2em] uppercase text-ink-300">БазисПорт</div>
+          <div className="text-[13px] tracking-[0.2em] uppercase text-brand-sky">БазисПорт</div>
           <div>
             <h1 className="text-4xl leading-tight font-semibold max-w-md">
-              Кабинет <span className="text-accent">веб-статистики</span>
+              Кабинет <span className="text-brand-sky">веб-статистики</span>
             </h1>
-            <p className="mt-4 text-ink-300 max-w-md">
+            <p className="mt-4 text-white/70 max-w-md">
               Остатки грузов, загрузка складов и динамика обработки — в одном окне,
               данные выгружаются из 1С.
             </p>
@@ -45,21 +44,21 @@ export default function LoginPage() {
                 ["Динамика", "принято / отгружено"],
               ].map(([t, d]) => (
                 <div key={t}>
-                  <dt className="text-sm text-ink-100">{t}</dt>
-                  <dd className="text-xs text-ink-300 mt-1">{d}</dd>
+                  <dt className="text-sm text-white">{t}</dt>
+                  <dd className="text-xs text-white/60 mt-1">{d}</dd>
                 </div>
               ))}
             </dl>
           </div>
-          <p className="text-xs text-ink-300">
+          <p className="text-xs text-white/60">
             Доступ выдаёт администратор кабинета. Вопросы по учёткам — служба поддержки.
           </p>
         </div>
       </aside>
 
-      {/* Карточка входа — то же «стекло», что и панели кабинета */}
+      {/* Карточка входа — обычная белая плашка с мягкой тенью (стекла больше нет) */}
       <main className="grid place-items-center p-6">
-        <form onSubmit={submit} className="panel glass-strong w-full max-w-sm p-6">
+        <form onSubmit={submit} className="panel w-full max-w-sm p-6">
           <h2 className="text-xl font-semibold">Вход в кабинет</h2>
           <p className="mt-1 text-sm text-ink-300">Рабочая учётная запись, не учётка 1С.</p>
 

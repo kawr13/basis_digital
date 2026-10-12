@@ -3,25 +3,26 @@ import type { DynamicsPoint } from "../api";
 import { dayFull, dayLabel, nf } from "../format";
 
 /**
- * Палитра графика повторяет tailwind-палитру (ink / accent): держим её здесь,
- * чтобы SVG-оси не разъезжались с цветами панелей.
+ * Палитра графика повторяет tailwind-палитру (ink / brand): держим её здесь,
+ * чтобы SVG-оси не разъезжались с цветами панелей. Все цвета — под СВЕТЛЫЙ фон
+ * плашки: янтарные столбцы на белом дают 2.2:1 и не читаются, поэтому столбцы синие.
  */
 const CHART = {
-  grid: "rgba(255,255,255,.10)", // линии сетки — светлая линия поверх стекла
-  axis: "rgba(127,151,189,.35)", // ink-400 полупрозрачный — базовая ось
-  muted: "#7f97bd", // ink-400 — подписи осей
-  barTop: "#f0a02c", // amber2 — обычные столбцы оставляем янтарными (6.8:1, синий даёт ~3:1)
-  barBottom: "#c9781c", // низ столбца — тот же янтарь, только глубже (градиент сверху вниз)
-  selTop: "#2fbaec", // accent — выбранный столбец: фирменный голубой сайта («мы здесь»)
-  selBottom: "#337ab7", // brand.mid — низ выбранного столбца (тот же голубой, глубже)
-  selStroke: "#b9c9e2", // ink-300 — тонкая рамка выбранного столбца
-  dwell: "#2fbaec", // accent — среднее время хранения
-  out: "#b9c9e2", // ink-300 — отгрузка
+  grid: "rgba(27,51,96,.10)", // линии сетки — navy, едва заметный на белом
+  axis: "rgba(27,51,96,.25)", // базовая ось — чуть плотнее сетки
+  muted: "#6b7c95", // ink-400 — подписи осей
+  barTop: "#337ab7", // brand.mid — столбцы обработки (4.0:1 на белом, форма несёт остальное)
+  barBottom: "#337ab7", // низ столбца — тот же цвет: в строгой светлой теме градиента нет
+  selTop: "#1b3360", // brand.navy — выбранный столбец («мы здесь»): темнее обычных
+  selBottom: "#1b3360", // низ выбранного столбца — тот же navy
+  selStroke: "#93a3ba", // ink-500 — тонкая светлая обводка выбранного столбца
+  dwell: "#c47b12", // янтарь, затемнённый под белый фон — среднее время хранения (пунктир)
+  out: "#1b3360", // brand.navy — отгрузка
 } as const;
 
 /**
- * Полосы — объём обработки за сутки (янтарь), голубой пунктир — среднее время
- * хранения, светлая черта — отгрузка; выбранный столбец — фирменный голубой.
+ * Полосы — объём обработки за сутки (brand.mid), янтарный пунктир — среднее время
+ * хранения, тёмно-синяя черта — отгрузка; выбранный столбец — brand.navy.
  *
  * SVG рисуется в реальных пикселях (viewBox = фактическая ширина контейнера),
  * поэтому текст не растягивается, когда плашку растягивают мышью.
@@ -215,13 +216,13 @@ export function DynamicsChart({
 
       <div className="mt-2 flex flex-wrap items-center gap-4 text-[11px] text-ink-300">
         <span className="flex items-center gap-1.5">
-          <i className="inline-block w-3 h-3 rounded-sm bg-amber2" /> обработано, т
+          <i className="inline-block w-3 h-3 rounded-sm" style={{ background: CHART.barTop }} /> обработано, т
         </span>
         <span className="flex items-center gap-1.5">
-          <i className="inline-block w-3 h-[2px] bg-accent" /> среднее время хранения, ч
+          <i className="inline-block w-3 h-[2px]" style={{ background: CHART.dwell }} /> среднее время хранения, ч
         </span>
         <span className="flex items-center gap-1.5">
-          <i className="inline-block w-3 h-[2px] bg-ink-300" /> отгружено, т
+          <i className="inline-block w-3 h-[2px]" style={{ background: CHART.out }} /> отгружено, т
         </span>
         {onSelectDay && (
           <span className="ml-auto text-ink-300">клик по столбцу — детализация за день</span>

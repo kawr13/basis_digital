@@ -8,7 +8,7 @@ export function CargoTable({ rows }: { rows: CargoRow[] }) {
     <div className="overflow-x-auto">
       <table className="w-full text-sm">
         <thead>
-          <tr className="text-left text-[11px] uppercase tracking-wider text-ink-300">
+          <tr className="text-left text-[11px] uppercase tracking-wider text-ink-400 bg-ink-800">
             <th className="py-2 pr-3 font-medium">Склад</th>
             <th className="py-2 pr-3 font-medium">Группа груза</th>
             <th className="py-2 pr-3 font-medium text-right">Мест</th>
@@ -19,7 +19,7 @@ export function CargoTable({ rows }: { rows: CargoRow[] }) {
         </thead>
         <tbody>
           {rows.map((r, i) => (
-            <tr key={`${r.warehouse_id}-${r.cargo_group}-${i}`} className="border-t border-ink-700">
+            <tr key={`${r.warehouse_id}-${r.cargo_group}-${i}`} className="border-t border-ink-700 hover:bg-ink-800">
               <td className="py-2 pr-3 text-ink-300">{r.warehouse}</td>
               <td className="py-2 pr-3">{r.cargo_group}</td>
               <td className="py-2 pr-3 num text-right text-ink-300">{nf(r.qty)}</td>

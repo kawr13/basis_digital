@@ -121,7 +121,9 @@ export default function ReportsPage() {
 
   return (
     <AppShell
-      asOf={asOf(cargo?.snapshot_at ?? null)}
+      // чип свежести показываем только когда реально знаем срез: у отчётов по дням
+      // snapshot_at не бывает, иначе в шапке читается «данные 1С на нет данных»
+      asOf={cargo?.snapshot_at ? asOf(cargo.snapshot_at) : undefined}
       scopeLabel={scopeLabel}
       actions={
         <button className="btn-primary text-xs" onClick={download} disabled={busy}>
@@ -139,7 +141,7 @@ export default function ReportsPage() {
                 <button
                   key={p.days}
                   onClick={() => setPreset(p.days)}
-                  className={`chip ${filters.days === p.days ? "bg-amber2/20 text-amber2" : "bg-white/5 border border-white/10 text-ink-300 hover:text-ink-100"}`}
+                  className={`chip ${filters.days === p.days ? "bg-amber2/20 text-amber2" : "bg-ink-800 border border-ink-700 text-ink-300 hover:text-ink-100"}`}
                 >
                   {p.label}
                 </button>
@@ -174,7 +176,7 @@ export default function ReportsPage() {
                 <button
                   key={w.id}
                   onClick={() => toggleWarehouse(w.id)}
-                  className={`chip ${filters.warehouses.includes(w.id) ? "bg-amber2/20 text-amber2" : "bg-white/5 border border-white/10 text-ink-300 hover:text-ink-100"}`}
+                  className={`chip ${filters.warehouses.includes(w.id) ? "bg-amber2/20 text-amber2" : "bg-ink-800 border border-ink-700 text-ink-300 hover:text-ink-100"}`}
                 >
                   <span className="num">{w.code}</span> {w.name}
                 </button>
@@ -227,7 +229,7 @@ export default function ReportsPage() {
           {tab === "daily" ? (
             <table className="w-full text-sm mt-3">
               <thead>
-                <tr className="text-left text-[11px] uppercase tracking-wider text-ink-300">
+                <tr className="text-left text-[11px] uppercase tracking-wider text-ink-400 bg-ink-800">
                   {([
                     ["bucket_date", "Дата"],
                     ["warehouse", "Склад"],
@@ -251,7 +253,7 @@ export default function ReportsPage() {
               </thead>
               <tbody>
                 {rows.map((r, i) => (
-                  <tr key={`${r.bucket_date}-${r.warehouse_id}-${i}`} className="border-t border-ink-700">
+                  <tr key={`${r.bucket_date}-${r.warehouse_id}-${i}`} className="border-t border-ink-700 hover:bg-ink-800">
                     <td className="py-2 pr-3 num">{dayLabel(r.bucket_date)}</td>
                     <td className="py-2 pr-3 text-ink-300">
                       <span className="num text-ink-300 mr-2">{r.code}</span>
@@ -290,7 +292,7 @@ export default function ReportsPage() {
           ) : (
             <table className="w-full text-sm mt-3">
               <thead>
-                <tr className="text-left text-[11px] uppercase tracking-wider text-ink-300">
+                <tr className="text-left text-[11px] uppercase tracking-wider text-ink-400 bg-ink-800">
                   <th className="py-2 pr-3 font-medium">Склад</th>
                   <th className="py-2 pr-3 font-medium text-right">Обработано, т</th>
                   <th className="py-2 pr-3 font-medium text-right">Принято, т</th>
@@ -301,7 +303,7 @@ export default function ReportsPage() {
               </thead>
               <tbody>
                 {(daily?.per_warehouse ?? []).map((r) => (
-                  <tr key={r.warehouse_id} className="border-t border-ink-700">
+                  <tr key={r.warehouse_id} className="border-t border-ink-700 hover:bg-ink-800">
                     <td className="py-2 pr-3">
                       <span className="num text-ink-300 mr-2">{r.code}</span>
                       {r.warehouse}
@@ -330,7 +332,7 @@ export default function ReportsPage() {
           </div>
           <table className="w-full text-sm mt-3">
             <thead>
-              <tr className="text-left text-[11px] uppercase tracking-wider text-ink-300">
+              <tr className="text-left text-[11px] uppercase tracking-wider text-ink-400 bg-ink-800">
                 <th className="py-2 pr-3 font-medium">Склад</th>
                 <th className="py-2 pr-3 font-medium">Группа груза</th>
                 <th className="py-2 pr-3 font-medium text-right">Мест</th>
@@ -341,7 +343,7 @@ export default function ReportsPage() {
             </thead>
             <tbody>
               {(cargo?.rows ?? []).map((r, i) => (
-                <tr key={`${r.warehouse_id}-${r.cargo_group}-${i}`} className="border-t border-ink-700">
+                <tr key={`${r.warehouse_id}-${r.cargo_group}-${i}`} className="border-t border-ink-700 hover:bg-ink-800">
                   <td className="py-2 pr-3 text-ink-300">
                     <span className="num text-ink-300 mr-2">{r.code}</span>
                     {r.warehouse}
@@ -365,7 +367,7 @@ export default function ReportsPage() {
           <h2 className="panel-title">Загрузка складов по срезам</h2>
           <table className="w-full text-sm mt-3">
             <thead>
-              <tr className="text-left text-[11px] uppercase tracking-wider text-ink-300">
+              <tr className="text-left text-[11px] uppercase tracking-wider text-ink-400 bg-ink-800">
                 <th className="py-2 pr-3 font-medium">Срез</th>
                 <th className="py-2 pr-3 font-medium">Склад</th>
                 <th className="py-2 pr-3 font-medium text-right">Занято</th>
@@ -375,7 +377,7 @@ export default function ReportsPage() {
             </thead>
             <tbody>
               {(capacity?.rows ?? []).slice(0, 300).map((r, i) => (
-                <tr key={`${r.snapshot_at}-${r.warehouse_id}-${i}`} className="border-t border-ink-700">
+                <tr key={`${r.snapshot_at}-${r.warehouse_id}-${i}`} className="border-t border-ink-700 hover:bg-ink-800">
                   <td className="py-2 pr-3 num text-ink-300">{asOf(r.snapshot_at)}</td>
                   <td className="py-2 pr-3">
                     <span className="num text-ink-300 mr-2">{r.code}</span>

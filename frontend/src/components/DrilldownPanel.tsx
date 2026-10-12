@@ -194,7 +194,7 @@ export function DrilldownPanel({
       {...(day ? { "data-drilldown-day": day } : {})}
       {...(warehouseId != null ? { "data-drilldown-warehouse": String(warehouseId) } : {})}
       className={[
-        "dd-panel panel glass-strong fixed z-30 outline-none",
+        "dd-panel panel fixed z-30 outline-none",
         // мобильный: во всю ширину снизу, шапку не задеваем
         "inset-x-0 bottom-0 max-h-[72vh] overflow-y-auto p-4 rounded-b-none",
         // десктоп: фиксированная колонка справа
@@ -220,7 +220,7 @@ export function DrilldownPanel({
         <div className="mt-4 space-y-2" aria-live="polite">
           <div className="text-xs text-ink-300">загрузка…</div>
           {[0, 1, 2, 3].map((i) => (
-            <div key={i} className="h-4 rounded-sm bg-white/10 animate-pulse" style={{ width: `${92 - i * 12}%` }} />
+            <div key={i} className="h-4 rounded-sm bg-ink-700 animate-pulse" style={{ width: `${92 - i * 12}%` }} />
           ))}
         </div>
       )}
@@ -249,7 +249,7 @@ export function DrilldownPanel({
         <div className="mt-3 overflow-x-auto">
           <table className="w-full text-[11px]">
             <thead>
-              <tr className="text-left text-[10px] uppercase tracking-wider text-ink-300">
+              <tr className="text-left text-[10px] uppercase tracking-wider text-ink-400 bg-ink-800">
                 <th className="py-1.5 pr-2 font-medium">{day ? "Склад" : "День"}</th>
                 <th className="py-1.5 pr-2 font-medium text-right">Принято</th>
                 <th className="py-1.5 pr-2 font-medium text-right">Отгружено</th>
@@ -264,7 +264,7 @@ export function DrilldownPanel({
                   key={r.key}
                   data-drilldown-row={r.key}
                   data-selected={r.key === selectedKey ? "1" : "0"}
-                  className={`border-t border-ink-700 ${r.key === selectedKey ? "bg-accent/15" : ""}`}
+                  className={`border-t border-ink-700 hover:bg-ink-800 ${r.key === selectedKey ? "bg-accent/10" : ""}`}
                 >
                   <td className="py-1.5 pr-2 text-ink-100">
                     {r.sub && <span className="num text-ink-300 mr-1.5">{r.sub}</span>}
@@ -311,7 +311,7 @@ export function DrilldownPanel({
           ) : (
             <table className="mt-1 w-full text-[11px]">
               <thead>
-                <tr className="text-left text-[10px] uppercase tracking-wider text-ink-300">
+                <tr className="text-left text-[10px] uppercase tracking-wider text-ink-400 bg-ink-800">
                   <th className="py-1.5 pr-2 font-medium">Группа груза</th>
                   <th className="py-1.5 pr-2 font-medium text-right">Вес, т</th>
                   <th className="py-1.5 pr-2 font-medium text-right">Просрочка</th>
@@ -320,7 +320,7 @@ export function DrilldownPanel({
               </thead>
               <tbody>
                 {cargoGroups.map((g) => (
-                  <tr key={g.group} className="border-t border-ink-700">
+                  <tr key={g.group} className="border-t border-ink-700 hover:bg-ink-800">
                     <td className="py-1.5 pr-2 break-words">
                       {g.group}
                       <span className="num text-ink-300 ml-1.5">({nf(g.qty)} мест)</span>

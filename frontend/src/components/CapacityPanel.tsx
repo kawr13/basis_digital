@@ -44,8 +44,8 @@ export function CapacityPanel({
               className={[
                 "block w-full text-left rounded-md px-2 -mx-2 py-1.5 transition",
                 sel
-                  ? "bg-accent/15 ring-1 ring-accent/70"
-                  : "hover:bg-white/5 focus-visible:bg-white/10",
+                  ? "bg-accent/10 ring-1 ring-accent/60"
+                  : "hover:bg-ink-800 focus-visible:bg-ink-700",
               ].join(" ")}
             >
               {body}
@@ -69,7 +69,7 @@ function RowBody({ r }: { r: CapacityRow }) {
         </span>
         <span className={`chip ${t.chip}`}>{pct(r.utilization)}</span>
       </span>
-      <span className="mt-1.5 block h-2 rounded-sm bg-white/10 overflow-hidden">
+      <span className="mt-1.5 block h-2 rounded-sm bg-ink-700 overflow-hidden">
         <span className={`block h-full ${t.bar}`} style={{ width: `${Math.min(r.utilization * 100, 100)}%` }} />
       </span>
       <span className="mt-1 flex justify-between text-[11px] text-ink-300">
