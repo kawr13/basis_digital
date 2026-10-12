@@ -151,7 +151,7 @@ export type CapacityTrendReport = {
 
 // --------------------------------------------------------------- layout ----
 
-export type WidgetState = { id: string; span: number; visible: boolean };
+export type WidgetState = { id: string; span: number; visible: boolean; h?: number };
 export type DashboardLayout = { version: number; widgets: WidgetState[] };
 
 export class ApiError extends Error {

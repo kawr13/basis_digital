@@ -118,7 +118,8 @@ export default function DashboardPage() {
         <div className="panel p-3 text-xs text-ink-300 flex flex-wrap items-center gap-x-4 gap-y-1">
           <span className="text-amber2">Режим настройки</span>
           <span>тяни блок за ⠿, чтобы переставить; ← → — без мыши;</span>
-          <span>¼ ½ ⅔ во всю — ширина блока; «скрыть» — убрать, вернуть можно кнопкой внизу.</span>
+          <span>правый край — ширина, нижний край — высота, правый нижний угол — оба; двойной клик по заголовку — вернуть размер;</span>
+          <span>«скрыть» — убрать блок, вернуть можно кнопкой внизу.</span>
           <span className="text-ink-500">Раскладка сохраняется на пользователя и подтягивается в любом браузере.</span>
         </div>
       )}
@@ -225,19 +226,24 @@ function buildWidgets(data: Data | null): WidgetDef[] {
       id: "dynamics",
       title: "Динамика обработки · 14 суток",
       defaultSpan: 8,
+      defaultHeight: 240,
       hint: `всего ${nf(data?.dynamics.processed_total ?? 0, 0)} т`,
-      render: () => <DynamicsChart points={data?.dynamics.points ?? []} />,
+      render: ({ height }) => (
+        <DynamicsChart points={data?.dynamics.points ?? []} height={height ?? 240} />
+      ),
     },
     {
       id: "capacity",
       title: "Ёмкость складов",
       defaultSpan: 4,
+      defaultHeight: 300,
       render: () => <CapacityPanel rows={data?.capacity.rows ?? []} />,
     },
     {
       id: "cargo_table",
       title: "Остатки грузов по складам",
       defaultSpan: 12,
+      defaultHeight: 320,
       hint: `срез ${asOf(data?.cargo.snapshot_at ?? null)}`,
       render: () => <CargoTable rows={data?.cargo.rows ?? []} />,
     },

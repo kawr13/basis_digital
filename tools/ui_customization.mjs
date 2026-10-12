@@ -46,6 +46,40 @@ await page.click("text=+ Ёмкость складов");
 await page.waitForTimeout(200);
 ok((await order()).includes("capacity"), "скрытую плашку можно вернуть");
 
+// ---- размеры: высота, ширина, оба сразу ---------------------------------
+const bodyH = (id) => page.$eval(`section[data-widget="${id}"] .widget-body`, (e) => e.offsetHeight);
+const spanOf = (id) => page.$eval(`section[data-widget="${id}"]`, (e) => Number(e.dataset.span));
+
+async function dragEdge(id, which, dx, dy) {
+  const box = await page.locator(`section[data-widget="${id}"] [data-resize="${which}"]`).boundingBox();
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width / 2 + dx, box.y + box.height / 2 + dy, { steps: 12 });
+  await page.mouse.up();
+  await page.waitForTimeout(200);
+}
+
+const h0 = await bodyH("dynamics");
+await dragEdge("dynamics", "h", 0, 140);
+const h1 = await bodyH("dynamics");
+ok(h1 > h0 + 100, `высота выросла тягой за нижний край: ${h0} → ${h1} px`);
+
+const s0 = await spanOf("dynamics");
+await dragEdge("dynamics", "w", -300, 0);
+const s1 = await spanOf("dynamics");
+ok(s1 < s0, `ширина уменьшилась тягой за правый край: ${s0} → ${s1} из 12`);
+
+await dragEdge("capacity", "both", 220, 90);
+const capSpan = await spanOf("capacity");
+const capH = await bodyH("capacity");
+ok(capSpan > 4 && capH > 300, `угол меняет ширину и высоту сразу: ${capSpan}/12, ${capH} px`);
+
+await page.dblclick('section[data-widget="dynamics"] [data-handle="dynamics"]');
+await page.waitForTimeout(250);
+const resetSpan = await spanOf("dynamics");
+const resetH = await bodyH("dynamics");
+ok(resetSpan === 8 && resetH === 240, `двойной клик по заголовку вернул размер (${resetSpan}/12, ${resetH} px)`);
+
 await page.screenshot({ path: "shot_edit_mode.png" });
 await page.click("text=Готово");
 await page.waitForTimeout(800); // дебаунс сохранения на сервер
@@ -58,6 +92,8 @@ console.log("порядок после перезагрузки:", afterReload.j
 ok(afterReload.join() === afterDrag.join(), "раскладка сохранилась на сервере и подтянулась после перезагрузки");
 const spanReload = await page.$eval('section[data-widget="kpi_cargo"]', (e) => e.style.gridColumn);
 ok(spanReload === "span 12", "ширина тоже запомнилась");
+ok((await spanOf("capacity")) === capSpan && (await bodyH("capacity")) === capH,
+  `размер плашки пережил перезагрузку (${capSpan}/12, ${capH} px)`);
 
 // ---- отчёты ---------------------------------------------------------------
 await page.click("nav >> text=Отчёты");

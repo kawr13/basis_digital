@@ -52,4 +52,43 @@
   .widget-grid > section {
     grid-column: span 12 !important;
   }
+  .rz {
+    display: none;
+  }
+}
+
+/* Ручки изменения размера плашки: правый край — ширина, нижний — высота, угол — оба */
+.rz {
+  @apply absolute p-0 border-0 bg-transparent;
+}
+.rz-e {
+  right: -4px;
+  top: 10px;
+  bottom: 10px;
+  width: 10px;
+  cursor: ew-resize;
+}
+.rz-s {
+  bottom: -4px;
+  left: 10px;
+  right: 10px;
+  height: 10px;
+  cursor: ns-resize;
+}
+.rz-se {
+  right: -4px;
+  bottom: -4px;
+  width: 18px;
+  height: 18px;
+  cursor: nwse-resize;
+}
+.rz::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 3px;
+}
+.rz:hover::after,
+.rz:active::after {
+  background: rgba(240, 160, 44, 0.45);
 }

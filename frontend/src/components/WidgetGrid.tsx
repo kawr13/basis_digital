@@ -1,13 +1,15 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import type { WidgetState } from "../api";
 
 export type WidgetDef = {
   id: string;
   title: string;
   hint?: string;
-  /** ширина в 12-колоночной сетке: 3, 4, 6, 8 или 12 */
+  /** ширина в 12-колоночной сетке: 1..12 */
   defaultSpan: number;
-  render: () => React.ReactNode;
+  /** высота тела виджета в px; undefined = по содержимому */
+  defaultHeight?: number;
+  render: (ctx: { height?: number }) => React.ReactNode;
 };
 
 export const SPANS = [
@@ -18,9 +20,16 @@ export const SPANS = [
   { v: 12, label: "во всю" },
 ] as const;
 
+const GAP = 16; // gap-4 в сетке
+const MIN_H = 120;
+const MAX_H = 900;
+const MIN_W = 120; // минимальная ширина виджета, чтобы таблица не сложилась в столбик
+
+type ResizeMode = "w" | "h" | "both";
+
 /**
  * Склеиваем сохранённую раскладку с набором виджетов текущей версии:
- * новые виджеты доезжают в конец, удалённые — исчезают, порядок сохраняется.
+ * новые виджеты доезжают в конец, удалённые — исчезают, порядок и размеры сохраняются.
  */
 export function mergeLayout(defs: WidgetDef[], saved?: WidgetState[] | null): WidgetState[] {
   const savedMap = new Map((saved ?? []).map((w) => [w.id, w]));
@@ -29,8 +38,10 @@ export function mergeLayout(defs: WidgetDef[], saved?: WidgetState[] | null): Wi
 
   const states = defs.map((d) => {
     const prev = savedMap.get(d.id);
-    const span = prev && SPANS.some((s) => s.v === prev.span) ? prev.span : d.defaultSpan;
-    return { id: d.id, span, visible: prev ? prev.visible !== false : true };
+    const span = prev && prev.span >= 1 && prev.span <= 12 ? prev.span : d.defaultSpan;
+    const rawH = prev?.h ?? d.defaultHeight;
+    const h = rawH ? Math.min(Math.max(rawH, MIN_H), MAX_H) : undefined;
+    return { id: d.id, span, visible: prev ? prev.visible !== false : true, h };
   });
 
   return states.sort((a, b) => {
@@ -71,22 +82,99 @@ export function WidgetGrid({
   edit: boolean;
   onChange: (next: WidgetState[]) => void;
 }) {
+  const gridRef = useRef<HTMLDivElement>(null);
+  const drag = useRef<{
+    id: string;
+    mode: ResizeMode;
+    x: number;
+    y: number;
+    span: number;
+    h: number;
+    colStep: number;
+    minSpan: number;
+  } | null>(null);
   const [dragId, setDragId] = useState<string | null>(null);
+  const [badge, setBadge] = useState<string | null>(null);
+
   const byId = new Map(defs.map((d) => [d.id, d]));
   const visible = state.filter((w) => w.visible && byId.has(w.id));
   const hidden = state.filter((w) => !w.visible && byId.has(w.id));
 
+  const patch = (id: string, next: Partial<WidgetState>) =>
+    onChange(state.map((w) => (w.id === id ? { ...w, ...next } : w)));
+
+  function startResize(e: React.PointerEvent, w: WidgetState, mode: ResizeMode) {
+    e.preventDefault();
+    e.stopPropagation();
+    const grid = gridRef.current?.getBoundingClientRect();
+    if (!grid) return;
+    const colStep = (grid.width + GAP) / 12;
+    const el = (e.currentTarget as HTMLElement).closest("section");
+    const currentH = el?.querySelector<HTMLElement>(".widget-body")?.offsetHeight ?? w.h ?? 240;
+    drag.current = {
+      id: w.id,
+      mode,
+      x: e.clientX,
+      y: e.clientY,
+      span: w.span,
+      h: currentH,
+      colStep,
+      minSpan: Math.max(1, Math.ceil((MIN_W * 12) / grid.width)),
+    };
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    setDragId(w.id);
+  }
+
+  function onResizeMove(e: React.PointerEvent) {
+    const d = drag.current;
+    if (!d) return;
+    const dx = e.clientX - d.x;
+    const dy = e.clientY - d.y;
+    const next: Partial<WidgetState> = {};
+
+    if (d.mode === "w" || d.mode === "both") {
+      const span = Math.min(12, Math.max(d.minSpan, d.span + Math.round(dx / d.colStep)));
+      if (span !== undefined) next.span = span;
+    }
+    if (d.mode === "h" || d.mode === "both") {
+      next.h = Math.min(MAX_H, Math.max(MIN_H, d.h + dy));
+    }
+    if (next.span === undefined && next.h === undefined) return;
+
+    patch(d.id, next);
+    setBadge(
+      `${next.span ?? state.find((s) => s.id === d.id)?.span ?? d.span} из 12 · ${Math.round(
+        next.h ?? d.h,
+      )} px`,
+    );
+  }
+
+  function endResize(e: React.PointerEvent) {
+    if (!drag.current) return;
+    (e.currentTarget as HTMLElement).releasePointerCapture?.(e.pointerId);
+    drag.current = null;
+    setDragId(null);
+    setBadge(null);
+  }
+
   return (
     <>
-      <div className="grid grid-cols-12 gap-4 widget-grid">
+      {badge && (
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-30 chip bg-amber2 text-ink-900 num px-3 py-1.5 shadow-panel">
+          {badge}
+        </div>
+      )}
+
+      <div ref={gridRef} className="grid grid-cols-12 gap-4 widget-grid">
         {visible.map((w) => {
           const def = byId.get(w.id)!;
           return (
             <section
               key={w.id}
               data-widget={w.id}
+              data-span={w.span}
               className={`panel p-4 relative ${edit ? "border-dashed border-ink-500" : ""} ${
-                dragId === w.id ? "opacity-40" : ""
+                dragId === w.id ? "opacity-60" : ""
               }`}
               style={{ gridColumn: `span ${w.span}` }}
               onDragEnter={() => dragId && dragId !== w.id && onChange(move(state, dragId, w.id))}
@@ -98,6 +186,10 @@ export function WidgetGrid({
                 draggable={edit}
                 onDragStart={() => setDragId(w.id)}
                 onDragEnd={() => setDragId(null)}
+                onDoubleClick={() =>
+                  edit && patch(w.id, { span: def.defaultSpan, h: def.defaultHeight })
+                }
+                title={edit ? "двойной клик — вернуть размер" : undefined}
               >
                 <h2 className="panel-title flex items-center gap-2">
                   {edit && <span className="text-ink-400 cursor-grab select-none">⠿</span>}
@@ -115,9 +207,7 @@ export function WidgetGrid({
                       <button
                         key={s.v}
                         title={`ширина ${s.label}`}
-                        onClick={() =>
-                          onChange(state.map((x) => (x.id === w.id ? { ...x, span: s.v } : x)))
-                        }
+                        onClick={() => patch(w.id, { span: s.v })}
                         className={`chip ${w.span === s.v ? "bg-amber2/20 text-amber2" : "bg-ink-700 text-ink-400 hover:text-ink-100"}`}
                       >
                         {s.label}
@@ -127,7 +217,7 @@ export function WidgetGrid({
                     <button
                       className="chip bg-ink-700 text-ink-400 hover:text-crit"
                       title="убрать с дашборда"
-                      onClick={() => onChange(state.map((x) => (x.id === w.id ? { ...x, visible: false } : x)))}
+                      onClick={() => patch(w.id, { visible: false })}
                     >
                       скрыть
                     </button>
@@ -137,7 +227,47 @@ export function WidgetGrid({
                 )}
               </div>
 
-              <div className="mt-3">{def.render()}</div>
+              <div
+                className="mt-3 widget-body"
+                style={w.h ? { height: w.h, overflowY: "auto" } : undefined}
+              >
+                {def.render({ height: w.h })}
+              </div>
+
+              {edit && (
+                <>
+                  <button
+                    type="button"
+                    data-resize="w"
+                    className="rz rz-e"
+                    title="потяни — ширина"
+                    onPointerDown={(e) => startResize(e, w, "w")}
+                    onPointerMove={onResizeMove}
+                    onPointerUp={endResize}
+                    onPointerCancel={endResize}
+                  />
+                  <button
+                    type="button"
+                    data-resize="h"
+                    className="rz rz-s"
+                    title="потяни — высота"
+                    onPointerDown={(e) => startResize(e, w, "h")}
+                    onPointerMove={onResizeMove}
+                    onPointerUp={endResize}
+                    onPointerCancel={endResize}
+                  />
+                  <button
+                    type="button"
+                    data-resize="both"
+                    className="rz rz-se"
+                    title="потяни — ширина и высота"
+                    onPointerDown={(e) => startResize(e, w, "both")}
+                    onPointerMove={onResizeMove}
+                    onPointerUp={endResize}
+                    onPointerCancel={endResize}
+                  />
+                </>
+              )}
             </section>
           );
         })}
@@ -151,7 +281,7 @@ export function WidgetGrid({
               <button
                 key={w.id}
                 className="chip bg-ink-700 text-ink-300 hover:text-amber2"
-                onClick={() => onChange(state.map((x) => (x.id === w.id ? { ...x, visible: true } : x)))}
+                onClick={() => patch(w.id, { visible: true })}
               >
                 + {byId.get(w.id)!.title}
               </button>
