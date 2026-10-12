@@ -3,6 +3,7 @@ import { useAuth } from "./auth";
 import DashboardPage from "./pages/DashboardPage";
 import LoginPage from "./pages/LoginPage";
 import ReportsPage from "./pages/ReportsPage";
+import AdminPage from "./pages/AdminPage";
 
 function Boot() {
   return (
@@ -16,6 +17,14 @@ function Protected({ children }: { children: React.ReactNode }) {
   const { user, booting } = useAuth();
   if (booting) return <Boot />;
   if (!user) return <Navigate to="/login" replace />;
+  return <>{children}</>;
+}
+
+/** Админка доступна только роли admin: остальным — возврат на сводку. */
+function AdminOnly({ children }: { children: React.ReactNode }) {
+  const { user, booting } = useAuth();
+  if (booting) return <Boot />;
+  if (!user || user.role !== "admin") return <Navigate to="/" replace />;
   return <>{children}</>;
 }
 
@@ -38,6 +47,14 @@ export default function App() {
           <Protected>
             <ReportsPage />
           </Protected>
+        }
+      />
+      <Route
+        path="/admin"
+        element={
+          <AdminOnly>
+            <AdminPage />
+          </AdminOnly>
         }
       />
       <Route path="*" element={<Navigate to="/" replace />} />

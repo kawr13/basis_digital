@@ -25,6 +25,7 @@ from ..db import get_db
 from ..deps import client_ip, current_user
 from ..models import AuditLog, RefreshToken, User, UserWarehouseScope, utcnow
 from ..schemas import ChangePasswordRequest, LoginRequest, TokensOut, UserOut
+from ..services import app_settings
 from ..security import (
     create_access_token, hash_refresh, new_refresh_token, password_is_strong, verify_password,
 )
@@ -82,7 +83,6 @@ def _issue(db: Session, user: User, response: Response, ip: str, ua: str,
 
 @router.post("/login", response_model=TokensOut)
 def login(payload: LoginRequest, request: Request, response: Response, db: Session = Depends(get_db)):
-    s = get_settings()
     ip, ua = client_ip(request), request.headers.get("User-Agent", "")
     _throttle(ip)
 
@@ -107,10 +107,12 @@ def login(payload: LoginRequest, request: Request, response: Response, db: Sessi
     if not verify_password(payload.password, user.password_hash):
         user.failed_attempts += 1
         detail = ""
-        if user.failed_attempts >= s.max_failed_logins:
-            user.locked_until = utcnow() + timedelta(minutes=s.lockout_minutes)
+        max_fails = int(app_settings.get(db, "security.max_failed_logins"))
+        lock_minutes = int(app_settings.get(db, "security.lockout_minutes"))
+        if user.failed_attempts >= max_fails:
+            user.locked_until = utcnow() + timedelta(minutes=lock_minutes)
             user.failed_attempts = 0
-            detail = f"блокировка {s.lockout_minutes} мин"
+            detail = f"блокировка {lock_minutes} мин"
             _audit(db, user.id, user.login, "login.lockout", ip, detail)
         else:
             _audit(db, user.id, user.login, "login.fail", ip, detail)

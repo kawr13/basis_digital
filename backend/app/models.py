@@ -1,7 +1,8 @@
 """Модели кабинета.
 
 Две группы таблиц:
-  1. Аутентификация/доступ: User, Warehouse, UserWarehouseScope, RefreshToken, AuditLog.
+  1. Аутентификация/доступ: User, Warehouse, UserWarehouseScope, RefreshToken, AuditLog,
+     плюс AppSetting — настройки времени выполнения, которые меняет администратор.
   2. Витрина статистики (куда складывает данные коннектор 1С): Fact* — плоские строки,
      которые 1С отдаёт как есть. Кабинет их только читает.
 """
@@ -208,3 +209,22 @@ class UserPreference(Base):
     key: Mapped[str] = mapped_column(String(64), primary_key=True)
     value: Mapped[str] = mapped_column(Text)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+class AppSetting(Base):
+    """Настройки времени выполнения, которые администратор меняет в UI.
+
+    Значение храним JSON-строкой: типы разные (строка, число, bool), а таблицу
+    под каждый новый ключ мигрировать не нужно. Приоритет чтения:
+    запись здесь → значение из .env → DEFAULTS в app/services/app_settings.py.
+    """
+
+    __tablename__ = "app_settings"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    key: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    value: Mapped[str] = mapped_column(Text)          # JSON: 30, true, "http"
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+    updated_by: Mapped[int | None] = mapped_column(Integer, nullable=True)  # id администратора
+    # Внешний ключ не ставим специально: учётку администратора могут удалить,
+    # а историю «кто поменял настройку» терять нельзя.

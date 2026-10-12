@@ -247,6 +247,7 @@ export function DrilldownPanel({
 
       {!busy && !error && rows.length > 0 && (
         <div className="mt-3 overflow-x-auto">
+          <div className="overflow-x-auto">
           <table className="w-full text-[11px]">
             <thead>
               <tr className="text-left text-[10px] uppercase tracking-wider text-ink-400 bg-ink-800">
@@ -293,6 +294,7 @@ export function DrilldownPanel({
               </tfoot>
             )}
           </table>
+          </div>
           <div className="mt-1.5 text-[10px] text-ink-300">
             вес — тонны, хранение — среднее время на складе в часах
           </div>
@@ -309,6 +311,7 @@ export function DrilldownPanel({
           {!cargo || !cargoGroups.length ? (
             <div className="py-5 text-center text-xs text-ink-300">Остатков на складе нет</div>
           ) : (
+            <div className="overflow-x-auto">
             <table className="mt-1 w-full text-[11px]">
               <thead>
                 <tr className="text-left text-[10px] uppercase tracking-wider text-ink-400 bg-ink-800">
@@ -344,6 +347,7 @@ export function DrilldownPanel({
                 </tr>
               </tfoot>
             </table>
+            </div>
           )}
         </div>
       )}

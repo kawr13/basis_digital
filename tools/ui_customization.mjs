@@ -16,6 +16,27 @@ page.on("pageerror", (e) => problems.push(`JS: ${e.message}`));
 const order = () => page.$$eval("section[data-widget]", (els) => els.map((e) => e.dataset.widget));
 const ok = (cond, msg) => console.log(`${cond ? "✅" : "❌"} ${msg}`) || (cond ? 0 : problems.push(msg));
 
+// Раскладка и фильтры хранятся на сервере, поэтому прогон делаем герметичным:
+// чистим сохранённую раскладку администратора, иначе проверки «сбросил к 8/12 и 240 px»
+// и «порядок пережил перезагрузку» зависят от того, что осталось от прошлого прогона.
+const API = process.env.API || "http://127.0.0.1:8000";
+try {
+  const tok = await fetch(`${API}/api/auth/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ login: "admin", password: process.env.PASS || "Top-Secret-2026" }),
+  })
+    .then((r) => r.json())
+    .then((d) => d.access_token);
+  const del = await fetch(`${API}/api/settings/preferences/dashboard_layout`, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${tok}` },
+  });
+  console.log(`сброс сохранённой раскладки перед прогоном: HTTP ${del.status}`);
+} catch (e) {
+  console.log("не удалось сбросить раскладку (прогон может быть зависим от прошлого):", e.message);
+}
+
 await page.goto(`${BASE}/login`, { waitUntil: "networkidle" });
 await page.fill("input[autocomplete=username]", "admin");
 await page.fill("input[autocomplete=current-password]", process.env.PASS || "Top-Secret-2026");

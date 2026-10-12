@@ -147,3 +147,104 @@ class PreferenceIn(BaseModel):
 class PreferenceOut(BaseModel):
     key: str
     value: Any
+
+
+# --------------------------------------------------- админ: настройки 1С ----
+
+
+class SettingsEnvelope(BaseModel):
+    """Ответ GET/PUT /api/admin/settings: значения + defaults + что перебито из .env."""
+
+    settings: dict[str, Any]
+    defaults: dict[str, Any]
+    overridden: list[str]
+    specs: dict[str, Any] = {}
+    scheduler: dict[str, Any] | None = None
+
+
+class OneCCheck(BaseModel):
+    path: str
+    ok: bool
+    status: int | None = None
+    ms: int = 0
+    error: str | None = None
+
+
+class OneCTestOut(BaseModel):
+    source: str
+    ok: bool
+    checks: list[OneCCheck]
+
+
+class SyncRunOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    started_at: datetime
+    finished_at: datetime | None = None
+    source: str
+    status: str
+    rows: int
+    error: str | None = None
+
+
+class SyncRunResult(SyncRunOut):
+    """Результат загрузки: итог + разбивка строк по разделам среза."""
+
+    counts: dict[str, int] = {}
+
+
+class PushOut(BaseModel):
+    status: str
+    source: str
+    run_id: int
+    snapshot_at: datetime
+    rows: int
+    counts: dict[str, int] = {}
+
+
+class AuditOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    created_at: datetime
+    login: str | None = None
+    action: str
+    ip: str | None = None
+    detail: str | None = None
+
+
+# -------------------------------------------------- админ: склады ----
+
+
+WAREHOUSE_KINDS = ("warehouse", "cold", "terminal")
+
+
+class WarehouseAdminOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    code: str
+    name: str
+    kind: str
+    capacity: float
+    unit: str
+    is_active: bool
+
+
+class WarehouseCreate(BaseModel):
+    code: str = Field(min_length=1, max_length=32)
+    name: str = Field(min_length=1, max_length=128)
+    kind: str = "warehouse"
+    capacity: float = Field(default=0, ge=0)
+    unit: str = Field(default="т", max_length=16)
+    is_active: bool = True
+
+
+class WarehouseUpdate(BaseModel):
+    code: str | None = Field(default=None, min_length=1, max_length=32)
+    name: str | None = Field(default=None, min_length=1, max_length=128)
+    kind: str | None = None
+    capacity: float | None = Field(default=None, ge=0)
+    unit: str | None = Field(default=None, max_length=16)
+    is_active: bool | None = None

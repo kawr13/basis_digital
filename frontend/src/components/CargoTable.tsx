@@ -6,6 +6,7 @@ export function CargoTable({ rows }: { rows: CargoRow[] }) {
 
   return (
     <div className="overflow-x-auto">
+      <div className="overflow-x-auto">
       <table className="w-full text-sm">
         <thead>
           <tr className="text-left text-[11px] uppercase tracking-wider text-ink-400 bg-ink-800">
@@ -32,6 +33,7 @@ export function CargoTable({ rows }: { rows: CargoRow[] }) {
           ))}
         </tbody>
       </table>
+      </div>
     </div>
   );
 }

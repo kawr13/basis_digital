@@ -16,11 +16,22 @@ from ..db import get_db
 from ..deps import current_user
 from ..models import User, UserPreference
 from ..schemas import PreferenceIn, PreferenceOut
+from ..services import app_settings
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 
 KNOWN_KEYS = {"dashboard_layout", "report_filters"}
 MAX_VALUE_LEN = 20_000
+
+
+@router.get("/public", response_model=dict[str, object])
+def public_settings(_: User = Depends(current_user), db: Session = Depends(get_db)):
+    """Общие настройки кабинета — доступны любой авторизованной роли.
+
+    Только безопасный набор: периоды (сколько суток рисовать) и пороги загрузки
+    склада. Секреты и параметры интеграции с 1С живут в /api/admin/settings.
+    """
+    return app_settings.public(db)
 
 
 @router.get("/preferences", response_model=dict[str, object])

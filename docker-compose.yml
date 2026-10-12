@@ -29,6 +29,9 @@ services:
       ONE_C_BASE_URL: ${ONE_C_BASE_URL:-}
       ONE_C_LOGIN: ${ONE_C_LOGIN:-}
       ONE_C_PASSWORD: ${ONE_C_PASSWORD:-}
+      ONE_C_TIMEOUT_SEC: ${ONE_C_TIMEOUT_SEC:-30}
+      # push из 1С: POST /api/onec/push с заголовком X-OneC-Token (пусто = выключено)
+      ONEC_PUSH_TOKEN: ${ONEC_PUSH_TOKEN:-}
       SYNC_ENABLED: ${SYNC_ENABLED:-true}
       SYNC_INTERVAL_MINUTES: ${SYNC_INTERVAL_MINUTES:-15}
       ADMIN_LOGIN: ${ADMIN_LOGIN:-admin}

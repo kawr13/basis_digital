@@ -1,14 +1,16 @@
 """Администрирование пользователей кабинета (роль admin)."""
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..db import get_db
 from ..deps import current_user, require_roles
-from ..models import AuditLog, Role, User, UserWarehouseScope, Warehouse, utcnow
-from ..schemas import UserCreate, UserOut, UserUpdate
+from ..models import (
+    AuditLog, RefreshToken, Role, User, UserWarehouseScope, Warehouse, utcnow,
+)
+from ..schemas import AuditOut, UserCreate, UserOut, UserUpdate
 from ..security import hash_password, password_is_strong, random_password
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
@@ -69,10 +71,7 @@ def update_user(user_id: int, payload: UserUpdate, db: Session = Depends(get_db)
             user.locked_until = None
             user.failed_attempts = 0
         else:
-            from ..models import RefreshToken
-            for rec in db.scalars(select(RefreshToken).where(
-                    RefreshToken.user_id == user.id, RefreshToken.revoked_at.is_(None))):
-                rec.revoked_at = utcnow()
+            _revoke_tokens(db, user)
     if payload.password:
         ok, msg = password_is_strong(payload.password)
         if not ok:
@@ -108,6 +107,55 @@ def reset_password(user_id: int, db: Session = Depends(get_db), actor: User = De
     return {"login": user.login, "temporary_password": pwd}
 
 
+@router.post("/users/{user_id}/unlock", response_model=UserOut)
+def unlock_user(user_id: int, db: Session = Depends(get_db), actor: User = Depends(admin_only)):
+    """Снять блокировку: менеджер набрал неверных паролей, админ проверяет личность."""
+    user = db.get(User, user_id)
+    if not user:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Пользователь не найден")
+    user.locked_until = None
+    user.failed_attempts = 0
+    db.add(AuditLog(user_id=actor.id, login=actor.login, action="admin.user_unlock",
+                    detail=f"target={user.login}"))
+    db.commit()
+    db.refresh(user)
+    return _out(user)
+
+
+@router.delete("/users/{user_id}", response_model=UserOut)
+def deactivate_user(user_id: int, db: Session = Depends(get_db),
+                    actor: User = Depends(admin_only)):
+    """Мягкое удаление: учётка выключается, все refresh-токены отзываются.
+
+    Жёсткого удаления нет намеренно: аудит и история загрузок должны переживать
+    увольнение сотрудника. Себя деактивировать нельзя — иначе одним неверным
+    кликом можно закрыть себе доступ в админку.
+    """
+    if user_id == actor.id:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Нельзя деактивировать собственную учётку")
+    user = db.get(User, user_id)
+    if not user:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Пользователь не найден")
+
+    user.is_active = False
+    user.locked_until = None
+    user.failed_attempts = 0
+    _revoke_tokens(db, user)
+    db.add(AuditLog(user_id=actor.id, login=actor.login, action="admin.user_deactivate",
+                    detail=f"target={user.login}"))
+    db.commit()
+    db.refresh(user)
+    return _out(user)
+
+
+@router.get("/audit", response_model=list[AuditOut])
+def audit_log(limit: int = Query(default=100, ge=1, le=1000),
+              _: User = Depends(admin_only), db: Session = Depends(get_db)):
+    """Последние записи журнала: кто входил, что менял в настройках и складах."""
+    return list(db.scalars(select(AuditLog).order_by(AuditLog.created_at.desc(), AuditLog.id.desc())
+                           .limit(limit)))
+
+
 def _set_scopes(db: Session, user: User, warehouse_ids: list[int]) -> None:
     user.scopes = []
     db.flush()
@@ -115,3 +163,10 @@ def _set_scopes(db: Session, user: User, warehouse_ids: list[int]) -> None:
         if db.get(Warehouse, wid):
             db.add(UserWarehouseScope(user_id=user.id, warehouse_id=wid))
     db.flush()
+
+
+def _revoke_tokens(db: Session, user: User) -> None:
+    """Отозвать живые refresh-токены: сессии пользователя умирают сразу."""
+    for rec in db.scalars(select(RefreshToken).where(
+            RefreshToken.user_id == user.id, RefreshToken.revoked_at.is_(None))):
+        rec.revoked_at = utcnow()

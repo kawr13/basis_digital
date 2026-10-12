@@ -17,13 +17,16 @@ from ..db import get_db
 from ..deps import current_user
 from ..models import User, Warehouse
 from ..services import metrics as q
+from ..services import app_settings
 from ..services import reports as r
 
 router = APIRouter(prefix="/api/reports", tags=["reports"])
 
 
-def _period(date_from: date | None, date_to: date | None):
-    return r.clamp_period(date_from, date_to)
+def _period(date_from: date | None, date_to: date | None, db: Session):
+    """Период отчёта: даты не указаны — берём настройку reports.default_days."""
+    return r.clamp_period(date_from, date_to,
+                          default_days=app_settings.get(db, "reports.default_days"))
 
 
 def _scope(db: Session, user: User, warehouses: str | None) -> list[int]:
@@ -74,7 +77,7 @@ def processing(
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ):
-    start, end = _period(date_from, date_to)
+    start, end = _period(date_from, date_to, db)
     ids = _scope(db, user, warehouses)
     return {
         "period": {"from": start, "to": end},
@@ -92,7 +95,7 @@ def processing_csv(
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ):
-    start, end = _period(date_from, date_to)
+    start, end = _period(date_from, date_to, db)
     ids = _scope(db, user, warehouses)
     rows = r.daily_processing(db, ids, start, end)
     return _to_csv(
@@ -142,7 +145,7 @@ def capacity_trend(
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ):
-    start, end = _period(date_from, date_to)
+    start, end = _period(date_from, date_to, db)
     rows = r.capacity_trend(db, _scope(db, user, warehouses), start, end)
     return {"period": {"from": start, "to": end}, "rows": rows}
 
@@ -155,7 +158,7 @@ def capacity_trend_csv(
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ):
-    start, end = _period(date_from, date_to)
+    start, end = _period(date_from, date_to, db)
     rows = r.capacity_trend(db, _scope(db, user, warehouses), start, end)
     return _to_csv(
         ["Срез", "Код склада", "Склад", "Занято", "Ёмкость", "Загрузка, %", "Единица"],

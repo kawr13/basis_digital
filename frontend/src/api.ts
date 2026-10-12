@@ -149,6 +149,111 @@ export type CapacityTrendReport = {
   }[];
 };
 
+// ------------------------------------------------------------- admin ------
+
+/**
+ * Ответ GET /api/admin/users. Полей is_active / locked_until бэкенд наружу не
+ * отдаёт — они опциональны: если бэкенд их добавит, UI подхватит без правок.
+ */
+export type AdminUser = User & { is_active?: boolean; locked_until?: string | null };
+
+export type AdminUserCreate = {
+  login: string;
+  full_name: string;
+  role: "admin" | "top" | "manager";
+  password: string;
+  email?: string | null;
+  warehouse_ids: number[];
+};
+
+export type AdminUserPatch = {
+  full_name?: string;
+  role?: "admin" | "top" | "manager";
+  is_active?: boolean;
+  password?: string;
+  warehouse_ids?: number[];
+};
+
+export type TempPassword = { login: string; temporary_password: string };
+
+export type AdminWarehouse = {
+  id: number;
+  code: string;
+  name: string;
+  kind: string;
+  capacity: number;
+  unit: string;
+  is_active: boolean;
+};
+
+export type WarehouseInput = {
+  code?: string;
+  name?: string;
+  kind?: string;
+  capacity?: number;
+  unit?: string;
+  is_active?: boolean;
+};
+
+export type SettingSpec = {
+  kind: "str" | "int" | "float" | "bool" | "choice";
+  min: number | null;
+  max: number | null;
+  choices: string[] | null;
+  secret: boolean;
+  label: string;
+  hint: string;
+  from_env: string | null;
+};
+
+/** Отчёт планировщика после PUT /api/admin/settings. */
+export type SchedulerReport = {
+  scheduler: boolean;
+  enabled: boolean;
+  interval_minutes: number;
+  job: string | null;
+};
+
+export type SettingsEnvelope = {
+  settings: Record<string, string | number | boolean>;
+  defaults: Record<string, string | number | boolean>;
+  overridden: string[];
+  specs: Record<string, SettingSpec>;
+  scheduler?: SchedulerReport | null;
+};
+
+export type SettingsPatch = Record<string, string | number | boolean>;
+
+export type OneCCheck = {
+  path: string;
+  ok: boolean;
+  status: number | null;
+  ms: number;
+  error: string | null;
+};
+
+export type OneCTestResult = { source: string; ok: boolean; checks: OneCCheck[] };
+
+export type SyncRun = {
+  id: number;
+  started_at: string;
+  finished_at: string | null;
+  source: string;
+  status: string;
+  rows: number;
+  error: string | null;
+  counts?: Record<string, number>;
+};
+
+export type AuditEntry = {
+  id: number;
+  created_at: string;
+  login: string | null;
+  action: string;
+  ip?: string | null;
+  detail: string | null;
+};
+
 // --------------------------------------------------------------- layout ----
 
 export type WidgetState = { id: string; span: number; visible: boolean; h?: number };
@@ -257,6 +362,46 @@ export const api = {
   reportCargo: (p: ReportParams) => request<CargoReport>(`/api/reports/cargo?${qs(p)}`),
   reportCapacity: (p: ReportParams) => request<CapacityTrendReport>(`/api/reports/capacity-trend?${qs(p)}`),
 
+  // публичные настройки: пороги и периоды — чтобы UI и бэкенд считали одинаково
+  publicSettings: () => request<Record<string, number>>("/api/settings/public"),
+
+  // ------------------------------------------- администрирование: пользователи ---
+  adminUsers: () => request<AdminUser[]>("/api/admin/users"),
+  adminCreateUser: (body: AdminUserCreate) =>
+    request<AdminUser>("/api/admin/users", { method: "POST", body: JSON.stringify(body) }),
+  adminPatchUser: (id: number, body: AdminUserPatch) =>
+    request<AdminUser>(`/api/admin/users/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
+  /** Временный пароль показывается один раз: бэкенд его не хранит в открытом виде. */
+  adminResetPassword: (id: number) =>
+    request<TempPassword>(`/api/admin/reset-password?user_id=${id}`, { method: "POST" }),
+  adminUnlock: (id: number) => request<AdminUser>(`/api/admin/users/${id}/unlock`, { method: "POST" }),
+  /** Мягкая деактивация: учётка остаётся в базе, токены отзываются. */
+  adminDeleteUser: (id: number) => request<AdminUser>(`/api/admin/users/${id}`, { method: "DELETE" }),
+
+  // -------------------------------------------------- администрирование: склады ---
+  adminWarehouses: () => request<AdminWarehouse[]>("/api/admin/warehouses"),
+  adminCreateWarehouse: (body: WarehouseInput) =>
+    request<AdminWarehouse>("/api/admin/warehouses", { method: "POST", body: JSON.stringify(body) }),
+  adminPatchWarehouse: (id: number, body: WarehouseInput) =>
+    request<AdminWarehouse>(`/api/admin/warehouses/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
+  adminDeleteWarehouse: (id: number) =>
+    request<AdminWarehouse>(`/api/admin/warehouses/${id}`, { method: "DELETE" }),
+
+  // ------------------------------------- администрирование: настройки и 1С ---
+  adminSettings: () => request<SettingsEnvelope>("/api/admin/settings"),
+  adminSaveSettings: (patch: SettingsPatch) =>
+    request<SettingsEnvelope>("/api/admin/settings", { method: "PUT", body: JSON.stringify(patch) }),
+  /** Бэкенд ждёт голый JSON-массив ключей (не объект {keys: [...]}). */
+  adminResetSettings: (keys: string[]) =>
+    request<SettingsEnvelope>("/api/admin/settings/reset", { method: "POST", body: JSON.stringify(keys) }),
+  onecTest: () => request<OneCTestResult>("/api/admin/onec/test", { method: "POST" }),
+  syncRun: (days?: number) =>
+    request<SyncRun>(`/api/admin/sync/run${days ? `?days=${days}` : ""}`, { method: "POST" }),
+  syncRuns: (limit = 20) => request<SyncRun[]>(`/api/admin/sync/runs?limit=${limit}`),
+  adminAudit: (limit = 100) => request<AuditEntry[]>(`/api/admin/audit?limit=${limit}`),
   /** Выгрузка CSV: fetch с Authorization, затем сохранение файла на диск браузера. */
   async downloadCsv(path: string, p: ReportParams, filename: string) {
     const res = await raw(`${path}?${qs(p)}`);

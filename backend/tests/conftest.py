@@ -21,6 +21,10 @@ os.environ.update(
     ONE_C_SOURCE="mock",
     SYNC_ENABLED="false",
     SYNC_INTERVAL_MINUTES="999",
+    # Троттлинг входа — счётчик в памяти на весь прогон (один «IP» у TestClient).
+    # Тестам блокировки нужно несколько неудачных попыток, поэтому лимит поднимаем:
+    # сам троттлинг отдельной проверкой не тестируется.
+    LOGIN_THROTTLE_PER_IP="200",
 )
 
 from fastapi.testclient import TestClient  # noqa: E402

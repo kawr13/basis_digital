@@ -3,9 +3,13 @@ import { useAuth } from "../auth";
 import { roleLabel } from "../format";
 
 const tabs = [
-  { to: "/", label: "Сводка", end: true },
-  { to: "/reports", label: "Отчёты", end: false },
+  { to: "/", label: "Сводка", end: true, nav: "summary" },
+  { to: "/reports", label: "Отчёты", end: false, nav: "reports" },
 ];
+
+// Вкладка администратора видна только роли admin: маршрут /admin всё равно
+// закрыт редиректом, но лишний раз подсказывать про доступ не стоит.
+const ADMIN_TAB = { to: "/admin", label: "Администрирование", end: true, nav: "admin" };
 
 export function AppShell({
   children,
@@ -22,6 +26,7 @@ export function AppShell({
   contentClassName?: string;
 }) {
   const { user, logout } = useAuth();
+  const navTabs = user?.role === "admin" ? [...tabs, ADMIN_TAB] : tabs;
 
   return (
     <div className="min-h-full">
@@ -29,18 +34,21 @@ export function AppShell({
           шапка. Снизу тонкая голубая рамка brand-sky — единственный «светлый» акцент. */}
       <header className="sticky top-0 z-20 bg-brand-navy text-white border-b border-brand-sky/30">
         <div className="mx-auto max-w-[1500px] px-6">
-          <div className="flex items-center gap-4 pt-3">
+          {/* flex-wrap: на узком экране навигация и блок пользователя перестают
+              влезать в одну строку — без переноса страница уезжает в горизонт */}
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 pt-3">
             <div>
               <div className="text-[11px] uppercase tracking-[0.18em] text-white/60">БазисПорт</div>
               <div className="text-sm font-medium text-white">Кабинет веб-статистики</div>
             </div>
 
-            <nav className="ml-6 flex items-center gap-1">
-              {tabs.map((t) => (
+            <nav className="ml-6 flex flex-wrap items-center gap-1">
+              {navTabs.map((t) => (
                 <NavLink
                   key={t.to}
                   to={t.to}
                   end={t.end}
+                  data-nav={t.nav}
                   className={({ isActive }) =>
                     `rounded-md px-3 py-1.5 text-sm transition ${
                       isActive

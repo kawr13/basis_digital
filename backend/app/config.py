@@ -39,6 +39,10 @@ class Settings(BaseSettings):
     one_c_password: str = ""
     one_c_timeout_sec: int = 30
 
+    # Токен для push-режима: 1С сама присылает срез на POST /api/onec/push
+    # (заголовок X-OneC-Token). Пусто — push выключен (503).
+    onec_push_token: str = ""
+
     # Синхронизация из 1С по расписанию
     sync_enabled: bool = True
     sync_interval_minutes: int = 15

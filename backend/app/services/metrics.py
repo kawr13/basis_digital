@@ -13,8 +13,24 @@ from ..models import (
     FactCargoBalance, FactProcessingDynamics, FactWarehouseCapacity, SyncRun, Warehouse, utcnow,
 )
 
-WARNING_AT = 0.85   # порог «внимание» по загрузке склада
-CRITICAL_AT = 0.95  # порог «критично»
+from . import app_settings
+
+
+# Пороги по умолчанию, если администратор не задал свои (в долях: 0.85 = 85 %).
+DEFAULT_WARNING_AT = 0.85
+DEFAULT_CRITICAL_AT = 0.95
+
+
+def capacity_thresholds(db: Session) -> tuple[float, float]:
+    """Пороги «внимание»/«критично» из настроек кабинета (проценты → доли)."""
+    try:
+        warn = float(app_settings.get(db, "thresholds.capacity_warn")) / 100.0
+        crit = float(app_settings.get(db, "thresholds.capacity_crit")) / 100.0
+    except (KeyError, TypeError, ValueError):
+        return DEFAULT_WARNING_AT, DEFAULT_CRITICAL_AT
+    if crit < warn:                       # на случай кривых данных в БД
+        warn, crit = min(warn, crit), max(warn, crit)
+    return warn, crit
 
 
 def allowed_warehouse_ids(db: Session, user) -> list[int]:
@@ -30,10 +46,10 @@ def _latest(db: Session, model, ids: list[int]):
     return db.scalar(select(func.max(model.snapshot_at)).where(model.warehouse_id.in_(ids)))
 
 
-def _status(util: float) -> str:
-    if util >= CRITICAL_AT:
+def _status(util: float, warn: float, crit: float) -> str:
+    if util >= crit:
         return "critical"
-    if util >= WARNING_AT:
+    if util >= warn:
         return "warning"
     return "ok"
 
@@ -69,6 +85,8 @@ def cargo_balance(db: Session, ids: list[int]) -> dict:
 
 
 def warehouse_capacity(db: Session, ids: list[int]) -> dict:
+    """Последний срез ёмкости. Пороги цвета — из настроек кабинета."""
+    warn, crit = capacity_thresholds(db)
     snap = _latest(db, FactWarehouseCapacity, ids)
     if not snap:
         return {"snapshot_at": None, "rows": []}
@@ -92,7 +110,7 @@ def warehouse_capacity(db: Session, ids: list[int]) -> dict:
             "free": round(max(capacity - fact.used, 0), 1),
             "utilization": round(util, 3),
             "unit": fact.unit or wh.unit,
-            "status": _status(util),
+            "status": _status(util, warn, crit),
         })
     out.sort(key=lambda r: r["utilization"], reverse=True)
     return {"snapshot_at": snap, "rows": out}

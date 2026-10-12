@@ -7,44 +7,102 @@
   GET {base}/dynamics?from=YYYY-MM-DD&to=YYYY-MM-DD
 Ответ: {"snapshot_at": ISO8601, "items": [...]}  (для dynamics items обязателен "date").
 Доступ: Basic auth (учётка только для чтения, отдельная от пользователей кабинета).
+
+Параметры подключения приходят аргументами конструктора — их берёт стор настроек
+(app_settings), а .env остаётся запасным вариантом, если админ ничего не менял.
 """
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+import logging
+import time
+from datetime import date, timedelta
+from typing import Any
 
 import httpx
 
 from ..config import get_settings
-from .base import CapacityRec, CargoRec, DynamicsRec, Snapshot, WarehouseRec
+from .base import Snapshot
+from .parse import parse_capacity, parse_cargo, parse_dt, parse_dynamics, parse_warehouses
 
-
-def _parse_dt(value: str | None) -> datetime:
-    if not value:
-        return datetime.utcnow()
-    try:
-        return datetime.fromisoformat(value.replace("T", " ").replace("Z", ""))
-    except ValueError:
-        return datetime.utcnow()
+log = logging.getLogger("statcab.onec.http")
 
 
 class HttpSource:
     name = "http"
 
-    def __init__(self) -> None:
+    def __init__(self, base_url: str | None = None, login: str | None = None,
+                 password: str | None = None, timeout: int | None = None) -> None:
+        """None — значит параметр не задан в сторе, берём из .env (как раньше)."""
         s = get_settings()
-        if not s.one_c_base_url:
-            raise RuntimeError("ONE_C_BASE_URL не задан — источник http недоступен")
-        self.base = s.one_c_base_url.rstrip("/")
-        self.auth = (s.one_c_login, s.one_c_password) if s.one_c_login else None
-        self.timeout = s.one_c_timeout_sec
+        base = (s.one_c_base_url if base_url is None else base_url) or ""
+        if not base.strip():
+            raise RuntimeError("Адрес 1С не задан (onec.base_url / ONE_C_BASE_URL)")
+        login = s.one_c_login if login is None else login
+        password = s.one_c_password if password is None else password
+        self.base = base.strip().rstrip("/")
+        self.auth = (login or "", password or "") if (login or "") else None
+        try:
+            self.timeout = float(timeout) if timeout is not None else float(s.one_c_timeout_sec)
+        except (TypeError, ValueError):
+            self.timeout = 30.0
+
+    # ------------------------------------------------------------------ запросы --
+    def _client(self) -> httpx.Client:
+        return httpx.Client(timeout=self.timeout, auth=self.auth, verify=True)
 
     def _get(self, path: str, params: dict | None = None) -> dict:
-        url = f"{self.base}{path}"
-        with httpx.Client(timeout=self.timeout, auth=self.auth, verify=True) as client:
-            resp = client.get(url, params=params, headers={"Accept": "application/json"})
+        with self._client() as client:
+            resp = client.get(f"{self.base}{path}", params=params,
+                              headers={"Accept": "application/json"})
             resp.raise_for_status()
             return resp.json()
 
+    def probe(self, days: int = 7) -> list[dict[str, Any]]:
+        """Проверка связи: по очереди бьём все четыре метода, ошибки не роняем.
+
+        Возвращает список проверок: path / ok / status / ms / error.
+        """
+        today = date.today()
+        targets: list[tuple[str, dict | None]] = [
+            ("/warehouses", None),
+            ("/balance", None),
+            ("/capacity", None),
+            ("/dynamics", {"from": (today - timedelta(days=days - 1)).isoformat(),
+                           "to": today.isoformat()}),
+        ]
+        checks: list[dict[str, Any]] = []
+        for path, params in targets:
+            started = time.perf_counter()
+            code: int | None = None
+            error: str | None = None
+            ok = False
+            try:
+                with self._client() as client:
+                    resp = client.get(f"{self.base}{path}", params=params,
+                                      headers={"Accept": "application/json"})
+                code = resp.status_code
+                if resp.status_code >= 400:
+                    error = f"HTTP {resp.status_code}"
+                else:
+                    try:
+                        body = resp.json()
+                        ok = isinstance(body, dict)
+                        if not ok:
+                            error = "ответ не объект JSON"
+                    except ValueError:
+                        error = "ответ не JSON (проверьте Content-Type в 1С)"
+            except Exception as exc:  # noqa: BLE001 — сеть/SSL/таймаут, наружу не пускаем
+                error = f"{type(exc).__name__}: {exc}"[:300]
+            checks.append({
+                "path": path,
+                "ok": ok,
+                "status": code,
+                "ms": int((time.perf_counter() - started) * 1000),
+                "error": error,
+            })
+        return checks
+
+    # --------------------------------------------------------------------- срез --
     def fetch(self, days: int = 30) -> Snapshot:
         today = date.today()
         wh_raw = self._get("/warehouses")
@@ -53,34 +111,11 @@ class HttpSource:
         dyn_raw = self._get("/dynamics", {"from": (today - timedelta(days=days - 1)).isoformat(),
                                           "to": today.isoformat()})
 
-        snap_at = _parse_dt(bal_raw.get("snapshot_at") or cap_raw.get("snapshot_at"))
-
-        warehouses = [
-            WarehouseRec(code=w["code"], name=w["name"], kind=w.get("kind", "warehouse"),
-                         capacity=float(w.get("capacity") or 0), unit=w.get("unit", "т"))
-            for w in wh_raw.get("items", [])
-        ]
-        cargo = [
-            CargoRec(warehouse_code=c["warehouse_code"], cargo_group=c.get("cargo_group", "Без группы"),
-                     qty=float(c.get("qty") or 0), weight_t=float(c.get("weight_t") or 0),
-                     overdue_weight_t=float(c.get("overdue_weight_t") or 0),
-                     avg_age_days=float(c.get("avg_age_days") or 0))
-            for c in bal_raw.get("items", [])
-        ]
-        capacity = [
-            CapacityRec(warehouse_code=c["warehouse_code"], used=float(c.get("used") or 0),
-                        capacity=float(c.get("capacity") or 0), unit=c.get("unit", "т"))
-            for c in cap_raw.get("items", [])
-        ]
-        dynamics = [
-            DynamicsRec(warehouse_code=d["warehouse_code"],
-                        bucket_date=date.fromisoformat(d["date"]),
-                        inbound_t=float(d.get("inbound_t") or 0),
-                        outbound_t=float(d.get("outbound_t") or 0),
-                        processed_t=float(d.get("processed_t") or 0),
-                        docs_count=int(d.get("docs_count") or 0),
-                        avg_dwell_hours=float(d.get("avg_dwell_hours") or 0))
-            for d in dyn_raw.get("items", [])
-        ]
-        return Snapshot(snapshot_at=snap_at, warehouses=warehouses,
-                        cargo=cargo, capacity=capacity, dynamics=dynamics)
+        snap_at = parse_dt(bal_raw.get("snapshot_at") or cap_raw.get("snapshot_at"))
+        return Snapshot(
+            snapshot_at=snap_at,
+            warehouses=parse_warehouses(wh_raw.get("items", [])),
+            cargo=parse_cargo(bal_raw.get("items", [])),
+            capacity=parse_capacity(cap_raw.get("items", [])),
+            dynamics=parse_dynamics(dyn_raw.get("items", [])),
+        )

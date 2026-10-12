@@ -227,6 +227,7 @@ export default function ReportsPage() {
           </div>
 
           {tab === "daily" ? (
+            <div className="overflow-x-auto">
             <table className="w-full text-sm mt-3">
               <thead>
                 <tr className="text-left text-[11px] uppercase tracking-wider text-ink-400 bg-ink-800">
@@ -289,7 +290,9 @@ export default function ReportsPage() {
                 </tfoot>
               )}
             </table>
+            </div>
           ) : (
+            <div className="overflow-x-auto">
             <table className="w-full text-sm mt-3">
               <thead>
                 <tr className="text-left text-[11px] uppercase tracking-wider text-ink-400 bg-ink-800">
@@ -317,6 +320,7 @@ export default function ReportsPage() {
                 ))}
               </tbody>
             </table>
+            </div>
           )}
         </section>
       )}
@@ -330,6 +334,7 @@ export default function ReportsPage() {
               {nf(cargo?.totals.overdue_weight_t ?? 0, 1)} т
             </span>
           </div>
+          <div className="overflow-x-auto">
           <table className="w-full text-sm mt-3">
             <thead>
               <tr className="text-left text-[11px] uppercase tracking-wider text-ink-400 bg-ink-800">
@@ -359,12 +364,14 @@ export default function ReportsPage() {
               ))}
             </tbody>
           </table>
+          </div>
         </section>
       )}
 
       {tab === "capacity" && (
         <section className="panel p-4">
           <h2 className="panel-title">Загрузка складов по срезам</h2>
+          <div className="overflow-x-auto">
           <table className="w-full text-sm mt-3">
             <thead>
               <tr className="text-left text-[11px] uppercase tracking-wider text-ink-400 bg-ink-800">
@@ -396,6 +403,7 @@ export default function ReportsPage() {
               ))}
             </tbody>
           </table>
+          </div>
         </section>
       )}
 

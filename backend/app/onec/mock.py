@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import random
+import time
 from datetime import date, datetime, timedelta, timezone
 
 from .base import CapacityRec, CargoRec, DynamicsRec, Snapshot, WarehouseRec
@@ -73,3 +74,19 @@ class MockSource:
 
         return Snapshot(snapshot_at=snap_at, warehouses=list(WAREHOUSES),
                         cargo=cargo, capacity=capacity, dynamics=dynamics)
+
+    def probe(self, days: int = 7) -> list[dict]:
+        """Демо-источник всегда «на связи»: проверяем, что fetch отдаёт данные."""
+        started = time.perf_counter()
+        try:
+            snap = self.fetch(days=days)
+            rows = (len(snap.warehouses) + len(snap.cargo)
+                    + len(snap.capacity) + len(snap.dynamics))
+            empty = rows == 0
+            return [{"path": "mock://snapshot", "ok": not empty, "status": 200,
+                     "ms": int((time.perf_counter() - started) * 1000),
+                     "error": None if not empty else "демо-источник вернул пустой срез"}]
+        except Exception as exc:  # noqa: BLE001 — проверка связи не должна ронять сервис
+            return [{"path": "mock://snapshot", "ok": False, "status": None,
+                     "ms": int((time.perf_counter() - started) * 1000),
+                     "error": f"{type(exc).__name__}: {exc}"[:300]}]

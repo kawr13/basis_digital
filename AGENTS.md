@@ -22,27 +22,36 @@
 statcab/
 ├── backend/
 │   ├── app/
-│   │   ├── main.py          # FastAPI, lifespan: init_db + первая загрузка витрины + scheduler
+│   │   ├── main.py          # FastAPI, lifespan: init_db + первая загрузка витрины + scheduler в app.state
 │   │   ├── config.py        # Settings из окружения (pydantic-settings)
 │   │   ├── db.py            # engine/SessionLocal/get_db
-│   │   ├── models.py        # User, Warehouse, UserWarehouseScope, RefreshToken, AuditLog, Fact*, SyncRun
+│   │   ├── models.py        # User, Warehouse, UserWarehouseScope, RefreshToken, AuditLog, AppSetting,
+│   │   │                    # Fact*, SyncRun, UserPreference
 │   │   ├── schemas.py       # Pydantic-схемы запросов/ответов
 │   │   ├── security.py      # scrypt-пароли, JWT, refresh-токены
 │   │   ├── deps.py          # current_user, require_roles, client_ip
 │   │   ├── seed.py          # администратор при первом запуске + демо-пользователи (dev)
-│   │   ├── api/             # auth.py, metrics.py, admin.py, settings.py (настройки), reports.py (отчёты+CSV)
+│   │   ├── api/             # auth.py, metrics.py, admin.py (пользователи+аудит), admin_settings.py
+│   │   │                    # (настройки, 1С, журнал загрузок), admin_warehouses.py, settings.py
+│   │   │                    # (персональные + /public), onec_push.py (приём среза от 1С), reports.py
 │   │   ├── services/metrics.py  # SQL-запросы витрины с фильтром по доступным складам
 │   │   ├── services/reports.py  # отчёты за произвольный период + итоги + тренд загрузки
-│   │   └── onec/            # base.py (контракт источника), mock.py, http_source.py, sync.py
-│   ├── tests/               # test_auth.py, test_reports.py, test_settings.py (27 тестов)
+│   │   ├── services/app_settings.py  # настройки времени выполнения: БД → .env → DEFAULTS
+│   │   ├── services/scheduling.py  # reschedule(): интервал/наличие job-а по настройкам
+│   │   └── onec/            # base.py (контракт), mock.py, http_source.py, parse.py (разбор среза),
+│   │                        # sync.py (get_source/apply_snapshot/run_sync)
+│   ├── tests/               # test_auth.py, test_reports.py, test_settings.py,
+│   │                        # test_admin_settings.py (45 тестов)
 │   └── requirements*.txt    # prod (пин) / dev (свежие колёса) / prod+psycopg2
 ├── frontend/
 │   ├── src/api.ts           # fetch-клиент: access в памяти, refresh в cookie, авто-повтор 401
 │   ├── src/auth.tsx         # AuthProvider: восстановление сессии, login/logout
-│   ├── src/pages/           # LoginPage, DashboardPage, ReportsPage
+│   ├── src/pages/           # LoginPage, DashboardPage, ReportsPage, AdminPage (вкладки админки)
 │   ├── src/components/      # AppShell (шапка+навигация), WidgetGrid (drag&drop плашек),
 │   │                        # KpiCard, DynamicsChart (SVG, кликабельный), CapacityPanel,
 │   │                        # CargoTable, DrilldownPanel (детализация за день / по складу)
+│   │                        # admin/ — вкладки админки (UsersTab, WarehousesTab, OneCTab,
+│   │                        # SettingsTab, AuditTab), SettingsForm (форма из specs бэкенда)
 │   └── nginx.conf           # прод-фронт: SPA + прокси /api → backend
 ├── docker-compose.yml       # db + backend + web
 ├── docs/                    # 01 постановка и вопросы, 02 архитектура, 03 контракт 1С
@@ -55,6 +64,16 @@ statcab/
 - **Multi-warehouse scope**: пустой `UserWarehouseScope` = доступ ко всем складам (роль `top`);
   менеджер видит только назначенные. Любой эндпоинт метрик обязан фильтровать по scope.
 - **access-токен** живёт только в памяти браузера (не в localStorage), refresh — httpOnly-cookie.
+- **Настройки времени выполнения** (`app_settings`, JSON в TEXT): приоритет БД → `.env` →
+  `DEFAULTS` из `services/app_settings.py`, поэтому существующий `.env` работает, пока админ
+  ничего не менял в UI. Секреты (`onec.password`, `onec.push_token`) наружу не отдаются —
+  маска `***` и флаг `..._set`; каждая запись оставляет след в `audit_log`.
+- **Расписание 1С** живёт в `app.state.scheduler`: `PUT /api/admin/settings` зовёт
+  `scheduling.reschedule()` — меняет интервал или снимает job при `sync.enabled=false`
+  без перезапуска процесса.
+- **Push из 1С** (`POST /api/onec/push`, заголовок `X-OneC-Token`): тот же контракт, что и
+  GET-методы; токен не задан → 503 (приём выключен). Сохранение общее — `apply_snapshot()`,
+  поэтому повторный срез не плодит дубликатов (ключ: срез × склад × группа груза/сутки).
 - **Персональные настройки** (`user_preferences`, JSON в TEXT): раскладка дашборда и фильтры
   отчётов. Ключи белым списком (`KNOWN_KEYS`), размер значения ограничен. Храним на сервере,
   а не в localStorage — настройка следует за пользователем между браузерами.
@@ -70,6 +89,13 @@ statcab/
   открывает панель `DrilldownPanel` — данные берутся из тех же `/api/reports/*`, поэтому цифры
   панели и отчёта всегда совпадают, а права фильтрует бэкенд. Панель вне сетки виджетов
   (фиксированная справа / снизу на мобильном), закрывается повторным кликом, «Закрыть» и Esc.
+- **Администрирование** (`/admin`, только роль `admin`: маршрут закрывается редиректом, вкладка в
+  шапке не рисуется остальным). Страница тонкая — вкладки в `components/admin/*`; форма настроек
+  строится из `specs` ответа `GET /api/admin/settings`, поэтому диапазоны и типы не дублируются во
+  фронте. Секретные поля (`onec.password`, `onec.push_token`) показываются пустыми: пустое поле =
+  «не менять», бэкенд возвращает маску `***` и флаг `..._set`. Удаления нет ни у пользователей, ни у
+  складов — только выключение. Статус учётки (активен/отключён/заблокирован) UI доопределяет сам:
+  `UserOut` полей `is_active`/`locked_until` не отдаёт, поэтому изменённое в сессии держим локально.
 - **Время** храним наивным UTC (`models.utcnow()`), чтобы SQLite и PG вели себя одинаково.
 - **Ошибки входа** — всегда один текст («Неверный логин или пароль»), чтобы не светить существование учётки.
 - **Пароли**: `scrypt$N$r$salt$hash` (stdlib, без нативных зависимостей).
@@ -92,10 +118,22 @@ statcab/
 | `cd frontend && npm run dev` | dev-фронт (проксирует `/api` на :8000) |
 | `cd frontend && npm run build` | typecheck (`tsc -b`) + прод-сборка |
 | `docker compose up -d --build` | полный стек |
-| `curl -X POST .../api/sync/run -H "Authorization: Bearer <token>"` | ручной запуск загрузки из 1С |
+| `curl -X POST .../api/admin/sync/run -H "Authorization: Bearer <token>"` | ручной запуск загрузки из 1С |
+| `curl -X POST .../api/admin/onec/test -H "Authorization: Bearer <token>"` | проверка связи с 1С (4 GET, ошибки в ответе) |
 | `node tools/ui_smoke.mjs` | браузерная проверка входа и дашборда |
 | `node tools/ui_customization.mjs` | браузерная проверка drag&drop, отчётов и CSV |
 | `node tools/ui_drilldown.mjs` | браузерная проверка кликабельных графиков и панели деталей |
+| `node tools/ui_admin.mjs` | браузерная проверка админки (нужны `ADMIN_LOGIN` и `PASS`) |
+
+**После браузерных смоков чистим dev-БД** — тесты создают учётки `qa*`/`zz*` и склады `QA-*`:
+```sql
+delete from users where login like 'qa%' or login like 'zz%';
+delete from warehouses where code like 'QA-%';
+delete from app_settings;
+```
+`tools/ui_customization.mjs` перед прогоном сам сбрасывает сохранённую раскладку администратора
+через `DELETE /api/settings/preferences/dashboard_layout` — иначе проверки размеров и порядка
+плашек зависят от того, что осталось от прошлого прогона (это и было причиной «плавающих» провалов).
 
 ## Definition of Done (фича готова, если)
 1. Бэкенд: есть тест на новый сценарий, `pytest` зелёный.

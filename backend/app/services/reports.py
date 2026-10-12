@@ -18,10 +18,20 @@ DEFAULT_DAYS = 30
 MAX_DAYS = 366
 
 
-def clamp_period(date_from: date | None, date_to: date | None) -> tuple[date, date]:
-    """Никогда не пускаем в запрос «всю историю»: максимум год."""
+def clamp_period(date_from: date | None, date_to: date | None,
+                 default_days: int | None = None) -> tuple[date, date]:
+    """Никогда не пускаем в запрос «всю историю»: максимум год.
+
+    default_days — период по умолчанию из настроек кабинета (reports.default_days);
+    если его не передали, живёт константа DEFAULT_DAYS.
+    """
+    try:
+        days = int(default_days) if default_days else DEFAULT_DAYS
+    except (TypeError, ValueError):
+        days = DEFAULT_DAYS
+    days = max(1, min(days, MAX_DAYS))
     end = date_to or date.today()
-    start = date_from or (end - timedelta(days=DEFAULT_DAYS - 1))
+    start = date_from or (end - timedelta(days=days - 1))
     if start > end:
         start, end = end, start
     if (end - start).days + 1 > MAX_DAYS:

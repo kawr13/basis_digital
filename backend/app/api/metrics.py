@@ -9,6 +9,7 @@ from ..db import get_db
 from ..deps import current_user
 from ..models import User, Warehouse
 from ..schemas import CapacityOut, CargoBalanceOut, DynamicsOut, SummaryOut, WarehouseOut
+from ..services import app_settings
 from ..services import metrics as q
 
 router = APIRouter(prefix="/api", tags=["metrics"])
@@ -38,6 +39,9 @@ def capacity(user: User = Depends(current_user), db: Session = Depends(get_db)):
 
 
 @router.get("/metrics/processing-dynamics", response_model=DynamicsOut)
-def dynamics(days: int = Query(14, ge=1, le=180),
+def dynamics(days: int | None = Query(default=None, ge=1, le=180),
              user: User = Depends(current_user), db: Session = Depends(get_db)):
+    """Динамика обработки. Если сутки не указаны — берём настройку ui.dynamics_days."""
+    if days is None:
+        days = int(app_settings.get(db, "ui.dynamics_days"))
     return q.processing_dynamics(db, q.allowed_warehouse_ids(db, user), days)
