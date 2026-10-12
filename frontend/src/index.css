@@ -1,0 +1,48 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+  body {
+    @apply bg-ink-900 text-ink-100 font-sans antialiased;
+  }
+  input,
+  button {
+    font: inherit;
+  }
+}
+
+@layer components {
+  .panel {
+    @apply bg-ink-800 border border-ink-600 rounded-lg shadow-panel;
+  }
+  .panel-title {
+    @apply text-[11px] uppercase tracking-[0.14em] text-ink-400 font-medium;
+  }
+  .num {
+    @apply font-num tabular-nums;
+  }
+  .field {
+    @apply w-full bg-ink-900 border border-ink-600 rounded-md px-3 py-2.5
+      text-ink-100 placeholder-ink-500 outline-none
+      focus:border-amber2 focus:ring-1 focus:ring-amber2/40 transition;
+  }
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-md px-4 py-2.5
+      font-medium transition disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+  .btn-primary {
+    @apply btn bg-amber2 text-ink-900 hover:brightness-110 active:brightness-95;
+  }
+  .btn-ghost {
+    @apply btn border border-ink-600 text-ink-300 hover:text-ink-100 hover:border-ink-500;
+  }
+  .chip {
+    @apply inline-flex items-center gap-1 rounded px-2 py-0.5 text-[11px] font-medium;
+  }
+}

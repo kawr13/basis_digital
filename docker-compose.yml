@@ -1,0 +1,56 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-statcab}
+      POSTGRES_USER: ${POSTGRES_USER:-statcab}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?укажите POSTGRES_PASSWORD в .env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-statcab}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    environment:
+      ENVIRONMENT: ${ENVIRONMENT:-prod}
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-statcab}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-statcab}
+      SECRET_KEY: ${SECRET_KEY:?укажите SECRET_KEY в .env}
+      ACCESS_TOKEN_TTL_MINUTES: ${ACCESS_TOKEN_TTL_MINUTES:-30}
+      REFRESH_TOKEN_TTL_DAYS: ${REFRESH_TOKEN_TTL_DAYS:-1}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8080}
+      ONE_C_SOURCE: ${ONE_C_SOURCE:-mock}
+      ONE_C_BASE_URL: ${ONE_C_BASE_URL:-}
+      ONE_C_LOGIN: ${ONE_C_LOGIN:-}
+      ONE_C_PASSWORD: ${ONE_C_PASSWORD:-}
+      SYNC_ENABLED: ${SYNC_ENABLED:-true}
+      SYNC_INTERVAL_MINUTES: ${SYNC_INTERVAL_MINUTES:-15}
+      ADMIN_LOGIN: ${ADMIN_LOGIN:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      SEED_DEMO_DATA: ${SEED_DEMO_DATA:-false}
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - statcab_data:/app/data
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "${WEB_PORT:-8080}:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  statcab_data:

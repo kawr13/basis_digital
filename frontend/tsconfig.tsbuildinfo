@@ -1,0 +1,1 @@
+{"root":["./src/app.tsx","./src/api.ts","./src/auth.tsx","./src/format.ts","./src/main.tsx","./src/components/capacitypanel.tsx","./src/components/cargotable.tsx","./src/components/dynamicschart.tsx","./src/components/kpicard.tsx","./src/pages/dashboardpage.tsx","./src/pages/loginpage.tsx"],"version":"5.9.3"}

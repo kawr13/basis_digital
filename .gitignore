@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# БД и локальные данные
+data/
+*.db
+*.sqlite
+
+# Node
+node_modules/
+dist/
+
+# Секреты
+.env
+*.pem
+*.key
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+*.log
