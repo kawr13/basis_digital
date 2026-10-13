@@ -134,10 +134,21 @@ ok(blocks >= 6, `блоков причалов в сетке: ${blocks}`);
 // вертикальная шкала: 10 м на ячейку. Тестовый причал 120 м → 12 отметок
 const ruler = await page.evaluate((code) => {
   const b = [...document.querySelectorAll("[data-berth-block]")].find((el) => el.dataset.berthBlock === code);
-  return b ? [...b.querySelectorAll("[data-ruler]")].map((r) => Number(r.textContent)) : [];
+  return b ? [...b.querySelectorAll("[data-ruler]")].map((r) => Number(r.dataset.ruler)) : [];
 }, BERTH_CODE);
 ok(ruler.length === 12 && ruler[0] === 10 && ruler[11] === 120,
   `шкала длины: ${ruler.length} ячеек по 10 м, последняя отметка ${ruler[ruler.length - 1]} м`);
+const labeled = await page.evaluate((code) => {
+  const b = [...document.querySelectorAll("[data-berth-block]")].find((el) => el.dataset.berthBlock === code);
+  return [...b.querySelectorAll("[data-ruler]")].filter((r) => r.textContent.trim()).length;
+}, BERTH_CODE);
+ok(labeled === 6, `при сжатой ячейке подписи каждые 20 м, чтобы не сливались: ${labeled} подписей`);
+// ячейка сжата в полтора раза: 10 м = 12 px
+const cellH = await page.evaluate(() => {
+  const r = document.querySelector("[data-ruler]");
+  return Math.round(r.getBoundingClientRect().height);
+});
+ok(cellH === 12, `ячейка шкалы по высоте ${cellH}px (10 м)`);
 const days = await page.locator("[data-day]").count();
 ok(days >= 30, `столбцов суток в месячном виде: ${days}`);
 const scroll = await page.evaluate(() => {
@@ -189,8 +200,8 @@ const geo = await page.evaluate((name) => {
   return { w: Math.round(r.width), h: Math.round(r.height), text: el.textContent.trim() };
 }, VESSEL);
 ok(geo.w > 60 && geo.h >= 20, `полоса растянутая: ${geo.w}×${geo.h}px, «${geo.text}»`);
-// 60 м длины при ячейке 18 px/10 м → полоса около 108 px высотой
-ok(Math.abs(geo.h - 108) <= 4, `высота полосы соответствует длине: ${geo.h}px ≈ 60 м`);
+// 60 м при 12 px на 10 м → 72 px минус зазор 2
+ok(Math.abs(geo.h - 70) <= 3, `высота полосы соответствует длине: ${geo.h}px ≈ 60 м`);
 const barMeters = await page.evaluate((name) => {
   const el = [...document.querySelectorAll("[data-vp-bar]")].find((b) => b.textContent.includes(name));
   return { length: el?.dataset.lengthM, offset: el?.dataset.offsetM };
@@ -250,6 +261,73 @@ const fitErr = (await page.textContent("[data-modal='placement-form'] [data-form
 ok(fitErr.includes("длина причала 120 м"), `судно длиннее причала не приняли: «${fitErr}»`);
 await page.click("[data-modal='placement-form'] [data-admin-action='close-modal']");
 await page.waitForSelector("[data-modal='placement-form']", { state: "detached" });
+
+// ───────────────────────────── WYSIWYG: перетаскивание мышью ─────────────────────────
+const pencil = page.locator("[data-admin-action='wysiwyg']");
+ok((await pencil.count()) === 1, "карандаш режима перетаскивания есть");
+await pencil.click();
+await page.waitForSelector("[data-wysiwyg-hint]");
+ok(true, "карандаш включил режим: подсказка на месте");
+
+const barSel = `[data-vp-bar]`;
+const before = await page.evaluate((name) => {
+  const el = [...document.querySelectorAll("[data-vp-bar]")].find((b) => b.textContent.includes(name));
+  const r = el.getBoundingClientRect();
+  return { offset: el.dataset.offsetM, left: Math.round(r.left), top: Math.round(r.top) };
+}, VESSEL);
+const box = await page.locator(`[data-vp-bar][data-offset-m="${before.offset}"]`)
+  .filter({ hasText: VESSEL }).first().boundingBox();
+await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+await page.mouse.down();
+await page.mouse.move(box.x + box.width / 2 + 33, box.y + box.height / 2 + 12, { steps: 6 });
+await page.mouse.up();
+await page.waitForFunction((name) => {
+  const el = [...document.querySelectorAll("[data-vp-bar]")].find((b) => b.textContent.includes(name));
+  return el?.dataset.offsetM === "10";
+}, VESSEL, { timeout: 8000 });
+const after = await page.evaluate((name) => {
+  const el = [...document.querySelectorAll("[data-vp-bar]")].find((b) => b.textContent.includes(name));
+  const r = el.getBoundingClientRect();
+  return { offset: el.dataset.offsetM, left: Math.round(r.left) };
+}, VESSEL);
+ok(after.offset === "10", `мышью передвинули место у причала: ${before.offset} → ${after.offset} м`);
+ok(Math.abs(after.left - before.left - 33) <= 2,
+   `мышью передвинули по времени: +1 слот (${after.left - before.left}px)`);
+ok((await page.locator("[data-modal='placement-detail']").count()) === 0,
+   "после перетаскивания карточка не открылась (клик не подменился)");
+
+// наезжаем на другое судно — бэкенд не даёт, и полоса возвращается на место
+const box2 = await page.locator(`[data-vp-bar][data-offset-m="10"]`).filter({ hasText: VESSEL })
+  .first().boundingBox();
+await page.mouse.move(box2.x + box2.width / 2, box2.y + box2.height / 2);
+await page.mouse.down();
+await page.mouse.move(box2.x + box2.width / 2, box2.y + box2.height / 2 + 24, { steps: 6 });
+await page.mouse.up();
+await page.waitForFunction(() => /пересечение по длине/.test(document.querySelector("[role=alert]")?.textContent ?? ""), { timeout: 8000 });
+const dragErr = (await page.textContent("[role=alert]")) || "";
+ok(dragErr.includes("пересечение по длине"), `съехало на другое судно — не пустило: «${dragErr}»`);
+await page.waitForFunction((name) => {
+  const el = [...document.querySelectorAll("[data-vp-bar]")].find((b) => b.textContent.includes(name));
+  return el?.dataset.offsetM === "10";
+}, VESSEL, { timeout: 8000 });
+ok(true, "после отказа полоса вернулась на свою отметку");
+
+// карандаш выключен — полоса больше не ручка
+await pencil.click();
+ok((await page.locator("[data-wysiwyg-hint]").count()) === 0, "карандаш выключен — подсказка ушла");
+const box3 = await page.locator(`[data-vp-bar][data-offset-m="10"]`).filter({ hasText: VESSEL })
+  .first().boundingBox();
+await page.mouse.move(box3.x + box3.width / 2, box3.y + box3.height / 2);
+await page.mouse.down();
+await page.mouse.move(box3.x + box3.width / 2, box3.y + box3.height / 2 + 24, { steps: 5 });
+await page.mouse.up();
+await page.waitForTimeout(700);
+const stillThere = await page.evaluate((name) => {
+  const el = [...document.querySelectorAll("[data-vp-bar]")].find((b) => b.textContent.includes(name));
+  return el?.dataset.offsetM;
+}, VESSEL);
+ok(stillThere === "10", "без карандаша перетаскивание не работает");
+await page.click("[role=alert] ~ * [data-admin-action], body", { position: { x: 1, y: 1 } }).catch(() => {});
 
 // ------------------------------------------------------ любой период ----
 await page.fill("[data-period-from]", plus(60));

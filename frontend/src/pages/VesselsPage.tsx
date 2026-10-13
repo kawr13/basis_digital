@@ -8,7 +8,7 @@
  * Данные не из 1С: их заводит диспетчер, поэтому здесь можно создавать и править
  * строки, а посмотреть — любой период.
  */
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   api,
   type Berth,
@@ -22,8 +22,9 @@ import { Field, FormError, Modal, Notice, errText } from "../components/admin/ui
 import { dmy } from "../format";
 import { resolveVesselRights, roleListLabel, usePublicSettings } from "../settings";
 import {
-  addDays, barGeometry, barText, cargoColor, daysInRange, isWeekend, lengthGeometry,
-  lengthLabel, parseLocal, periodLabel, rulerMarks, slotLabel, slotsCount, SLOT_HOURS, ymd,
+  addDays, addSlots, barGeometry, barText, cargoColor, daysInRange, isWeekend, isoLocal,
+  lengthGeometry, lengthLabel, M_PER_CELL, parseLocal, periodLabel, rulerMarks, slotLabel,
+  slotsCount, SLOT_HOURS, ymd,
 } from "../vessels";
 
 /** Ширина одного слота в пикселях: 4 слота = сутки ≈ 132px, читается и на ноутбуке. */
@@ -31,7 +32,7 @@ const SLOT_W = 33;
 /** Левая липкая колонка с причалом. */
 const LEFT_W = 168;
 /** Высота одной ячейки вертикальной шкалы = 10 метров длины причала. */
-const CELL_H = 18;
+const CELL_H = 12;
 
 const PRESETS = [
   { label: "Неделя", days: 7 },
@@ -114,6 +115,11 @@ export default function VesselsPage() {
   const [saved, setSaved] = useState("");
   const [detail, setDetail] = useState<Placement | null>(null);
   const [freeHint, setFreeHint] = useState("");
+  // WYSIWYG: карандаш превращает полосы в ручки — судно двигают мышью
+  const [wysiwyg, setWysiwyg] = useState(false);
+  const [drag, setDrag] = useState<{ id: number; startX: number; startY: number; dx: number; dy: number } | null>(null);
+  // после перетаскивания клик по полосе не должен открывать карточку
+  const suppressClick = useRef(false);
 
   const load = useCallback(async () => {
     setBusy(true);
@@ -227,6 +233,68 @@ export default function VesselsPage() {
     }
   };
 
+  /* -------------------------- WYSIWYG: судно мышью -------------------------- */
+
+  const startDrag = (e: React.PointerEvent, p: Placement) => {
+    (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
+    setDrag({ id: p.id, startX: e.clientX, startY: e.clientY, dx: 0, dy: 0 });
+  };
+
+  const moveDrag = (e: React.PointerEvent, p: Placement) => {
+    if (!drag || drag.id !== p.id) return;
+    setDrag({ ...drag, dx: e.clientX - drag.startX, dy: e.clientY - drag.startY });
+  };
+
+  const endDrag = async (p: Placement) => {
+    if (!drag) return;
+    const { dx, dy } = drag;
+    setDrag(null);
+    const slots = Math.round(dx / SLOT_W);
+    const meters = Math.round((dy / CELL_H) * (M_PER_CELL / 5)) * 5;
+    if (!slots && !meters) return;
+    suppressClick.current = true;
+    window.setTimeout(() => (suppressClick.current = false), 0);
+    await movePlacement(p, slots, meters);
+  };
+
+  /** Клавиатура вместо мыши: стрелки — слот по времени и 5 м по причалу. */
+  const nudge = async (p: Placement, e: React.KeyboardEvent) => {
+    const step: Record<string, [number, number]> = {
+      ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -5], ArrowDown: [0, 5],
+    };
+    const move = step[e.key];
+    if (!move) return;
+    e.preventDefault();
+    await movePlacement(p, move[0], move[1]);
+  };
+
+  /** Сдвинуть постановку на N слотов по времени и M метров у причала. */
+  const movePlacement = async (p: Placement, slots: number, meters: number) => {
+    const berth = berths.find((b) => b.id === p.berth_id);
+    const start = addSlots(parseLocal(p.starts_at), slots);
+    const end = addSlots(parseLocal(p.ends_at), slots);
+    if (start < new Date(`${from}T00:00:00`) || end > new Date(`${to}T23:59:59`)) {
+      setError("Судно нельзя вынести за границы выбранного периода");
+      return;
+    }
+    let offset = (p.offset_m ?? 0) + meters;
+    offset = berth?.length_m
+      ? Math.min(Math.max(offset, 0), Math.max(berth.length_m - (p.length_m ?? 0), 0))
+      : Math.max(offset, 0);
+    try {
+      await api.updatePlacement(p.id, { starts_at: isoLocal(start), ends_at: isoLocal(end), offset_m: offset });
+      setError("");
+      setSaved(`${p.vessel}: ${start.toLocaleDateString("ru-RU")} · ${offset} м`);
+      window.setTimeout(() => setSaved(""), 5000);
+      await load();
+    } catch (e) {
+      // 409 — наехали на другое судно: откат и текст бэкенда, где именно засада.
+      // сначала перезагрузка (она чистит error), потом сообщение
+      await load();
+      setError(errText(e, "Не удалось переставить судно"));
+    }
+  };
+
   const remove = async (p: Placement) => {
     try {
       await api.deletePlacement(p.id);
@@ -305,12 +373,31 @@ export default function VesselsPage() {
               Новая постановка
             </button>
           )}
+          {canEdit && (
+            <button
+              className={`btn btn-mini ${wysiwyg ? "btn-primary" : "btn-ghost"}`}
+              onClick={() => setWysiwyg((v) => !v)}
+              aria-pressed={wysiwyg}
+              title="Перетаскивание судов мышью: горизонталь — время, вертикаль — место у причала"
+              data-admin-action="wysiwyg"
+            >
+              ✏ Карандаш
+            </button>
+          )}
           {saved && (
             <span className="text-[11px] text-ok" data-saved-note>
               {saved}
             </span>
           )}
         </div>
+
+        {wysiwyg && canEdit && (
+          <p className="mt-2 text-[11px] text-ink-300" data-wysiwyg-hint>
+            Режим перетаскивания: тяните полосу мышью — горизонталь это слоты (шаг 6 часов),
+            вертикаль — место у причала (шаг 5 м). Отпустили — сохранилось. Стрелки двигают
+            полосу под фокусом.
+          </p>
+        )}
 
         {error && (
           <div className="mt-3 text-sm text-crit" role="alert">
@@ -395,7 +482,7 @@ export default function VesselsPage() {
                         style={{ height: CELL_H, lineHeight: `${CELL_H}px` }}
                         data-ruler={m}
                       >
-                        {m}
+                        {m % (CELL_H < 14 ? 20 : 10) === 0 ? m : ""}
                       </div>
                     ))}
                   </div>
@@ -425,28 +512,44 @@ export default function VesselsPage() {
                       const v = lengthGeometry(p, CELL_H);
                       // длину не задали — полоса идёт до конца причала; за блок не выходим
                       const height = Math.max(10, Math.min(v.height, cells * CELL_H - v.top) - 2);
+                      const dragging = drag?.id === p.id;
+                      const canDrag = wysiwyg && canEdit && !busy;
+                      // пока тащим, полоса едет за курсором с тем же шагом, с каким
+                      // потом сохранится: слот по горизонтали, 5 м по вертикали
+                      const shiftX = dragging ? Math.round(drag.dx / SLOT_W) * SLOT_W : 0;
+                      const shiftY = dragging ? Math.round(drag.dy / (CELL_H / 2)) * (CELL_H / 2) : 0;
                       return (
                         <button
                           key={p.id}
-                          className="absolute rounded-md text-left text-[11px] px-1.5 text-white shadow-sm hover:brightness-110 focus:outline-none focus:ring-2 focus:ring-brand-sky"
+                          className={`absolute rounded-md text-left text-[11px] px-1.5 text-white shadow-sm hover:brightness-110 focus:outline-none focus:ring-2 focus:ring-brand-sky ${canDrag ? "cursor-move touch-none" : ""} ${dragging ? "z-40 ring-2 ring-brand-sky" : ""}`}
                           style={{
                             left: geo.left * SLOT_W,
                             width: geo.width * SLOT_W - 3,
                             top: v.top + 1,
                             height,
+                            transform: shiftX || shiftY ? `translate(${shiftX}px, ${shiftY}px)` : undefined,
                             background: `linear-gradient(180deg, ${color}f0, ${color}cc)`,
                             borderLeft: geo.clippedStart ? "3px dotted rgba(255,255,255,.85)" : "3px solid rgba(0,0,0,.18)",
                           }}
                           title={`${barText(p)} · ${lengthLabel(p)}${p.cargo ? ` · ${p.cargo}` : ""}\n${parseLocal(p.starts_at).toLocaleString("ru-RU")} — ${parseLocal(p.ends_at).toLocaleString("ru-RU")}`}
-                          onClick={() => setDetail(p)}
+                          onClick={() => {
+                            if (suppressClick.current) return;
+                            setDetail(p);
+                          }}
+                          onPointerDown={canDrag ? (e) => startDrag(e, p) : undefined}
+                          onPointerMove={canDrag ? (e) => moveDrag(e, p) : undefined}
+                          onPointerUp={canDrag ? () => endDrag(p) : undefined}
+                          onPointerCancel={() => setDrag(null)}
+                          onKeyDown={canDrag ? (e) => nudge(p, e) : undefined}
                           data-vp-bar={p.id}
                           data-berth={berth.code}
                           data-cargo={(p.cargo || "").toUpperCase()}
                           data-length-m={p.length_m ?? ""}
                           data-offset-m={p.offset_m ?? 0}
+                          data-dragging={dragging ? "1" : "0"}
                         >
                           <span className="block truncate">{p.vessel}</span>
-                          {height >= 30 ? (
+                          {height >= 24 ? (
                             <span className="block truncate text-[10px] opacity-85">
                               {[p.volume, p.length_m ? `${p.length_m} м` : null].filter(Boolean).join(" · ")}
                             </span>

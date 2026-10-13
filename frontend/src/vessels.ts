@@ -115,6 +115,16 @@ export function rulerMarks(cells: number): number[] {
   return Array.from({ length: cells }, (_, i) => (i + 1) * M_PER_CELL);
 }
 
+/** Сдвиг времени на N слотов (план перетаскивают по горизонтали). */
+export function addSlots(d: Date, slots: number): Date {
+  return new Date(d.getTime() + slots * SLOT_MS);
+}
+
+/** Date → «2026-05-10T06:00:00» — формат, который понимает бэкенд. */
+export function isoLocal(d: Date): string {
+  return `${ymd(d)}T${String(d.getHours()).padStart(2, "0")}:00:00`;
+}
+
 export function periodLabel(from: string, to: string): string {
   return `${new Date(`${from}T00:00:00`).toLocaleDateString("ru-RU")} — ${new Date(
     `${to}T00:00:00`,
