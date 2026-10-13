@@ -346,6 +346,50 @@ export type Freshness = {
   server_time: string;
 };
 
+/** ---------- постановка судов (ручной планировочный документ) ---------- */
+
+export type Berth = {
+  id: number;
+  code: string;
+  depth: number | null;
+  length_m: number | null;
+  lanes: number;
+  sort_order: number;
+  is_active: boolean;
+};
+
+export type Placement = {
+  id: number;
+  berth_id: number;
+  lane: number;
+  vessel: string;
+  volume: string | null;
+  cargo: string | null;
+  note: string | null;
+  starts_at: string;
+  ends_at: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type PlacementInput = {
+  berth_id: number;
+  lane: number;
+  vessel: string;
+  volume?: string | null;
+  cargo?: string | null;
+  note?: string | null;
+  starts_at: string;
+  ends_at: string;
+};
+
+export type VesselPlan = {
+  period: { from: string; to: string };
+  slot_hours: number[];
+  berths: Berth[];
+  placements: Placement[];
+};
+
 export const api = {
   async login(login: string, password: string): Promise<User> {
     const data = await request<Tokens>("/api/auth/login", {
@@ -433,6 +477,22 @@ export const api = {
     a.remove();
     URL.revokeObjectURL(url);
   },
+
+  // ---- постановка судов ----
+  berths: () => request<Berth[]>("/api/vessels/berths"),
+  vesselPlan: (from?: string, to?: string, berthId?: number) => {
+    const q = new URLSearchParams();
+    if (from) q.set("from", from);
+    if (to) q.set("to", to);
+    if (berthId) q.set("berth_id", String(berthId));
+    const tail = q.toString();
+    return request<VesselPlan>(`/api/vessels/placements${tail ? `?${tail}` : ""}`);
+  },
+  createPlacement: (body: PlacementInput) =>
+    request<Placement>("/api/vessels/placements", { method: "POST", body: JSON.stringify(body) }),
+  updatePlacement: (id: number, body: Partial<PlacementInput>) =>
+    request<Placement>(`/api/vessels/placements/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
+  deletePlacement: (id: number) => request<void>(`/api/vessels/placements/${id}`, { method: "DELETE" }),
 };
 
 export type ReportParams = { from?: string; to?: string; warehouses?: number[] };

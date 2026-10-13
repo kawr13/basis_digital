@@ -248,3 +248,67 @@ class WarehouseUpdate(BaseModel):
     capacity: float | None = Field(default=None, ge=0)
     unit: str | None = Field(default=None, max_length=16)
     is_active: bool | None = None
+
+
+# -------------------------------------------------- постановка судов ----
+
+
+class BerthOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    code: str
+    depth: float | None
+    length_m: int | None
+    lanes: int
+    sort_order: int
+    is_active: bool
+
+
+class BerthUpsert(BaseModel):
+    code: str = Field(min_length=1, max_length=32)
+    depth: float | None = Field(default=None, ge=0, le=100)
+    length_m: int | None = Field(default=None, ge=1, le=2000)
+    lanes: int = Field(default=1, ge=1, le=12)
+    sort_order: int = 0
+    is_active: bool | None = None
+
+
+class PlacementIn(BaseModel):
+    """Строка плана. Границы — начало слота (00/06/12/18), включительно."""
+
+    berth_id: int
+    lane: int = Field(default=1, ge=1, le=12)
+    vessel: str = Field(min_length=2, max_length=128)
+    volume: str | None = Field(default=None, max_length=64)
+    cargo: str | None = Field(default=None, max_length=64)
+    note: str | None = Field(default=None, max_length=1000)
+    starts_at: datetime
+    ends_at: datetime
+
+
+class PlacementUpdate(BaseModel):
+    berth_id: int | None = None
+    lane: int | None = Field(default=None, ge=1, le=12)
+    vessel: str | None = Field(default=None, min_length=2, max_length=128)
+    volume: str | None = Field(default=None, max_length=64)
+    cargo: str | None = Field(default=None, max_length=64)
+    note: str | None = Field(default=None, max_length=1000)
+    starts_at: datetime | None = None
+    ends_at: datetime | None = None
+
+
+class PlacementOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    berth_id: int
+    lane: int
+    vessel: str
+    volume: str | None
+    cargo: str | None
+    note: str | None
+    starts_at: datetime
+    ends_at: datetime
+    created_at: datetime
+    updated_at: datetime

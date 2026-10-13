@@ -7,6 +7,7 @@ import { ageLabel, type Live } from "../live";
 const tabs = [
   { to: "/", label: "Сводка", end: true, nav: "summary" },
   { to: "/reports", label: "Отчёты", end: false, nav: "reports" },
+  { to: "/vessels", label: "Постановка", end: false, nav: "vessels" },
 ];
 
 // Вкладка администратора видна только роли admin: маршрут /admin всё равно

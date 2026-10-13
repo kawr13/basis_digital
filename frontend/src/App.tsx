@@ -3,6 +3,7 @@ import { useAuth } from "./auth";
 import DashboardPage from "./pages/DashboardPage";
 import LoginPage from "./pages/LoginPage";
 import ReportsPage from "./pages/ReportsPage";
+import VesselsPage from "./pages/VesselsPage";
 import AdminPage from "./pages/AdminPage";
 
 function Boot() {
@@ -46,6 +47,14 @@ export default function App() {
         element={
           <Protected>
             <ReportsPage />
+          </Protected>
+        }
+      />
+      <Route
+        path="/vessels"
+        element={
+          <Protected>
+            <VesselsPage />
           </Protected>
         }
       />

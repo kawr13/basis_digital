@@ -10,7 +10,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
 from .api import (admin, admin_settings, admin_warehouses, auth, meta, metrics, onec_push, reports,
-                  settings)
+                  settings, vessels)
 from .config import get_settings
 from .db import SessionLocal, get_db, init_db
 from .deps import require_roles
@@ -18,6 +18,7 @@ from .models import Role
 from .onec.sync import run_sync
 from .seed import ensure_admin, seed_demo_users
 from .services import app_settings, scheduling
+from .services.vessels import seed_berths
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("statcab")
@@ -38,6 +39,12 @@ async def lifespan(app: FastAPI):
             run = run_sync(db)
             log.info("Витрина инициализирована источником %s: %s строк", run.source, run.rows)
         seed_demo_users(db)
+        # Причалы — не данные 1С, это часть планировочного документа «Постановка
+        # судов»: при пустом справочнике заводим типовые, иначе новому пользователю
+        # некуда ставить суда.
+        created = seed_berths(db)
+        if created:
+            log.info("Справочник причалов заполнен: %d шт.", created)
     finally:
         db.close()
 
@@ -82,6 +89,7 @@ app.include_router(admin_settings.router)
 app.include_router(admin_warehouses.router)
 app.include_router(settings.router)
 app.include_router(reports.router)
+app.include_router(vessels.router)
 app.include_router(onec_push.router)
 
 

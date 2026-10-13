@@ -228,3 +228,60 @@ class AppSetting(Base):
     updated_by: Mapped[int | None] = mapped_column(Integer, nullable=True)  # id администратора
     # Внешний ключ не ставим специально: учётку администратора могут удалить,
     # а историю «кто поменял настройку» терять нельзя.
+
+
+# ---------------------------------------------------------------------------
+# «Постановка судов» — ручной планировочный документ.
+#
+# В отличие от витрины статистики эти строки приходят НЕ из 1С: их заводит
+# диспетчер руками. Поэтому они живут в отдельных таблицах и никогда не
+# перезаписываются синхронизацией.
+#
+# Время дробится так же, как в бумажном плане: сутки = 4 слота по 6 часов
+# (00-06, 06-12, 12-18, 18-00). starts_at/ends_at хранят НАЧАЛО первого и
+# последнего занятого слота, то есть границы включительно.
+# ---------------------------------------------------------------------------
+
+class Berth(Base):
+    """Причал: код, осадка и длина (метраж) в метрах."""
+
+    __tablename__ = "berths"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    code: Mapped[str] = mapped_column(String(32), unique=True, index=True)   # РП-1
+    depth: Mapped[float | None] = mapped_column(Float, nullable=True)        # осадка, м
+    length_m: Mapped[int | None] = mapped_column(Integer, nullable=True)     # метраж, м
+    lanes: Mapped[int] = mapped_column(Integer, default=1)                   # сколько судов одновременно
+    sort_order: Mapped[int] = mapped_column(Integer, default=0)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    placements: Mapped[list["VesselPlacement"]] = relationship(back_populates="berth")
+
+
+class VesselPlacement(Base):
+    """Одна строка плана: судно у причала с … по … (включительно)."""
+
+    __tablename__ = "vessel_placements"
+    __table_args__ = (
+        Index("ix_placement_period", "starts_at", "ends_at"),
+        Index("ix_placement_berth", "berth_id", "lane"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    berth_id: Mapped[int] = mapped_column(ForeignKey("berths.id", ondelete="RESTRICT"), index=True)
+    lane: Mapped[int] = mapped_column(Integer, default=1)    # «дорожка» внутри причала
+
+    vessel: Mapped[str] = mapped_column(String(128))         # CROWN SAPPHIRE
+    volume: Mapped[str | None] = mapped_column(String(64), nullable=True)   # «5 500», «(100+40) + 4 000»
+    cargo: Mapped[str | None] = mapped_column(String(64), nullable=True)    # БШ, БАНАНЫ-ПАЛЛЕТ, МЛК (БКК)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)           # сборник, (КМП-ЮМФ)…
+
+    starts_at: Mapped[datetime] = mapped_column(DateTime)    # начало первого слота
+    ends_at: Mapped[datetime] = mapped_column(DateTime)      # начало последнего слота
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+    created_by: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    updated_by: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    berth: Mapped[Berth] = relationship(back_populates="placements")
