@@ -5,8 +5,17 @@
  * состояния «загрузка / пуст / ошибка»), одинаковая для всех вкладок админки.
  * Классы сняты с ReportsPage — админка должна выглядеть как остальной кабинет.
  * (модалка затемняет подложку rgba(15,27,45,.35), а стекло даёт сам .panel).
+ *
+ * Два неочевидных момента, без которых окно «не влазит в экран»:
+ * 1) портал в document.body. Карточка админки — это .panel с backdrop-filter,
+ *    а backdrop-filter превращает карточку в containing block для position:fixed:
+ *    без портала модалка запиралась внутри карточки (310px вместо всего экрана)
+ *    и обрастала собственными ползунками прокрутки;
+ * 2) окно — flex-колонка с прокруткой только в середине: шапка и кнопки формы
+ *    остаются на месте даже на низком экране (ноутбук ~525px по высоте).
  */
 import { useEffect } from "react";
+import { createPortal } from "react-dom";
 
 export type Tone = "ok" | "warn" | "crit" | "muted";
 
@@ -15,17 +24,24 @@ export function errText(e: unknown, fallback = "Операция не удала
   return e instanceof Error && e.message ? e.message : fallback;
 }
 
-/** Модальное окно формы. Esc и клик по подложке закрывают, как в DrilldownPanel. */
+/**
+ * Модальное окно формы. Esc и клик по подложке закрывают, как в DrilldownPanel.
+ * Рендерится порталом в <body> (см. шапку файла) — иначе position:fixed
+ * считается не от экрана, а от карточки-родителя с backdrop-filter.
+ */
 export function Modal({
   title,
   onClose,
   children,
+  footer,
   testId,
   wide,
 }: {
   title: string;
   onClose: () => void;
   children: React.ReactNode;
+  /** нижняя панель с кнопками: не уезжает при прокрутке тела формы */
+  footer?: React.ReactNode;
   /** stable value for data-modal — используется браузерными проверками */
   testId?: string;
   wide?: boolean;
@@ -38,31 +54,57 @@ export function Modal({
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
-  return (
+  // Пока окно открыто — страницу за ним не крутим: два ползунка рядом
+  // (в окне и за окном) читаются как сломанный интерфейс
+  useEffect(() => {
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = prev;
+    };
+  }, []);
+
+  return createPortal(
     <div
-      className="fixed inset-0 z-30 overflow-y-auto bg-[rgba(15,27,45,.35)] p-4 py-8"
+      className="fixed inset-0 z-40 overflow-y-auto bg-[rgba(15,27,45,.35)] p-4"
       onClick={onClose}
       data-modal-overlay
     >
-      {/* сама модалка — .panel, а значит уже матовое стекло: blur(18px) размывает
-          затемнённую подложку и страницу за ней */}
-      <div
-        className={`panel dd-panel relative mx-auto w-full ${wide ? "max-w-3xl" : "max-w-xl"} p-0`}
-        role="dialog"
-        aria-modal="true"
-        aria-label={title}
-        data-modal={testId}
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="flex items-center justify-between gap-3 border-b border-ink-700 px-4 py-3">
-          <h2 className="panel-title">{title}</h2>
-          <button className="btn-ghost text-xs" onClick={onClose} data-admin-action="close-modal">
-            Закрыть
-          </button>
+      {/* min-h-full + items-center: окно по центру, пока влезает, и обычная
+          прокрутка подложки, когда экран ниже самой формы */}
+      <div className="flex min-h-full items-center justify-center">
+        {/* сама модалка — .panel, а значит уже матовое стекло: blur(20px)
+            размывает затемнённую подложку и страницу за ней */}
+        <div
+          className={`panel dd-panel relative flex w-full max-h-[calc(100vh-2rem)] flex-col ${
+            wide ? "max-w-3xl" : "max-w-xl"
+          } p-0`}
+          role="dialog"
+          aria-modal="true"
+          aria-label={title}
+          data-modal={testId}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div className="flex shrink-0 items-center justify-between gap-3 border-b border-ink-700 px-4 py-3">
+            <h2 className="panel-title">{title}</h2>
+            <button className="btn-ghost text-xs" onClick={onClose} data-admin-action="close-modal">
+              Закрыть
+            </button>
+          </div>
+
+          <div className="min-h-0 flex-1 overflow-y-auto p-4" data-modal-body>
+            {children}
+          </div>
+
+          {footer && (
+            <div className="shrink-0 border-t border-ink-700 px-4 py-3" data-modal-footer>
+              {footer}
+            </div>
+          )}
         </div>
-        <div className="p-4">{children}</div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 

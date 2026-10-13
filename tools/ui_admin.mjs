@@ -72,6 +72,33 @@ console.log("учёток до:", usersBefore);
 // ------------------------------------------------------- создание пользователя ---
 await page.click('[data-admin-action="create-user"]');
 await page.waitForSelector('[data-modal="user-form"]');
+
+// Низкий экран (ноутбук): окно обязано влезать целиком, а кнопка «Создать» —
+// быть видна без прокрутки. Раньше модалка запиралась внутри карточки с
+// backdrop-filter (position:fixed считалось от карточки) и ползла за границы.
+await page.setViewportSize({ width: 1198, height: 525 });
+await page.waitForTimeout(300);
+const geo = await page.evaluate(() => {
+  const m = document.querySelector('[data-modal="user-form"]');
+  const b = document.querySelector('[data-admin-action="save-user"]');
+  const mr = m.getBoundingClientRect();
+  const br = b.getBoundingClientRect();
+  return {
+    fits: mr.top >= 0 && mr.bottom <= innerHeight,
+    btn: br.top >= 0 && br.bottom <= innerHeight,
+    scrollX: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+    portaled: document.querySelector("[data-modal-overlay]")?.parentElement === document.body,
+    h: Math.round(mr.height),
+  };
+});
+ok(geo.portaled, "модалка рендерится порталом в <body> (иначе fixed считается от карточки)");
+ok(geo.fits, `окно влезает в экран 525px по высоте (высота ${geo.h}px)`);
+ok(geo.btn, "кнопка «Создать» видна без прокрутки");
+ok(geo.scrollX === 0, "горизонтальной прокрутки страницы нет");
+await page.screenshot({ path: "shot_admin_modal_short.png" });
+await page.setViewportSize({ width: 1500, height: 950 });
+await page.waitForTimeout(300);
+
 await page.fill('[data-field="login"]', NEW_LOGIN.toUpperCase());
 await page.fill('[data-field="full_name"]', "Тестовый Менеджер Проверочный");
 await page.selectOption('[data-field="role"]', "manager");

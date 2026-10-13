@@ -401,6 +401,20 @@ export function UsersTab() {
           onClose={() => setEditing(null)}
           testId={editing.mode === "create" ? "user-form" : "user-edit"}
           wide
+          footer={
+            <div className="space-y-3">
+              <FormError text={formError} />
+              <div className="flex flex-wrap items-center gap-2">
+                <button className="btn-primary text-sm" onClick={submit} disabled={busy} data-admin-action="save-user">
+                  {editing.mode === "create" ? "Создать" : "Сохранить"}
+                </button>
+                <button className="btn-ghost text-sm" onClick={() => setEditing(null)} disabled={busy}>
+                  Отмена
+                </button>
+                {busy && <BusyNote />}
+              </div>
+            </div>
+          }
         >
           <div className="grid gap-3 sm:grid-cols-2">
             <Field label="Логин" hint={editing.mode === "create" ? "строчные буквы, минимум 2 символа" : "логин не меняется"}>
@@ -517,18 +531,6 @@ export function UsersTab() {
             </div>
           </div>
 
-          <div className="mt-4 space-y-3">
-            <FormError text={formError} />
-            <div className="flex flex-wrap items-center gap-2">
-              <button className="btn-primary text-sm" onClick={submit} disabled={busy} data-admin-action="save-user">
-                {editing.mode === "create" ? "Создать" : "Сохранить"}
-              </button>
-              <button className="btn-ghost text-sm" onClick={() => setEditing(null)} disabled={busy}>
-                Отмена
-              </button>
-              {busy && <BusyNote />}
-            </div>
-          </div>
         </Modal>
       )}
     </section>

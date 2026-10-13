@@ -226,6 +226,25 @@ export function WarehousesTab() {
           title={editing.mode === "create" ? "Новый склад" : `Правка: ${editing.warehouse.code}`}
           onClose={() => setEditing(null)}
           testId={editing.mode === "create" ? "warehouse-form" : "warehouse-edit"}
+          footer={
+            <div className="space-y-3">
+              <FormError text={formError} />
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  className="btn-primary text-sm"
+                  onClick={submit}
+                  disabled={busy}
+                  data-admin-action="save-warehouse"
+                >
+                  {editing.mode === "create" ? "Создать" : "Сохранить"}
+                </button>
+                <button className="btn-ghost text-sm" onClick={() => setEditing(null)} disabled={busy}>
+                  Отмена
+                </button>
+                {busy && <BusyNote />}
+              </div>
+            </div>
+          }
         >
           <div className="grid gap-3 sm:grid-cols-2">
             <Field label="Код" hint="например WH-01, как в 1С">
@@ -282,18 +301,6 @@ export function WarehousesTab() {
             </Field>
           </div>
 
-          <div className="mt-4 space-y-3">
-            <FormError text={formError} />
-            <div className="flex flex-wrap items-center gap-2">
-              <button className="btn-primary text-sm" onClick={submit} disabled={busy} data-admin-action="save-warehouse">
-                {editing.mode === "create" ? "Создать" : "Сохранить"}
-              </button>
-              <button className="btn-ghost text-sm" onClick={() => setEditing(null)} disabled={busy}>
-                Отмена
-              </button>
-              {busy && <BusyNote />}
-            </div>
-          </div>
         </Modal>
       )}
     </section>
