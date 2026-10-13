@@ -357,3 +357,60 @@
     opacity: 1 !important;
   }
 }
+
+/* ─────────────────────────── печать / «Сохранить как PDF» ───────────────────
+   Кнопка «⤓ PDF» открывает диалог печати: браузер сам делает из него PDF-файл,
+   и текст в нём остаётся текстом (кириллица, поиск, копирование), а не картинкой.
+   В файл уходит ровно то, что выбрано на экране: период, причалы, масштаб.
+   Всё лишнее — шапка, навигация, панель периода, подсказки — прячем, сетку
+   разворачиваем без прокрутки и сжимаем до ширины страницы (--vp-print-scale),
+   иначе правый край периода отрезался бы на второй лист. */
+@media print {
+  @page {
+    size: A3 landscape;
+    margin: 8mm;
+  }
+
+  html,
+  body {
+    background: #fff !important;
+  }
+
+  body::before,
+  header.glass-navy,
+  [data-vessels-toolbar],
+  [data-wysiwyg-hint],
+  [data-live],
+  .no-print {
+    display: none !important;
+  }
+
+  main {
+    max-width: none !important;
+    padding: 0 !important;
+  }
+
+  /* стекло в печати не нужно, а backdrop-filter к тому же ломает вёрстку листа */
+  .panel {
+    background: #fff !important;
+    backdrop-filter: none !important;
+    box-shadow: none !important;
+    border: 1px solid #cfd8e3;
+  }
+
+  [data-vp-grid] {
+    max-height: none !important;
+    overflow: visible !important;
+    border: 0 !important;
+  }
+
+  [data-vp-print] {
+    zoom: var(--vp-print-scale, 1);
+  }
+
+  /* цвета полос — часть смысла плана, печатаем их как на экране */
+  * {
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+}

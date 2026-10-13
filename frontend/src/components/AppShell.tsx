@@ -24,6 +24,7 @@ export function AppShell({
   scopeLabel,
   actions,
   live,
+  wide,
 }: {
   children: React.ReactNode;
   asOf?: string;
@@ -31,6 +32,8 @@ export function AppShell({
   actions?: React.ReactNode;
   /** возраст данных из useLive: «обновлено N мин назад» + бейдж устаревания */
   live?: Live;
+  /** на всю ширину окна: план постановки читают поперёк, 1500px ему тесно */
+  wide?: boolean;
 }) {
   const { user, logout } = useAuth();
   const settings = usePublicSettings();
@@ -66,7 +69,7 @@ export function AppShell({
           контент, и blur(16px) размывает его в мягкое navy-марево. Текст белый —
           контраст 11.5:1, снизу тонкая голубая рамка brand-sky. */}
       <header ref={headerRef} className="glass-navy sticky top-0 z-20 text-white">
-        <div className="mx-auto max-w-[1500px] px-6">
+        <div className={`mx-auto ${wide ? "max-w-none px-3" : "max-w-[1500px] px-6"}`}>
           {/* flex-wrap: на узком экране навигация и блок пользователя перестают
               влезать в одну строку — без переноса страница уезжает в горизонт */}
           <div className="flex flex-wrap items-center gap-x-4 gap-y-1 pt-3">
@@ -148,7 +151,7 @@ export function AppShell({
         </div>
       </header>
 
-      <main className="mx-auto max-w-[1500px] px-6 py-6 space-y-5">{children}</main>
+      <main className={`mx-auto ${wide ? "max-w-none px-3" : "max-w-[1500px] px-6"} py-6 space-y-5`}>{children}</main>
     </div>
   );
 }

@@ -27,8 +27,14 @@ import {
   slotsCount, SLOT_HOURS, ymd,
 } from "../vessels";
 
-/** Ширина одного слота в пикселях: 4 слота = сутки ≈ 132px, читается и на ноутбуке. */
-const SLOT_W = 33;
+/**
+ * Ширина слота. Минимум — тот, при котором ещё читается «00»; дальше поле
+ * растягиваем на всю доступную ширину, чтобы план не обрывался задолго до
+ * правого края экрана (недельный период на широком мониторе оставлял ~360 px
+ * пустоты).
+ */
+const SLOT_W_MIN = 22;
+const SLOT_W_MAX = 64;
 /** Левая липкая колонка с причалом. */
 const LEFT_W = 168;
 /** Высота одной ячейки вертикальной шкалы = 10 метров длины причала. */
@@ -117,7 +123,14 @@ export default function VesselsPage() {
   const [freeHint, setFreeHint] = useState("");
   // WYSIWYG: карандаш превращает полосы в ручки — судно двигают мышью
   const [wysiwyg, setWysiwyg] = useState(false);
-  const [drag, setDrag] = useState<{ id: number; startX: number; startY: number; dx: number; dy: number } | null>(null);
+  // перетаскивание считает не «дельту от старта», а где курсор сейчас: блок
+  // причала под курсором = целевой причал, поэтому судно переезжает с РП-2 на
+  // РП-3 одним движением
+  const [drag, setDrag] = useState<{
+    id: number; startX: number; dx: number; grabY: number; ownTop: number;
+    blocks: { id: number; top: number; height: number }[];
+    berthId: number; offsetM: number; topInBlock: number;
+  } | null>(null);
   // после перетаскивания клик по полосе не должен открывать карточку
   const suppressClick = useRef(false);
 
@@ -139,6 +152,31 @@ export default function VesselsPage() {
 
   const days = useMemo(() => daysInRange(from, to), [from, to]);
   const totalSlots = days.length * SLOT_HOURS.length;
+
+  // поле плана обязано доставать до правого края: ширину слота считаем от
+  // реальной ширины контейнера, а не зашиваем
+  const gridRef = useRef<HTMLDivElement>(null);
+  const [availW, setAvailW] = useState(0);
+  useEffect(() => {
+    const el = gridRef.current;
+    if (!el) return;
+    const measure = () => setAvailW(el.clientWidth);
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    window.addEventListener("resize", measure);
+    return () => {
+      ro.disconnect();
+      window.removeEventListener("resize", measure);
+    };
+  }, [plan]);
+  const slotW = useMemo(() => {
+    if (!availW || !totalSlots) return SLOT_W_MIN;
+    // дробная ширина намеренно: округляя до целых пикселей, справа остаётся
+    // незаполненная полоса (до половины слота), а поле должно доставать до края
+    const fit = (availW - LEFT_W) / totalSlots;
+    return Math.max(SLOT_W_MIN, Math.min(SLOT_W_MAX, fit));
+  }, [availW, totalSlots]);
   const berths = plan?.berths.filter((b) => b.is_active) ?? [];
 
   /** Блоки сетки: по одному на причал. Внутри — шкала длины, 10 м на ячейку. */
@@ -235,26 +273,74 @@ export default function VesselsPage() {
 
   /* -------------------------- WYSIWYG: судно мышью -------------------------- */
 
+  /** Поле шкалы под курсором; в шапке причала (между полями) — ближайший по центру. */
+  const pickBlock = (blocks: { id: number; top: number; height: number }[], y: number) => {
+    if (!blocks.length) return null;
+    const hit = blocks.find((b) => y >= b.top && y < b.top + b.height);
+    if (hit) return hit;
+    let best = blocks[0];
+    let bestD = Math.abs(y - (blocks[0].top + blocks[0].height / 2));
+    for (const b of blocks) {
+      const d = Math.abs(y - (b.top + b.height / 2));
+      if (d < bestD) {
+        best = b;
+        bestD = d;
+      }
+    }
+    return best;
+  };
+
   const startDrag = (e: React.PointerEvent, p: Placement) => {
-    (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
-    setDrag({ id: p.id, startX: e.clientX, startY: e.clientY, dx: 0, dy: 0 });
+    const bar = e.currentTarget as HTMLElement;
+    bar.setPointerCapture?.(e.pointerId);
+    const barTop = bar.getBoundingClientRect().top;
+    // мериим поля шкалы, а не блоки: у блока сверху строка с названием причала,
+    // и отсчёт метров от неё съехал бы на полтора десятка метров
+    const blocks = [...document.querySelectorAll<HTMLElement>("[data-berth-scale]")]
+      .map((el) => {
+        const r = el.getBoundingClientRect();
+        return { id: Number(el.dataset.berthScale), top: r.top, height: r.height };
+      })
+      .filter((b) => Number.isFinite(b.id));
+    setDrag({
+      id: p.id,
+      startX: e.clientX,
+      dx: 0,
+      grabY: e.clientY - barTop,
+      ownTop: blocks.find((b) => b.id === p.berth_id)?.top ?? barTop,
+      blocks,
+      berthId: p.berth_id,
+      offsetM: p.offset_m ?? 0,
+      topInBlock: lengthGeometry(p, CELL_H).top,
+    });
   };
 
   const moveDrag = (e: React.PointerEvent, p: Placement) => {
     if (!drag || drag.id !== p.id) return;
-    setDrag({ ...drag, dx: e.clientX - drag.startX, dy: e.clientY - drag.startY });
+    const block = pickBlock(drag.blocks, e.clientY);
+    if (!block) {
+      setDrag({ ...drag, dx: e.clientX - drag.startX });
+      return;
+    }
+    const berth = berths.find((b) => b.id === block.id);
+    // судно без длины занимает причал целиком — двигать его по метрам нельзя
+    const room = berth?.length_m && p.length_m ? Math.max(berth.length_m - p.length_m, 0) : 0;
+    const raw = ((e.clientY - block.top - drag.grabY) / CELL_H) * M_PER_CELL;
+    const offsetM = Math.min(Math.max(Math.round(raw / 5) * 5, 0), room);
+    setDrag({ ...drag, dx: e.clientX - drag.startX, berthId: block.id, offsetM });
   };
 
   const endDrag = async (p: Placement) => {
     if (!drag) return;
-    const { dx, dy } = drag;
+    const { dx, berthId, offsetM } = drag;
     setDrag(null);
-    const slots = Math.round(dx / SLOT_W);
-    const meters = Math.round((dy / CELL_H) * (M_PER_CELL / 5)) * 5;
-    if (!slots && !meters) return;
+    const slots = Math.round(dx / slotW);
+    const same =
+      !slots && berthId === p.berth_id && offsetM === (p.offset_m ?? 0);
+    if (same) return;
     suppressClick.current = true;
     window.setTimeout(() => (suppressClick.current = false), 0);
-    await movePlacement(p, slots, meters);
+    await movePlacement(p, { slots, berthId, offsetM });
   };
 
   /** Клавиатура вместо мыши: стрелки — слот по времени и 5 м по причалу. */
@@ -265,26 +351,35 @@ export default function VesselsPage() {
     const move = step[e.key];
     if (!move) return;
     e.preventDefault();
-    await movePlacement(p, move[0], move[1]);
+    await movePlacement(p, { slots: move[0], berthId: p.berth_id, offsetM: (p.offset_m ?? 0) + move[1] });
   };
 
-  /** Сдвинуть постановку на N слотов по времени и M метров у причала. */
-  const movePlacement = async (p: Placement, slots: number, meters: number) => {
-    const berth = berths.find((b) => b.id === p.berth_id);
-    const start = addSlots(parseLocal(p.starts_at), slots);
-    const end = addSlots(parseLocal(p.ends_at), slots);
+  /** Переставить: на N слотов по времени, на причал `berthId` и на отметку `offsetM`. */
+  const movePlacement = async (
+    p: Placement,
+    dest: { slots: number; berthId: number; offsetM: number },
+  ) => {
+    const berth = berths.find((b) => b.id === dest.berthId);
+    const start = addSlots(parseLocal(p.starts_at), dest.slots);
+    const end = addSlots(parseLocal(p.ends_at), dest.slots);
     if (start < new Date(`${from}T00:00:00`) || end > new Date(`${to}T23:59:59`)) {
       setError("Судно нельзя вынести за границы выбранного периода");
       return;
     }
-    let offset = (p.offset_m ?? 0) + meters;
-    offset = berth?.length_m
-      ? Math.min(Math.max(offset, 0), Math.max(berth.length_m - (p.length_m ?? 0), 0))
-      : Math.max(offset, 0);
+    const offset =
+      berth?.length_m && p.length_m
+        ? Math.min(Math.max(dest.offsetM, 0), Math.max(berth.length_m - p.length_m, 0))
+        : Math.max(dest.offsetM, 0);
     try {
-      await api.updatePlacement(p.id, { starts_at: isoLocal(start), ends_at: isoLocal(end), offset_m: offset });
+      await api.updatePlacement(p.id, {
+        starts_at: isoLocal(start),
+        ends_at: isoLocal(end),
+        offset_m: offset,
+        berth_id: dest.berthId,
+      });
       setError("");
-      setSaved(`${p.vessel}: ${start.toLocaleDateString("ru-RU")} · ${offset} м`);
+      const moved = dest.berthId !== p.berth_id ? ` → ${berth?.code}` : "";
+      setSaved(`${p.vessel}${moved}: ${start.toLocaleDateString("ru-RU")} · ${offset} м`);
       window.setTimeout(() => setSaved(""), 5000);
       await load();
     } catch (e) {
@@ -308,11 +403,32 @@ export default function VesselsPage() {
   };
 
   const formBerth = berths.find((b) => b.id === form?.berth_id);
-  const gridWidth = LEFT_W + totalSlots * SLOT_W;
+  const gridWidth = LEFT_W + totalSlots * slotW;
+
+  /* ------------------------------- PDF / печать ------------------------------ */
+
+  /**
+   * PDF — это печать браузера («Сохранить как PDF»). Другого способа дать
+   * векторный текст с кириллицёй и поиском по PDF без тяжёлых зависимостей нет:
+   * рисовать сетку картинкой (html2canvas) нельзя — панели на backdrop-filter
+   * он не умеет, а план бы и поехал по цветам, и стал бы нечитаемым.
+   *
+   * В файл уходит ровно то, что выбрано сейчас: период, причалы и масштаб.
+   * Сетку перед диалогом печатаем без прокрутки и сжимаем до ширины страницы,
+   * чтобы правый край не отрезался.
+   */
+  const exportPdf = () => {
+    // A3 landscape с полями 8 мм ≈ 1527 px при 96 dpi
+    const printable = 1527;
+    const scale = Math.min(1, +(printable / Math.max(gridWidth, 1)).toFixed(3));
+    document.documentElement.style.setProperty("--vp-print-scale", String(scale));
+    window.print();
+  };
 
   return (
     <AppShell
       asOf={undefined}
+      wide
       scopeLabel={`${days.length} сут · ${berths.length} причалов`}
     >
       <div className="panel p-4" data-vessels-page>
@@ -365,6 +481,14 @@ export default function VesselsPage() {
             aria-label="Конец периода"
             data-period-to
           />
+          <button
+            className="btn btn-mini btn-ghost"
+            onClick={exportPdf}
+            title="Сохранить план в PDF: в файл уходит выбранный период целиком"
+            data-admin-action="export-pdf"
+          >
+            ⤓ PDF
+          </button>
           <button className="btn btn-mini btn-ghost" onClick={load} disabled={busy}>
             {busy ? "Загрузка…" : "Обновить"}
           </button>
@@ -417,8 +541,8 @@ export default function VesselsPage() {
         )}
 
         {/* Сетка: горизонтальная прокрутка обязательна — месяц это 124 слота */}
-        <div className="mt-4 overflow-auto max-h-[68vh] border border-ink-700 rounded-md" data-vp-grid>
-          <div style={{ width: gridWidth }} className="relative">
+        <div ref={gridRef} className="mt-4 overflow-auto max-h-[68vh] border border-ink-700 rounded-md" data-vp-grid>
+          <div style={{ width: gridWidth }} className="relative" data-vp-print>
             {/* шапка: сутки + подписи слотов */}
             <div className="flex sticky top-0 z-20 bg-white/90 backdrop-blur border-b border-ink-700">
               <div
@@ -431,7 +555,7 @@ export default function VesselsPage() {
                 <div
                   key={d}
                   className={`border-r border-ink-700 ${isWeekend(d) ? "bg-ink-800" : ""}`}
-                  style={{ width: SLOT_W * 4 }}
+                  style={{ width: slotW * 4 }}
                   data-day={d}
                 >
                   <div className="text-[11px] text-center text-ink-300 py-0.5">{dmy(d).slice(0, 5)}</div>
@@ -440,7 +564,7 @@ export default function VesselsPage() {
                       <div
                         key={h}
                         className="text-[9px] text-center text-ink-400 border-l border-ink-700 first:border-l-0"
-                        style={{ width: SLOT_W }}
+                        style={{ width: slotW }}
                       >
                         {String(h).padStart(2, "0")}
                       </div>
@@ -452,7 +576,13 @@ export default function VesselsPage() {
 
             {/* один блок на причал: заголовок, затем шкала длины 10 м на ячейку */}
             {blocks.map(({ berth, cells, items }) => (
-              <div key={berth.id} className="border-b border-ink-700" data-berth-block={berth.code}>
+              <div
+                key={berth.id}
+                className={`border-b border-ink-700 ${drag && drag.berthId === berth.id && drag.berthId !== items[0]?.berth_id ? "ring-2 ring-inset ring-brand-sky" : ""}`}
+                data-berth-block={berth.code}
+                data-berth-id={berth.id}
+                data-drop-target={drag && drag.berthId === berth.id ? "1" : "0"}
+              >
                 <div className="flex bg-ink-900/5">
                   <div
                     className="sticky left-0 z-10 bg-white/95 border-r border-ink-700 px-2 py-0.5 text-xs"
@@ -465,7 +595,7 @@ export default function VesselsPage() {
                       </span>
                     ) : null}
                   </div>
-                  <div className="text-[10px] text-ink-400 px-2 py-0.5" style={{ width: totalSlots * SLOT_W }}>
+                  <div className="text-[10px] text-ink-400 px-2 py-0.5" style={{ width: totalSlots * slotW }}>
                     {berth.length_m
                       ? `${berth.length_m} м длины · ${cells} ячеек по ${10} м`
                       : "метраж причала не задан · показываем 100 м"}
@@ -487,13 +617,13 @@ export default function VesselsPage() {
                     ))}
                   </div>
 
-                  <div className="relative" style={{ width: totalSlots * SLOT_W, height: cells * CELL_H }}>
+                  <div className="relative" style={{ width: totalSlots * slotW, height: cells * CELL_H }} data-berth-scale={berth.id}>
                     {/* фоновые колонки: выходные подсвечены */}
                     {days.map((d) => (
                       <div
                         key={d}
                         className={`absolute top-0 bottom-0 border-r border-ink-700 ${isWeekend(d) ? "bg-ink-800/70" : ""}`}
-                        style={{ left: days.indexOf(d) * SLOT_W * 4, width: SLOT_W * 4 }}
+                        style={{ left: days.indexOf(d) * slotW * 4, width: slotW * 4 }}
                       />
                     ))}
                     {/* горизонтальная шкала: граница каждой десятки метров */}
@@ -516,15 +646,22 @@ export default function VesselsPage() {
                       const canDrag = wysiwyg && canEdit && !busy;
                       // пока тащим, полоса едет за курсором с тем же шагом, с каким
                       // потом сохранится: слот по горизонтали, 5 м по вертикали
-                      const shiftX = dragging ? Math.round(drag.dx / SLOT_W) * SLOT_W : 0;
-                      const shiftY = dragging ? Math.round(drag.dy / (CELL_H / 2)) * (CELL_H / 2) : 0;
+                      const shiftX = dragging ? Math.round(drag.dx / slotW) * slotW : 0;
+                      // вертикаль считаем от блока-цели: если это другой причал,
+                      // полоса доезжает до него и встаёт на его отметку
+                      const shiftY = dragging
+                        ? (drag.blocks.find((b) => b.id === drag.berthId)?.top ?? drag.ownTop) -
+                          drag.ownTop +
+                          (drag.offsetM / M_PER_CELL) * CELL_H -
+                          drag.topInBlock
+                        : 0;
                       return (
                         <button
                           key={p.id}
                           className={`absolute rounded-md text-left text-[11px] px-1.5 text-white shadow-sm hover:brightness-110 focus:outline-none focus:ring-2 focus:ring-brand-sky ${canDrag ? "cursor-move touch-none" : ""} ${dragging ? "z-40 ring-2 ring-brand-sky" : ""}`}
                           style={{
-                            left: geo.left * SLOT_W,
-                            width: geo.width * SLOT_W - 3,
+                            left: geo.left * slotW,
+                            width: geo.width * slotW - 3,
                             top: v.top + 1,
                             height,
                             transform: shiftX || shiftY ? `translate(${shiftX}px, ${shiftY}px)` : undefined,

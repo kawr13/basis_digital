@@ -86,7 +86,7 @@ async function cleanup() {
   // тестовые причалы удаляем совсем: выключенный причал остаётся в справочнике,
   // и после десятка прогонов администратор видит в плане мусор вместо причалов
   for (const b of await api("/api/vessels/berths").then((r) => r.json())) {
-    if (b.code.startsWith("QA-")) {
+    if (/^Q[AB]-/.test(b.code)) {
       await api(`/api/vessels/berths/${b.id}`, "DELETE");
     }
   }
@@ -95,6 +95,7 @@ await cleanup();
 
 // отдельный причал для теста: он всегда свободен, и его не занимают демо-данные
 const BERTH_CODE = `QA-${Date.now().toString(36)}`;
+const BERTH2_CODE = `QB-${Date.now().toString(36)}`;
 const testBerth = await api("/api/vessels/berths", "POST", { code: BERTH_CODE, length_m: 120, lanes: 2 })
   .then((r) => r.json());
 
@@ -167,6 +168,26 @@ const sticky = await page.evaluate(() => {
   return r.left >= gr.left - 1 && r.left < gr.left + 60;
 });
 ok(sticky, "колонка причала остаётся липкой при прокрутке");
+
+// ─────────────────────────── поле на всю ширину ───────────────────────────
+// недельный период обязан занимать всю ширину: раньше слот был зашит 33 px,
+// и на широком экране справа оставалась пустая полоса ~360 px
+await page.click("[data-preset='7']");
+await page.waitForTimeout(900);
+const fit = await page.evaluate(() => {
+  const g = document.querySelector("[data-vp-grid]");
+  const inner = document.querySelector("[data-vp-print]");
+  return {
+    avail: g.clientWidth,
+    inner: Math.round(inner.getBoundingClientRect().width),
+    slot: Math.round(document.querySelector("[data-day]").getBoundingClientRect().width / 4),
+  };
+});
+ok(Math.abs(fit.inner - fit.avail) <= 2,
+   `поле дотянуто до правого края: ${fit.inner}px при ${fit.avail}px доступных`);
+ok(fit.slot > 33, `слот на широком экране стал шире: ${fit.slot}px вместо зашитых 33px`);
+await page.click("[data-preset='31']");
+await page.waitForTimeout(700);
 
 // ------------------------------------------------------- создание из UI ----
 const VESSEL = `QA SHIP ${Date.now().toString(36)}`;
@@ -263,6 +284,31 @@ ok(fitErr.includes("длина причала 120 м"), `судно длинне
 await page.click("[data-modal='placement-form'] [data-admin-action='close-modal']");
 await page.waitForSelector("[data-modal='placement-form']", { state: "detached" });
 
+// ────────────────────────────────── PDF / печать ──────────────────────────────────
+const pdfBtn = page.locator("[data-admin-action='export-pdf']");
+ok((await pdfBtn.count()) === 1, "кнопка «⤓ PDF» на месте");
+await page.evaluate(() => { window.print = () => {}; });   // диалог в headless не открываем
+await pdfBtn.click();
+const scale = await page.evaluate(() =>
+  getComputedStyle(document.documentElement).getPropertyValue("--vp-print-scale").trim());
+ok(+scale > 0 && +scale <= 1, `план подгоняется под ширину страницы: масштаб ${scale}`);
+await page.emulateMedia({ media: "print" });
+await page.waitForTimeout(300);
+const printStyle = await page.evaluate(() => {
+  const g = getComputedStyle(document.querySelector("[data-vp-grid]"));
+  return {
+    header: getComputedStyle(document.querySelector("header.glass-navy")).display,
+    toolbar: getComputedStyle(document.querySelector("[data-vessels-toolbar]")).display,
+    maxH: g.maxHeight,
+    overflow: g.overflowY,
+  };
+});
+ok(printStyle.header === "none" && printStyle.toolbar === "none",
+   "в PDF не уедут шапка кабинета и панель управления");
+ok(printStyle.maxH === "none" && printStyle.overflow === "visible",
+   "сетка в печати разворачивается целиком, без прокрутки");
+await page.emulateMedia({ media: "screen" });
+
 // ───────────────────────────── WYSIWYG: перетаскивание мышью ─────────────────────────
 const pencil = page.locator("[data-admin-action='wysiwyg']");
 ok((await pencil.count()) === 1, "карандаш режима перетаскивания есть");
@@ -276,11 +322,13 @@ const before = await page.evaluate((name) => {
   const r = el.getBoundingClientRect();
   return { offset: el.dataset.offsetM, left: Math.round(r.left), top: Math.round(r.top) };
 }, VESSEL);
+const slotPx = await page.evaluate(() =>
+  Math.round(document.querySelector("[data-day]").getBoundingClientRect().width / 4));
 const box = await page.locator(`[data-vp-bar][data-offset-m="${before.offset}"]`)
   .filter({ hasText: VESSEL }).first().boundingBox();
 await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
 await page.mouse.down();
-await page.mouse.move(box.x + box.width / 2 + 33, box.y + box.height / 2 + 12, { steps: 6 });
+await page.mouse.move(box.x + box.width / 2 + slotPx, box.y + box.height / 2 + 12, { steps: 6 });
 await page.mouse.up();
 await page.waitForFunction((name) => {
   const el = [...document.querySelectorAll("[data-vp-bar]")].find((b) => b.textContent.includes(name));
@@ -292,8 +340,8 @@ const after = await page.evaluate((name) => {
   return { offset: el.dataset.offsetM, left: Math.round(r.left) };
 }, VESSEL);
 ok(after.offset === "10", `мышью передвинули место у причала: ${before.offset} → ${after.offset} м`);
-ok(Math.abs(after.left - before.left - 33) <= 2,
-   `мышью передвинули по времени: +1 слот (${after.left - before.left}px)`);
+ok(Math.abs(after.left - before.left - slotPx) <= 2,
+   `мышью передвинули по времени: +1 слот (${after.left - before.left}px при слоте ${slotPx}px)`);
 ok((await page.locator("[data-modal='placement-detail']").count()) === 0,
    "после перетаскивания карточка не открылась (клик не подменился)");
 
@@ -328,6 +376,53 @@ const stillThere = await page.evaluate((name) => {
   return el?.dataset.offsetM;
 }, VESSEL);
 ok(stillThere === "10", "без карандаша перетаскивание не работает");
+ok((await page.locator("[data-modal='placement-detail']").count()) === 1,
+   "без карандаша полоса осталась кнопкой: клик открыл карточку");
+await page.keyboard.press("Escape");
+await page.waitForSelector("[data-modal='placement-detail']", { state: "detached", timeout: 8000 });
+
+// ───────────────────── перетаскивание между причалами ─────────────────────
+await pencil.click();
+await page.waitForSelector("[data-wysiwyg-hint]");
+const second = await api("/api/vessels/berths", "POST", { code: BERTH2_CODE, length_m: 200, lanes: 2 })
+  .then((r) => r.json());
+ok(second.code === BERTH2_CODE, `второй тестовый причал ${BERTH2_CODE} создан`);
+await page.reload({ waitUntil: "networkidle" });
+await page.waitForSelector("[data-berth-block]");
+await page.waitForTimeout(600);
+await page.click("[data-admin-action='wysiwyg']");
+await page.waitForSelector("[data-wysiwyg-hint]");
+
+const src = await page.locator(`[data-vp-bar]`).filter({ hasText: VESSEL }).first().boundingBox();
+const dst = await page.locator(`[data-berth-block="${BERTH2_CODE}"] [data-berth-scale]`).boundingBox();
+ok(!!src && !!dst && dst.y > src.y, `цель ниже по сетке: ${dst?.y} > ${src?.y}`);
+await page.mouse.move(src.x + 30, src.y + src.height / 2);
+await page.mouse.down();
+await page.mouse.move(src.x + 30, dst.y + 60, { steps: 14 });
+await page.waitForTimeout(200);
+const overTarget = await page.evaluate((code) => {
+  const el = [...document.querySelectorAll("[data-berth-block]")].find((b) => b.dataset.berthBlock === code);
+  return el?.dataset.dropTarget === "1";
+}, BERTH2_CODE);
+ok(overTarget, "причал-цель подсвечивается, пока над ним курсор");
+await page.mouse.move(src.x + 30, dst.y + 60, { steps: 2 });
+await page.mouse.up();
+await page.waitForFunction(
+  ({ name, code }) => [...document.querySelectorAll("[data-vp-bar]")].some(
+    (b) => b.textContent.includes(name) && b.dataset.berth === code,
+  ),
+  { name: VESSEL, code: BERTH2_CODE },
+  { timeout: 8000 },
+);
+const moved = await page.evaluate((name) => {
+  const el = [...document.querySelectorAll("[data-vp-bar]")].find((b) => b.textContent.includes(name));
+  return el ? { berth: el.dataset.berth, offset: el.dataset.offsetM } : null;
+}, VESSEL);
+ok(moved?.berth === BERTH2_CODE,
+   `судно переехало между причалами: ${moved?.berth} · ${moved?.offset} м`);
+const saved2 = (await page.textContent("[data-saved-note]")) || "";
+ok(saved2.includes(BERTH2_CODE), `и это подписано в ответе: «${saved2}»`);
+await pencil.click();
 await page.click("[role=alert] ~ * [data-admin-action], body", { position: { x: 1, y: 1 } }).catch(() => {});
 
 // ------------------------------------------------------ любой период ----
@@ -407,8 +502,11 @@ try {
   await page.fill('[data-field="end-date"]', plus(23));
   await page.click("[data-admin-action='save-placement']");
   await page.waitForSelector("[data-modal='placement-form']", { state: "detached", timeout: 8000 });
-  ok((await page.locator("[data-vp-bar]").filter({ hasText: MV }).count()) === 1,
-     "менеджер по настройке реально поставил судно");
+  await page.waitForFunction(
+    (name) => [...document.querySelectorAll("[data-vp-bar]")].some((b) => b.textContent.includes(name)),
+    MV, { timeout: 8000 },
+  );
+  ok(true, "менеджер по настройке реально поставил судно");
 
   // закрываем просмотр совсем: вкладка обязана исчезнуть, а маршрут — редиректить
   await api("/api/admin/settings", "PUT", { "vessels.view_roles": "admin,top" });
