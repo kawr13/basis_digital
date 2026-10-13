@@ -62,12 +62,19 @@ const apiTok = await fetch(`${API}/api/auth/login`, {
   .then((r) => r.json())
   .then((d) => d.access_token);
 
+const SETTINGS_KEYS = ["vessels.view_roles", "vessels.edit_roles", "vessels.delete_roles"];
+
 const api = (path, method = "GET", body) =>
   fetch(`${API}${path}`, {
     method,
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiTok}` },
     body: body ? JSON.stringify(body) : undefined,
   });
+
+// прогон обязан быть самовосстанавливающимся: если прошлый упал посередине,
+// в БД остаются его настройки (например view_roles=top) и тестовые учётки,
+// и следующий стартует уже «с правами не у того» — сбрасываем до начала
+await api("/api/admin/settings/reset", "POST", SETTINGS_KEYS);
 
 async function cleanup() {
   const plan = await api("/api/vessels/placements?from=2000-01-01&to=2100-01-01").then((r) => r.json());
@@ -96,6 +103,27 @@ page.on("pageerror", (e) => problems.push(`JS: ${e.message}`));
 await login(page, "admin", PASS);
 await page.click("[data-nav='vessels']");
 await page.waitForSelector("[data-vessels-page]");
+{
+  // панель периода: компактно и у левого края плашки (в шапке кнопки были крупнее
+  // и уезжали в правый угол к «Выйти»)
+  const geo = await page.evaluate(() => {
+    const t = document.querySelector("[data-vessels-toolbar]");
+    const panel = document.querySelector("[data-vessels-page]");
+    const pr = panel.getBoundingClientRect();
+    const kids = [...t.children].map((el) => el.getBoundingClientRect());
+    return {
+      left: Math.round(kids[0].left - pr.left),
+      heights: kids.map((r) => Math.round(r.height)),
+      // строки считаем по центрам: align-items:center даёт разный top у
+      // элементов разной высоты, но строка при этом одна
+      rows: new Set(kids.map((r) => Math.round(r.top + r.height / 2))).size,
+      count: kids.length,
+    };
+  });
+  ok(geo.left <= 20, `панель периода начинается у левого края плашки (${geo.left}px)`);
+  ok(Math.max(...geo.heights) <= 30, `кнопки компактные: самая высокая ${Math.max(...geo.heights)}px`);
+  ok(geo.rows === 1, `вся панель периода в одну строку (${geo.count} элементов, ${geo.rows} строк)`);
+}
 // ждём именно строк сетки: панель появляется раньше, чем приходят причалы,
 // и иначе первый же подсчёт ловит пустой экран
 await page.waitForSelector("[data-lane]", { timeout: 15000 });
@@ -221,7 +249,6 @@ ok(hint.includes("ставят и правят") && hint.includes("топ-мен
    `менеджеру сказано, кто ведёт план: «${(hint.match(/План можно смотреть[^]*?\./) || ["—"])[0]}»`);
 
 // ------------------------------------------- права берутся из настроек админки ----
-const SETTINGS_KEYS = ["vessels.view_roles", "vessels.edit_roles", "vessels.delete_roles"];
 try {
   await api("/api/admin/settings", "PUT", { "vessels.edit_roles": "manager" });
   await login(page, "petrov", "demo1234");

@@ -46,6 +46,12 @@ ok(geo.logo.left >= geo.panel.left + 44 && geo.logo.left <= geo.panel.left + 52,
 ok(geo.logo.top >= geo.panel.top + 44 && geo.logo.top <= geo.panel.top + 52,
   `логотип вверху панели (top=${Math.round(geo.logo.top - geo.panel.top)}px от неё)`);
 ok(geo.logo.h <= 32, `логотип маленький: ${Math.round(geo.logo.h)}px в высоту`);
+// знак 230×35; в column-flex контейнере align-items:stretch растягивает img на всю
+// ширину панели, и логотип начинает выглядеть размазанным посередине
+const ratio = geo.logo.w / geo.logo.h;
+ok(Math.abs(ratio - 230 / 35) < 0.2, `пропорция логотипа сохранена: ${ratio.toFixed(2)} против ${(230 / 35).toFixed(2)}`);
+ok(geo.logo.right < geo.panel.right - 200,
+  `логотип не растянут по панели: занимает ${Math.round(geo.logo.w)}px из ${Math.round(geo.panel.w)}px`);
 
 const panelMid = geo.panel.top + geo.panel.h / 2;
 const titleMid = geo.title.top + geo.title.h / 2;

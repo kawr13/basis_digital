@@ -192,7 +192,7 @@ docker compose logs backend | grep администратор
 ```bash
 cd backend && python -m pytest            # 78 тестов: авторизация, права, отчёты, постановка, настройки
 node tools/ui_smoke.mjs                   # браузерный smoke: вход, ошибка входа, дашборд, выход
-node tools/ui_login.mjs                   # вход геометрией и цветом: логотип, центр заголовка, раскраска (9 проверок)
+node tools/ui_login.mjs                   # вход геометрией и цветом: логотип, центр заголовка, раскраска (11 проверок)
 node tools/ui_customization.mjs           # drag&drop, размеры плашек, сохранение, отчёты, CSV (22 проверки)
 node tools/ui_drilldown.mjs               # клики по графику/строке, панель деталей, Esc/Enter, права (28 проверок)
 node tools/ui_shots.mjs                   # скриншоты входа/дашборда/отчётов для проверки темы

@@ -211,45 +211,6 @@ export default function VesselsPage() {
     <AppShell
       asOf={undefined}
       scopeLabel={`${days.length} сут · ${berths.length} причалов`}
-      actions={
-        <>
-          {saved && (
-            <span className="text-[11px] text-ok" data-saved-note>{saved}</span>
-          )}
-          {PRESETS.map((p) => (
-            <button
-              key={p.days}
-              className={`btn text-xs ${to === addDays(from, p.days - 1) ? "btn-primary" : "btn-ghost"}`}
-              onClick={() => setPreset(p.days)}
-              data-preset={p.days}
-            >
-              {p.label}
-            </button>
-          ))}
-          <input
-            type="date"
-            className="field w-[140px]"
-            value={from}
-            onChange={(e) => setFrom(e.target.value)}
-            data-period-from
-          />
-          <input
-            type="date"
-            className="field w-[140px]"
-            value={to}
-            onChange={(e) => setTo(e.target.value)}
-            data-period-to
-          />
-          <button className="btn-ghost text-xs" onClick={load} disabled={busy}>
-            {busy ? "Загрузка…" : "Обновить"}
-          </button>
-          {canEdit && (
-            <button className="btn btn-primary text-xs" onClick={openCreate} data-admin-action="new-placement">
-              Новая постановка
-            </button>
-          )}
-        </>
-      }
     >
       <div className="panel p-4" data-vessels-page>
         <div className="flex flex-wrap items-center justify-between gap-3">
@@ -268,6 +229,51 @@ export default function VesselsPage() {
                 </span>
               ))}
             </div>
+          )}
+        </div>
+
+        {/* Период и действия — слева, компактно. В шапке эти кнопки были крупнее
+            и уезжали в правый угол к «Выйти», а план читают слева направо: управление
+            должно стоять там же, где начинается таблица. */}
+        <div className="mt-3 flex flex-wrap items-center gap-2" data-vessels-toolbar>
+          {PRESETS.map((p) => (
+            <button
+              key={p.days}
+              className={`btn btn-mini ${to === addDays(from, p.days - 1) ? "btn-primary" : "btn-ghost"}`}
+              onClick={() => setPreset(p.days)}
+              data-preset={p.days}
+            >
+              {p.label}
+            </button>
+          ))}
+          <input
+            type="date"
+            className="field-mini w-[132px]"
+            value={from}
+            onChange={(e) => setFrom(e.target.value)}
+            aria-label="Начало периода"
+            data-period-from
+          />
+          <input
+            type="date"
+            className="field-mini w-[132px]"
+            value={to}
+            onChange={(e) => setTo(e.target.value)}
+            aria-label="Конец периода"
+            data-period-to
+          />
+          <button className="btn btn-mini btn-ghost" onClick={load} disabled={busy}>
+            {busy ? "Загрузка…" : "Обновить"}
+          </button>
+          {canEdit && (
+            <button className="btn btn-mini btn-primary" onClick={openCreate} data-admin-action="new-placement">
+              Новая постановка
+            </button>
+          )}
+          {saved && (
+            <span className="text-[11px] text-ok" data-saved-note>
+              {saved}
+            </span>
           )}
         </div>
 

@@ -29,8 +29,11 @@ export default function LoginPage() {
       <aside className="relative hidden lg:block overflow-hidden bg-brand-navy text-white border-r border-brand-sky/30">
         <div className="relative h-full flex flex-col justify-between p-12">
           {/* Фирменный знак: маленький (h-7) в левом верхнем углу панели.
-              На глухом navy — светлая версия логотипа. */}
-          <img src="/logo-light.svg" alt="БазисПорт" width={230} height={35} className="h-7 w-auto" />
+              На глухом navy — светлая версия логотипа. self-start обязателен:
+              в column-flex контейнере align-items:stretch растягивает img на всю
+              ширину панели (657px при высоте 28px), и знак выглядит размазанным
+              где-то посередине. */}
+          <img src="/logo-light.svg" alt="БазисПорт" width={230} height={35} className="h-7 w-auto self-start" />
           {/* Продукт — Basis.Indicators, ровно по середине высоты панели (абсолютно:
               flex-отступы съели бы половину на логотип и строку внизу). Раскрашен как
               сам знак: белое первое слово, голубое второе. Голубой взят из знака

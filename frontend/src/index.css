@@ -114,6 +114,9 @@
     @apply btn;
     color: #ffffff;
     background-color: #1b3360; /* brand.navy */
+    /* рамка-заглушка: у .btn-ghost рамка есть, и без неё активная кнопка
+       периода на 2px ниже неактивной — переключение периода дёргает строку */
+    border: 1px solid transparent;
   }
   .btn-primary:hover:not(:disabled) {
     background-color: #24457a;
@@ -141,6 +144,14 @@
     @apply btn text-ink-300 hover:text-ink-100 hover:border-accent;
     background-color: #ffffff;
     border: 1px solid #cfd8e6; /* ink-600 */
+  }
+  /*
+   * Компактный вариант для панелей инструментов внутри плашек (период,
+   * «Обновить», «Новая постановка»). Объявлен после .btn/.btn-ghost/.btn-primary:
+   * специфичность та же, но кто позже — тот и перебивает отступы базовой кнопки.
+   */
+  .btn-mini {
+    @apply px-2.5 py-1 text-xs gap-1;
   }
   .chip {
     @apply inline-flex items-center gap-1 rounded px-2 py-0.5 text-[11px] font-medium;
