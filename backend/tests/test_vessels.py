@@ -363,3 +363,21 @@ def test_manage_right_includes_delete(client, admin_hdr):
         assert client.delete(f"/api/vessels/placements/{pid}", headers=hdr).status_code == 204
     finally:
         client.patch(f"/api/admin/users/{uid}", json={"vessel_right": None}, headers=admin_hdr)
+
+
+def test_rights_ship_with_the_user(client, admin_hdr):
+    """Вход и /me отдают посчитанные права — фронт прячет вкладку сразу, без
+    отдельного запроса настроек (иначе запрещённая вкладка успевает мигнуть)."""
+    body = client.post("/api/auth/login", json={"login": "petrov", "password": "demo1234"}).json()
+    assert body["user"]["vessel_rights"] == {"view": True, "edit": False, "delete": False}
+
+    hdr = {"Authorization": f"Bearer {body['access_token']}"}
+    assert client.get("/api/auth/me", headers=hdr).json()["vessel_rights"]["view"] is True
+
+    # закрываем просмотр менеджеру — права уезжают те же, что и у API
+    assert client.put("/api/admin/settings", json={"vessels.view_roles": "admin,top"},
+                      headers=admin_hdr).status_code == 200
+    assert client.get("/api/auth/me", headers=hdr).json()["vessel_rights"] == {
+        "view": False, "edit": False, "delete": False,
+    }
+    assert client.get("/api/vessels/placements", params=PERIOD, headers=hdr).status_code == 403

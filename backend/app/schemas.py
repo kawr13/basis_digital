@@ -14,6 +14,14 @@ class LoginRequest(BaseModel):
     password: str = Field(min_length=1, max_length=128)
 
 
+class VesselRightsOut(BaseModel):
+    """Права на «Постановку судов» в том виде, в каком их посчитал бэкенд."""
+
+    view: bool
+    edit: bool
+    delete: bool
+
+
 class UserOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -27,6 +35,9 @@ class UserOut(BaseModel):
     last_login_at: datetime | None = None
     # право на «Постановку судов»: пусто = по роли, иначе none|view|edit|manage
     vessel_right: str | None = None
+    # посчитанные права: фронт прячет вкладку и кнопку по ним, не дожидаясь
+    # /api/settings/public — иначе запрещённая вкладка успевает мигнуть
+    vessel_rights: VesselRightsOut = VesselRightsOut(view=False, edit=False, delete=False)
 
 
 class TokensOut(BaseModel):

@@ -251,6 +251,25 @@ try {
   await page.waitForTimeout(600);
   ok(page.url().endsWith("/") && (await page.locator("[data-vessels-page]").count()) === 0,
      "прямая ссылка /vessels у закрытой роли ведёт на сводку");
+
+  // Права приходят со входа вместе с пользователем, поэтому запрещённая вкладка
+  // не мигает, пока /api/settings/public в пути. Проверка с намеренно тормозящими
+  // настройками: иначе «скрыто» было бы видно только на втором кадре.
+  let slow = true;
+  const slowSettings = async (route) => {
+    if (slow) await new Promise((r) => setTimeout(r, 2500));
+    await route.continue().catch(() => undefined);
+  };
+  await page.route("**/api/settings/public", slowSettings);
+  await login(page, "petrov", "demo1234");
+  ok((await page.locator("[data-nav='vessels']").count()) === 0,
+     "вкладки нет сразу, ещё до ответа настроек");
+  await api("/api/admin/settings", "PUT", { "vessels.view_roles": "admin,top,manager" });
+  await login(page, "petrov", "demo1234");
+  ok((await page.locator("[data-nav='vessels']").count()) === 1,
+     "но и не прячемся в пустоту: с правом вкладка на месте при тех же тормозящих настройках");
+  slow = false;
+  await page.unroute("**/api/settings/public", slowSettings);
 } finally {
   await api("/api/admin/settings/reset", "POST", SETTINGS_KEYS);
 }

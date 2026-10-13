@@ -16,7 +16,11 @@ export type User = {
   last_login_at: string | null;
   /** право на «Постановку судов»: null = по роли, иначе none|view|edit|manage */
   vessel_right?: VesselRight | null;
+  /** те же права, но уже посчитанные бэкендом; приходят со входа и /me */
+  vessel_rights?: VesselRights;
 };
+
+export type VesselRights = { view: boolean; edit: boolean; delete: boolean };
 
 export type VesselRight = "none" | "view" | "edit" | "manage";
 

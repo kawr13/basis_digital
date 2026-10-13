@@ -12,24 +12,24 @@ from ..models import (
 )
 from ..schemas import AuditOut, UserCreate, UserOut, UserUpdate
 from ..security import hash_password, password_is_strong, random_password
-from ..services.vessels import VESSEL_RIGHTS
+from ..services.vessels import VESSEL_RIGHTS, rights_for
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
 admin_only = require_roles(Role.ADMIN)
 
 
-def _out(u: User) -> UserOut:
+def _out(u: User, db: Session) -> UserOut:
     return UserOut(
         id=u.id, login=u.login, full_name=u.full_name, role=u.role.value, email=u.email,
         all_warehouses=u.all_warehouses, warehouse_ids=u.warehouse_ids, last_login_at=u.last_login_at,
-        vessel_right=u.vessel_right,
+        vessel_right=u.vessel_right, vessel_rights=rights_for(db, u),
     )
 
 
 @router.get("/users", response_model=list[UserOut])
 def list_users(_: User = Depends(admin_only), db: Session = Depends(get_db)):
-    return [_out(u) for u in db.scalars(select(User).order_by(User.login))]
+    return [_out(u, db) for u in db.scalars(select(User).order_by(User.login))]
 
 
 @router.post("/users", response_model=UserOut, status_code=201)
@@ -52,7 +52,7 @@ def create_user(payload: UserCreate, db: Session = Depends(get_db), _: User = De
     db.add(AuditLog(user_id=user.id, login=login, action="admin.user_create", detail=f"role={user.role.value}"))
     db.commit()
     db.refresh(user)
-    return _out(user)
+    return _out(user, db)
 
 
 @router.patch("/users/{user_id}", response_model=UserOut)
@@ -96,7 +96,7 @@ def update_user(user_id: int, payload: UserUpdate, db: Session = Depends(get_db)
                     detail=f"target={user.login}"))
     db.commit()
     db.refresh(user)
-    return _out(user)
+    return _out(user, db)
 
 
 @router.post("/reset-password")
@@ -128,7 +128,7 @@ def unlock_user(user_id: int, db: Session = Depends(get_db), actor: User = Depen
                     detail=f"target={user.login}"))
     db.commit()
     db.refresh(user)
-    return _out(user)
+    return _out(user, db)
 
 
 @router.delete("/users/{user_id}", response_model=UserOut)
@@ -154,7 +154,7 @@ def deactivate_user(user_id: int, db: Session = Depends(get_db),
                     detail=f"target={user.login}"))
     db.commit()
     db.refresh(user)
-    return _out(user)
+    return _out(user, db)
 
 
 @router.get("/audit", response_model=list[AuditOut])

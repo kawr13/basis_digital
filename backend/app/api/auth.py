@@ -26,6 +26,7 @@ from ..deps import client_ip, current_user
 from ..models import AuditLog, RefreshToken, User, UserWarehouseScope, utcnow
 from ..schemas import ChangePasswordRequest, LoginRequest, TokensOut, UserOut
 from ..services import app_settings
+from ..services.vessels import rights_for as svc_rights
 from ..security import (
     create_access_token, hash_refresh, new_refresh_token, password_is_strong, verify_password,
 )
@@ -53,12 +54,12 @@ def _audit(db: Session, user_id: int | None, login: str | None, action: str, ip:
     db.commit()
 
 
-def _user_out(user: User) -> UserOut:
+def _user_out(user: User, db: Session) -> UserOut:
     return UserOut(
         id=user.id, login=user.login, full_name=user.full_name, role=user.role.value,
         email=user.email, all_warehouses=user.all_warehouses,
         warehouse_ids=user.warehouse_ids, last_login_at=user.last_login_at,
-        vessel_right=user.vessel_right,
+        vessel_right=user.vessel_right, vessel_rights=svc_rights(db, user),
     )
 
 
@@ -79,7 +80,7 @@ def _issue(db: Session, user: User, response: Response, ip: str, ua: str,
     db.commit()
     _set_refresh_cookie(response, raw)
     token, ttl = create_access_token(user.id, user.role.value)
-    return TokensOut(access_token=token, expires_in=ttl, user=_user_out(user))
+    return TokensOut(access_token=token, expires_in=ttl, user=_user_out(user, db))
 
 
 @router.post("/login", response_model=TokensOut)
@@ -176,8 +177,8 @@ def logout(request: Request, response: Response, db: Session = Depends(get_db)):
 
 
 @router.get("/me", response_model=UserOut)
-def me(user: User = Depends(current_user)):
-    return _user_out(user)
+def me(user: User = Depends(current_user), db: Session = Depends(get_db)):
+    return _user_out(user, db)
 
 
 @router.post("/change-password", status_code=status.HTTP_204_NO_CONTENT)

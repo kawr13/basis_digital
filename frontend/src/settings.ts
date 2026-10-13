@@ -70,15 +70,26 @@ export type VesselRights = { view: boolean; edit: boolean; delete: boolean };
 
 const RIGHT_LEVEL: Record<string, number> = { none: 0, view: 1, edit: 2, manage: 3 };
 
+type UserWithRights = {
+  role: string;
+  vessel_right?: string | null;
+  vessel_rights?: VesselRights | null;
+};
+
 /**
  * Та же логика, что в `app/services/vessels.py::rights_for`: личная графа
  * пользователя (`users.vessel_right`) перекрывает ролевые настройки.
+ *
+ * Сначала берём `vessel_rights` — их посчитал бэкенд и прислал со входа и `/me`:
+ * так вкладка «Постановка» и кнопка «Новая постановка» не мигают, пока не ответит
+ * `/api/settings/public`, и не остаются, если тот запрос недоступен.
  */
 export function resolveVesselRights(
-  user: { role: string; vessel_right?: string | null } | null,
+  user: UserWithRights | null,
   settings: PublicSettings | null,
 ): VesselRights {
   if (!user) return { view: false, edit: false, delete: false };
+  if (user.vessel_rights) return user.vessel_rights;
   const personal = user.vessel_right;
   if (personal) {
     const level = RIGHT_LEVEL[personal] ?? 0;
