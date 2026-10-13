@@ -43,6 +43,8 @@ def get_db():
 # ради одной графы. DDL одинаково проходит и на SQLite, и на PostgreSQL.
 _ADDED_COLUMNS = [
     ("users", "vessel_right", "VARCHAR(16)"),
+    ("vessel_placements", "length_m", "INTEGER"),
+    ("vessel_placements", "offset_m", "INTEGER NOT NULL DEFAULT 0"),
 ]
 
 

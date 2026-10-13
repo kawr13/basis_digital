@@ -1,10 +1,12 @@
 /**
  * «Постановка судов» — ручной планировочный документ.
  *
- * Это тот же план, что ведут на бумаге/в Excel: строки — причалы (у каждого
- * своя «дорожка»), колонки — сутки, разбитые на 4 слота по 6 часов, полосы —
- * суда. Отличие от остального кабинета: данные не из 1С, их заводит диспетчер,
- * поэтому здесь можно создавать и править строки, а посмотреть — любой период.
+ * План читается как лист миллиметровки: слева направо — время (сутки разбиты на
+ * 4 слота по 6 часов), сверху вниз — длина причала, 10 метров на ячейку (100 м —
+ * это 10 ячеек). Судно занимает полосу: отметка швартовки + его длина. Два судна
+ * мешают друг другу, только если пересекаются и по времени, и по метрам.
+ * Данные не из 1С: их заводит диспетчер, поэтому здесь можно создавать и править
+ * строки, а посмотреть — любой период.
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
@@ -20,15 +22,16 @@ import { Field, FormError, Modal, Notice, errText } from "../components/admin/ui
 import { dmy } from "../format";
 import { resolveVesselRights, roleListLabel, usePublicSettings } from "../settings";
 import {
-  addDays, barGeometry, barText, cargoColor, daysInRange, isWeekend, parseLocal,
-  periodLabel, slotLabel, slotsCount, SLOT_HOURS, ymd,
+  addDays, barGeometry, barText, cargoColor, daysInRange, isWeekend, lengthGeometry,
+  lengthLabel, parseLocal, periodLabel, rulerMarks, slotLabel, slotsCount, SLOT_HOURS, ymd,
 } from "../vessels";
 
 /** Ширина одного слота в пикселях: 4 слота = сутки ≈ 132px, читается и на ноутбуке. */
 const SLOT_W = 33;
 /** Левая липкая колонка с причалом. */
 const LEFT_W = 168;
-const ROW_H = 34;
+/** Высота одной ячейки вертикальной шкалы = 10 метров длины причала. */
+const CELL_H = 18;
 
 const PRESETS = [
   { label: "Неделя", days: 7 },
@@ -39,7 +42,10 @@ const PRESETS = [
 type Form = {
   id?: number;
   berth_id: number;
-  lane: number;
+  /** длина судна в метрах; пустая строка = не задана (занимает причал до конца) */
+  length_m: string;
+  /** отметка швартовки в метрах от начала причала */
+  offset_m: string;
   vessel: string;
   volume: string;
   cargo: string;
@@ -57,7 +63,8 @@ function formFrom(p: Placement | null, berths: Berth[]): Form {
   if (!p) {
     return {
       berth_id: berths[0]?.id ?? 0,
-      lane: 1,
+      length_m: "",
+      offset_m: "0",
       vessel: "",
       volume: "",
       cargo: "",
@@ -73,7 +80,8 @@ function formFrom(p: Placement | null, berths: Berth[]): Form {
   return {
     id: p.id,
     berth_id: p.berth_id,
-    lane: p.lane,
+    length_m: p.length_m == null ? "" : String(p.length_m),
+    offset_m: String(p.offset_m ?? 0),
     vessel: p.vessel,
     volume: p.volume ?? "",
     cargo: p.cargo ?? "",
@@ -105,6 +113,7 @@ export default function VesselsPage() {
   const [formError, setFormError] = useState("");
   const [saved, setSaved] = useState("");
   const [detail, setDetail] = useState<Placement | null>(null);
+  const [freeHint, setFreeHint] = useState("");
 
   const load = useCallback(async () => {
     setBusy(true);
@@ -126,20 +135,16 @@ export default function VesselsPage() {
   const totalSlots = days.length * SLOT_HOURS.length;
   const berths = plan?.berths.filter((b) => b.is_active) ?? [];
 
-  /** Строки сетки: причал × дорожка. */
-  const rows = useMemo(() => {
-    const out: { berth: Berth; lane: number; items: Placement[] }[] = [];
-    for (const b of berths) {
-      for (let lane = 1; lane <= Math.max(b.lanes, 1); lane += 1) {
-        out.push({
-          berth: b,
-          lane,
-          items: (plan?.placements ?? []).filter((p) => p.berth_id === b.id && p.lane === lane),
-        });
-      }
-    }
-    return out;
-  }, [berths, plan]);
+  /** Блоки сетки: по одному на причал. Внутри — шкала длины, 10 м на ячейку. */
+  const blocks = useMemo(
+    () =>
+      berths.map((b) => ({
+        berth: b,
+        cells: Math.max(b.length_cells ?? 10, 1),
+        items: (plan?.placements ?? []).filter((p) => p.berth_id === b.id),
+      })),
+    [berths, plan],
+  );
 
   const legend = useMemo(() => {
     const seen = new Map<string, string>();
@@ -171,7 +176,9 @@ export default function VesselsPage() {
     setFormError("");
     const body: PlacementInput = {
       berth_id: form.berth_id,
-      lane: form.lane,
+      lane: 1,
+      length_m: form.length_m.trim() ? Number(form.length_m) : null,
+      offset_m: form.offset_m.trim() ? Number(form.offset_m) : 0,
       vessel: form.vessel.trim(),
       volume: form.volume.trim() || null,
       cargo: form.cargo.trim() || null,
@@ -187,8 +194,36 @@ export default function VesselsPage() {
       window.setTimeout(() => setSaved(""), 6000);
       await load();
     } catch (e) {
-      // 409 — занятая дорожка: текст бэкенда объясняет, какое судно мешает
+      // 409 — на этом отрезке причала уже стоит судно: текст бэкенда объясняет,
+      // какое именно и где именно пересекаются метры
       setFormError(errText(e, "Не удалось сохранить"));
+    }
+  };
+
+  /** Подсказать свободное место: диспетчер не должен гадать и ловить 409. */
+  const findFree = async () => {
+    if (!form) return;
+    const len = Number(form.length_m);
+    if (!len || len <= 0) {
+      setFormError("Сначала укажите длину судна — тогда подскажу, где свободно");
+      return;
+    }
+    setFormError("");
+    try {
+      const spot = await api.freeOffset(
+        form.berth_id,
+        toIso(form.startDate, form.startHour),
+        toIso(form.endDate, form.endHour),
+        len,
+      );
+      if (spot.offset_m === null || !spot.fits) {
+        setFormError(`На причале ${spot.berth_length_m} м нет свободного куска в ${len} м на это время`);
+        return;
+      }
+      setForm({ ...form, offset_m: String(spot.offset_m) });
+      setFreeHint(`свободно с ${spot.offset_m} м`);
+    } catch (e) {
+      setFormError(errText(e, "Не удалось подобрать место"));
     }
   };
 
@@ -204,7 +239,7 @@ export default function VesselsPage() {
     }
   };
 
-  const laneCount = berths.find((b) => b.id === form?.berth_id)?.lanes ?? 1;
+  const formBerth = berths.find((b) => b.id === form?.berth_id);
   const gridWidth = LEFT_W + totalSlots * SLOT_W;
 
   return (
@@ -303,7 +338,7 @@ export default function VesselsPage() {
                 className="sticky left-0 z-30 bg-white/95 border-r border-ink-700 text-[11px] uppercase tracking-wider text-ink-400 px-2 py-1"
                 style={{ width: LEFT_W }}
               >
-                Причал / дорожка
+                Причал / метры
               </div>
               {days.map((d) => (
                 <div
@@ -328,58 +363,99 @@ export default function VesselsPage() {
               ))}
             </div>
 
-            {/* строки */}
-            {rows.map(({ berth, lane, items }) => (
-              <div key={`${berth.id}-${lane}`} className="flex border-b border-ink-700" data-lane={`${berth.code}|${lane}`}>
-                <div
-                  className="sticky left-0 z-10 bg-white/95 border-r border-ink-700 px-2 py-1 text-xs"
-                  style={{ width: LEFT_W }}
-                >
-                  <div className="font-medium">
-                    {berth.code}
-                    {berth.depth ? <span className="text-ink-400"> · {String(berth.depth).replace(".", ",")} м</span> : null}
+            {/* один блок на причал: заголовок, затем шкала длины 10 м на ячейку */}
+            {blocks.map(({ berth, cells, items }) => (
+              <div key={berth.id} className="border-b border-ink-700" data-berth-block={berth.code}>
+                <div className="flex bg-ink-900/5">
+                  <div
+                    className="sticky left-0 z-10 bg-white/95 border-r border-ink-700 px-2 py-0.5 text-xs"
+                    style={{ width: LEFT_W }}
+                  >
+                    <span className="font-medium">{berth.code}</span>
+                    {berth.depth ? (
+                      <span className="text-[10px] text-ink-400">
+                        {" "}· осадка {String(berth.depth).replace(".", ",")} м
+                      </span>
+                    ) : null}
                   </div>
-                  <div className="text-[10px] text-ink-400">
-                    дорожка {lane}
-                    {berth.length_m ? ` · ${berth.length_m} м` : ""}
+                  <div className="text-[10px] text-ink-400 px-2 py-0.5" style={{ width: totalSlots * SLOT_W }}>
+                    {berth.length_m
+                      ? `${berth.length_m} м длины · ${cells} ячеек по ${10} м`
+                      : "метраж причала не задан · показываем 100 м"}
                   </div>
                 </div>
 
-                <div className="relative" style={{ width: totalSlots * SLOT_W, height: ROW_H }}>
-                  {/* фоновые колонки: выходные подсвечены, сетка слотов */}
-                  {days.map((d) => (
-                    <div
-                      key={d}
-                      className={`absolute top-0 bottom-0 border-r border-ink-700 ${isWeekend(d) ? "bg-ink-800/70" : ""}`}
-                      style={{ left: days.indexOf(d) * SLOT_W * 4, width: SLOT_W * 4 }}
-                    />
-                  ))}
-
-                  {items.map((p) => {
-                    const geo = barGeometry(p, from, totalSlots);
-                    if (!geo) return null;
-                    const color = cargoColor(p.cargo);
-                    return (
-                      <button
-                        key={p.id}
-                        className="absolute top-1 h-[26px] rounded-md text-left text-[11px] px-1.5 truncate text-white shadow-sm hover:brightness-110 focus:outline-none focus:ring-2 focus:ring-brand-sky"
-                        style={{
-                          left: geo.left * SLOT_W,
-                          width: geo.width * SLOT_W - 3,
-                          background: `linear-gradient(180deg, ${color}f0, ${color}cc)`,
-                          borderLeft: geo.clippedStart ? "3px dotted rgba(255,255,255,.85)" : "3px solid rgba(0,0,0,.18)",
-                        }}
-                        title={`${barText(p)}${p.cargo ? ` · ${p.cargo}` : ""}\n${parseLocal(p.starts_at).toLocaleString("ru-RU")} — ${parseLocal(p.ends_at).toLocaleString("ru-RU")}`}
-                        onClick={() => setDetail(p)}
-                        data-vp-bar={p.id}
-                        data-berth={berth.code}
-                        data-cargo={(p.cargo || "").toUpperCase()}
+                <div className="flex">
+                  {/* линейка длины: подпись каждой ячейки в метрах */}
+                  <div className="sticky left-0 z-10 bg-white/95 border-r border-ink-700" style={{ width: LEFT_W }}>
+                    {rulerMarks(cells).map((m) => (
+                      <div
+                        key={m}
+                        className="num text-right pr-2 text-[9px] text-ink-400 border-t border-ink-700/50"
+                        style={{ height: CELL_H, lineHeight: `${CELL_H}px` }}
+                        data-ruler={m}
                       >
-                        {barText(p)}
-                        {geo.clippedEnd ? " …" : ""}
-                      </button>
-                    );
-                  })}
+                        {m}
+                      </div>
+                    ))}
+                  </div>
+
+                  <div className="relative" style={{ width: totalSlots * SLOT_W, height: cells * CELL_H }}>
+                    {/* фоновые колонки: выходные подсвечены */}
+                    {days.map((d) => (
+                      <div
+                        key={d}
+                        className={`absolute top-0 bottom-0 border-r border-ink-700 ${isWeekend(d) ? "bg-ink-800/70" : ""}`}
+                        style={{ left: days.indexOf(d) * SLOT_W * 4, width: SLOT_W * 4 }}
+                      />
+                    ))}
+                    {/* горизонтальная шкала: граница каждой десятки метров */}
+                    {Array.from({ length: cells - 1 }, (_, i) => (
+                      <div
+                        key={i}
+                        className="absolute left-0 right-0 border-t border-ink-700/40"
+                        style={{ top: (i + 1) * CELL_H }}
+                      />
+                    ))}
+
+                    {items.map((p) => {
+                      const geo = barGeometry(p, from, totalSlots);
+                      if (!geo) return null;
+                      const color = cargoColor(p.cargo);
+                      const v = lengthGeometry(p, CELL_H);
+                      // длину не задали — полоса идёт до конца причала; за блок не выходим
+                      const height = Math.max(10, Math.min(v.height, cells * CELL_H - v.top) - 2);
+                      return (
+                        <button
+                          key={p.id}
+                          className="absolute rounded-md text-left text-[11px] px-1.5 text-white shadow-sm hover:brightness-110 focus:outline-none focus:ring-2 focus:ring-brand-sky"
+                          style={{
+                            left: geo.left * SLOT_W,
+                            width: geo.width * SLOT_W - 3,
+                            top: v.top + 1,
+                            height,
+                            background: `linear-gradient(180deg, ${color}f0, ${color}cc)`,
+                            borderLeft: geo.clippedStart ? "3px dotted rgba(255,255,255,.85)" : "3px solid rgba(0,0,0,.18)",
+                          }}
+                          title={`${barText(p)} · ${lengthLabel(p)}${p.cargo ? ` · ${p.cargo}` : ""}\n${parseLocal(p.starts_at).toLocaleString("ru-RU")} — ${parseLocal(p.ends_at).toLocaleString("ru-RU")}`}
+                          onClick={() => setDetail(p)}
+                          data-vp-bar={p.id}
+                          data-berth={berth.code}
+                          data-cargo={(p.cargo || "").toUpperCase()}
+                          data-length-m={p.length_m ?? ""}
+                          data-offset-m={p.offset_m ?? 0}
+                        >
+                          <span className="block truncate">{p.vessel}</span>
+                          {height >= 30 ? (
+                            <span className="block truncate text-[10px] opacity-85">
+                              {[p.volume, p.length_m ? `${p.length_m} м` : null].filter(Boolean).join(" · ")}
+                            </span>
+                          ) : null}
+                          {geo.clippedEnd ? <span className="block text-[10px]">…</span> : null}
+                        </button>
+                      );
+                    })}
+                  </div>
                 </div>
               </div>
             ))}
@@ -397,7 +473,9 @@ export default function VesselsPage() {
           <dl className="grid grid-cols-2 gap-3 text-sm">
             <div>
               <dt className="panel-title">Причал</dt>
-              <dd>{berths.find((b) => b.id === detail.berth_id)?.code ?? "—"} · дорожка {detail.lane}</dd>
+              <dd>
+                {berths.find((b) => b.id === detail.berth_id)?.code ?? "—"} · {lengthLabel(detail)}
+              </dd>
             </div>
             <div>
               <dt className="panel-title">Груз</dt>
@@ -414,6 +492,12 @@ export default function VesselsPage() {
             <div>
               <dt className="panel-title">Объём / тоннаж</dt>
               <dd>{detail.volume || "—"}</dd>
+            </div>
+            <div>
+              <dt className="panel-title">Длина судна</dt>
+              <dd className="num" data-detail-length>
+                {detail.length_m ? `${detail.length_m} м` : "не указана — занимает причал до конца"}
+              </dd>
             </div>
             <div>
               <dt className="panel-title">Слотов в плане</dt>
@@ -465,7 +549,7 @@ export default function VesselsPage() {
               <select
                 className="field"
                 value={form.berth_id}
-                onChange={(e) => setForm({ ...form, berth_id: Number(e.target.value), lane: 1 })}
+                onChange={(e) => setForm({ ...form, berth_id: Number(e.target.value), offset_m: "0" })}
                 data-field="berth"
               >
                 {berths.map((b) => (
@@ -476,12 +560,40 @@ export default function VesselsPage() {
                 ))}
               </select>
             </Field>
-            <Field label="Дорожка" hint="сколько судов у причала одновременно">
-              <select className="field" value={form.lane} onChange={(e) => setForm({ ...form, lane: Number(e.target.value) })} data-field="lane">
-                {Array.from({ length: Math.max(laneCount, 1) }, (_, i) => i + 1).map((n) => (
-                  <option key={n} value={n}>{n}</option>
-                ))}
-              </select>
+            <Field
+              label="Длина судна, м"
+              hint={formBerth?.length_m ? `причал ${formBerth.code} — ${formBerth.length_m} м` : "метраж причала не задан"}
+            >
+              <input
+                className="field num"
+                type="number"
+                min={1}
+                max={500}
+                step={5}
+                value={form.length_m}
+                onChange={(e) => setForm({ ...form, length_m: e.target.value })}
+                placeholder="60"
+                data-field="length-m"
+              />
+            </Field>
+            <Field label="Место у причала, м" hint="отметка от начала причала, кратно 10 м">
+              <div className="flex gap-2">
+                <input
+                  className="field num"
+                  type="number"
+                  min={0}
+                  step={10}
+                  value={form.offset_m}
+                  onChange={(e) => setForm({ ...form, offset_m: e.target.value })}
+                  data-field="offset-m"
+                />
+                <button className="btn-ghost text-xs whitespace-nowrap" onClick={findFree} data-admin-action="find-free">
+                  Найти свободное
+                </button>
+              </div>
+              {freeHint ? (
+                <span className="mt-1 block text-[11px] text-ok" data-free-hint>{freeHint}</span>
+              ) : null}
             </Field>
             <Field label="Судно">
               <input className="field" value={form.vessel} onChange={(e) => setForm({ ...form, vessel: e.target.value })} data-field="vessel" placeholder="CROWN SAPPHIRE" />
@@ -523,7 +635,7 @@ export default function VesselsPage() {
             </Field>
           </div>
 
-          <Notice text="Если на дорожке уже стоит судно, кабинет не даст поставить второе и скажет, какое именно." />
+          <Notice text="Два судна мешают друг другу, только если пересекаются и по времени, и по метрам: 100 м причала — это 10 ячеек по 10 м. Кабинет не даст поставить судно так, чтобы оно вылезло за край причала или наехало на уже стоящее, и скажет, какое именно и где именно." />
         </Modal>
       )}
     </AppShell>

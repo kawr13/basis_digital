@@ -78,9 +78,41 @@ export function cargoColor(cargo: string | null): string {
   return PALETTE[hash % PALETTE.length];
 }
 
-/** Одна строка подписи полосы: «CROWN SAPPHIRE 5 500». */
+/** Одна строка подписи полосы: «CROWN SAPPHIRE 5 500».
+ *  Длину добавляем: теперь полоса — это ещё и метраж судна, а не только время. */
 export function barText(p: Placement): string {
-  return [p.vessel, p.volume].filter(Boolean).join(" ");
+  return [p.vessel, p.volume, p.length_m ? `${p.length_m} м` : null].filter(Boolean).join(" ");
+}
+
+/* ------------------------------- шкала длины (сверху вниз) ------------------------- */
+
+/** Одна ячейка вертикальной шкалы = 10 метров длины причала (100 м = 10 ячеек). */
+export const M_PER_CELL = 10;
+
+/** Отрезок длины, который занимает постановка. `to === null` — до конца причала
+ *  (длину не задали, занимаем консервативно). */
+export function spanM(p: Placement): { from: number; to: number | null } {
+  const from = p.offset_m ?? 0;
+  return p.length_m == null ? { from, to: null } : { from, to: from + p.length_m };
+}
+
+/** Пиксельная позиция полосы по шкале длины: метры → px. */
+export function lengthGeometry(p: Placement, cellH: number): { top: number; height: number } {
+  const { from, to } = spanM(p);
+  const top = (from / M_PER_CELL) * cellH;
+  const bottom = to === null ? Number.POSITIVE_INFINITY : (to / M_PER_CELL) * cellH;
+  return { top, height: bottom - top };
+}
+
+/** Метры в подпись: «0–60 м» или «60 м — до конца причала». */
+export function lengthLabel(p: Placement): string {
+  const { from, to } = spanM(p);
+  return to === null ? `${from} м — до конца причала` : `${from}–${to} м`;
+}
+
+/** Подписи линейки причала: 10, 20, … метров. */
+export function rulerMarks(cells: number): number[] {
+  return Array.from({ length: cells }, (_, i) => (i + 1) * M_PER_CELL);
 }
 
 export function periodLabel(from: string, to: string): string {

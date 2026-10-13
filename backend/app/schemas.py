@@ -4,7 +4,9 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, computed_field, Field
+
+from .services.vessels import length_cells as berth_length_cells
 
 
 # ------------------------------------------------------------------ auth ----
@@ -280,6 +282,11 @@ class BerthOut(BaseModel):
     sort_order: int
     is_active: bool
 
+    @computed_field  # шкала длины: фронт не дублирует правило «10 м на ячейку»
+    @property
+    def length_cells(self) -> int:
+        return berth_length_cells(self)
+
 
 class BerthUpsert(BaseModel):
     code: str = Field(min_length=1, max_length=32)
@@ -294,7 +301,11 @@ class PlacementIn(BaseModel):
     """Строка плана. Границы — начало слота (00/06/12/18), включительно."""
 
     berth_id: int
+    # устарело: шкала внутри причала теперь метровая (offset_m + length_m)
     lane: int = Field(default=1, ge=1, le=12)
+    # длина судна и отметка швартовки в метрах от начала причала
+    length_m: int | None = Field(default=None, ge=1, le=500)
+    offset_m: int = Field(default=0, ge=0, le=5000)
     vessel: str = Field(min_length=2, max_length=128)
     volume: str | None = Field(default=None, max_length=64)
     cargo: str | None = Field(default=None, max_length=64)
@@ -306,6 +317,8 @@ class PlacementIn(BaseModel):
 class PlacementUpdate(BaseModel):
     berth_id: int | None = None
     lane: int | None = Field(default=None, ge=1, le=12)
+    length_m: int | None = Field(default=None, ge=1, le=500)
+    offset_m: int | None = Field(default=None, ge=0, le=5000)
     vessel: str | None = Field(default=None, min_length=2, max_length=128)
     volume: str | None = Field(default=None, max_length=64)
     cargo: str | None = Field(default=None, max_length=64)
@@ -320,6 +333,8 @@ class PlacementOut(BaseModel):
     id: int
     berth_id: int
     lane: int
+    length_m: int | None
+    offset_m: int
     vessel: str
     volume: str | None
     cargo: str | None

@@ -124,13 +124,20 @@ await page.waitForSelector("[data-vessels-page]");
   ok(Math.max(...geo.heights) <= 30, `кнопки компактные: самая высокая ${Math.max(...geo.heights)}px`);
   ok(geo.rows === 1, `вся панель периода в одну строку (${geo.count} элементов, ${geo.rows} строк)`);
 }
-// ждём именно строк сетки: панель появляется раньше, чем приходят причалы,
+// ждём именно блоков причалов: панель появляется раньше, чем приходят данные,
 // и иначе первый же подсчёт ловит пустой экран
-await page.waitForSelector("[data-lane]", { timeout: 15000 });
+await page.waitForSelector("[data-berth-block]", { timeout: 15000 });
 
 // -------------------------------------------------------------- сетка ----
-const lanes = await page.locator("[data-lane]").count();
-ok(lanes >= 12, `строк сетки (причал × дорожка): ${lanes}`);
+const blocks = await page.locator("[data-berth-block]").count();
+ok(blocks >= 6, `блоков причалов в сетке: ${blocks}`);
+// вертикальная шкала: 10 м на ячейку. Тестовый причал 120 м → 12 отметок
+const ruler = await page.evaluate((code) => {
+  const b = [...document.querySelectorAll("[data-berth-block]")].find((el) => el.dataset.berthBlock === code);
+  return b ? [...b.querySelectorAll("[data-ruler]")].map((r) => Number(r.textContent)) : [];
+}, BERTH_CODE);
+ok(ruler.length === 12 && ruler[0] === 10 && ruler[11] === 120,
+  `шкала длины: ${ruler.length} ячеек по 10 м, последняя отметка ${ruler[ruler.length - 1]} м`);
 const days = await page.locator("[data-day]").count();
 ok(days >= 30, `столбцов суток в месячном виде: ${days}`);
 const scroll = await page.evaluate(() => {
@@ -141,7 +148,7 @@ ok(scroll.w > scroll.c, `сетка листается по горизонтал
 const sticky = await page.evaluate(() => {
   const g = document.querySelector("[data-vp-grid]");
   g.scrollLeft = 400;
-  const cell = g.querySelector("[data-lane] > div:first-child");
+  const cell = g.querySelector("[data-berth-block] [data-ruler]");
   const r = cell.getBoundingClientRect();
   const gr = g.getBoundingClientRect();
   g.scrollLeft = 0;
@@ -158,6 +165,8 @@ await page.click("[data-admin-action='new-placement']");
 await page.waitForSelector("[data-modal='placement-form']");
 await page.selectOption('[data-field="berth"]', String(testBerth.id));
 await page.fill('[data-field="vessel"]', VESSEL);
+await page.fill('[data-field="length-m"]', "60");
+await page.fill('[data-field="offset-m"]', "0");
 await page.fill('[data-field="volume"]', "5 500");
 await page.fill('[data-field="cargo"]', "БШ");
 await page.fill('[data-field="note"]', "(КМП-ЮМФ) сборник");
@@ -180,18 +189,65 @@ const geo = await page.evaluate((name) => {
   return { w: Math.round(r.width), h: Math.round(r.height), text: el.textContent.trim() };
 }, VESSEL);
 ok(geo.w > 60 && geo.h >= 20, `полоса растянутая: ${geo.w}×${geo.h}px, «${geo.text}»`);
+// 60 м длины при ячейке 18 px/10 м → полоса около 108 px высотой
+ok(Math.abs(geo.h - 108) <= 4, `высота полосы соответствует длине: ${geo.h}px ≈ 60 м`);
+const barMeters = await page.evaluate((name) => {
+  const el = [...document.querySelectorAll("[data-vp-bar]")].find((b) => b.textContent.includes(name));
+  return { length: el?.dataset.lengthM, offset: el?.dataset.offsetM };
+}, VESSEL);
+ok(barMeters.length === "60" && barMeters.offset === "0",
+  `в сетке видно длину и место: ${barMeters.offset}+${barMeters.length} м`);
 
 // --------------------------------------------------------- конфликт ----
 await page.click("[data-admin-action='new-placement']");
 await page.waitForSelector("[data-modal='placement-form']");
 await page.selectOption('[data-field="berth"]', String(testBerth.id));
 await page.fill('[data-field="vessel"]', "SECOND SHIP");
+await page.fill('[data-field="length-m"]', "60");
+await page.fill('[data-field="offset-m"]', "30");
 await page.fill('[data-field="start-date"]', plus(4));
 await page.fill('[data-field="end-date"]', plus(4));
 await page.click("[data-admin-action='save-placement']");
 await page.waitForSelector("[data-modal='placement-form'] [data-form-error]", { timeout: 8000 });
 const err = (await page.textContent("[data-modal='placement-form'] [data-form-error]")) || "";
-ok(err.includes(VESSEL.split(" ")[0]) && err.includes(BERTH_CODE), `второе судно на ту же дорожку не пустили: «${err}»`);
+ok(err.includes(VESSEL.split(" ")[0]) && err.includes(BERTH_CODE) && err.includes("30–60 м"),
+   `судно наехавшее по длине не пустили: «${err}»`);
+
+// то же время, но свободные метры — ставить можно
+await page.fill('[data-field="vessel"]', "SECOND SHIP");
+await page.fill('[data-field="length-m"]', "50");
+await page.fill('[data-field="offset-m"]', "70");
+await page.click("[data-admin-action='save-placement']");
+await page.waitForSelector("[data-modal='placement-form']", { state: "detached", timeout: 8000 });
+ok((await page.locator("[data-vp-bar]").filter({ hasText: "SECOND SHIP" }).count()) === 1,
+   "второе судно в то же время встало, если метры не пересекаются");
+
+// подсказка свободного места: не заставляем гадать и ловить 409
+await page.click("[data-admin-action='new-placement']");
+await page.waitForSelector("[data-modal='placement-form']");
+await page.selectOption('[data-field="berth"]', String(testBerth.id));
+await page.fill('[data-field="start-date"]', plus(4));
+await page.fill('[data-field="end-date"]', plus(4));
+await page.fill('[data-field="length-m"]', "10");
+await page.click("[data-admin-action='find-free']");
+await page.waitForSelector("[data-free-hint]", { timeout: 8000 });
+const freeOffset = await page.inputValue('[data-field="offset-m"]');
+ok(freeOffset === "60", `подсказка свободного места: ${await page.textContent("[data-free-hint]")}`);
+await page.click("[data-modal='placement-form'] [data-admin-action='close-modal']");
+await page.waitForSelector("[data-modal='placement-form']", { state: "detached" });
+
+// судно длиннее причала — не проходим (тестовый причал 120 м)
+await page.click("[data-admin-action='new-placement']");
+await page.waitForSelector("[data-modal='placement-form']");
+await page.selectOption('[data-field="berth"]', String(testBerth.id));
+await page.fill('[data-field="vessel"]', "TOO LONG SHIP");
+await page.fill('[data-field="length-m"]', "140");
+await page.fill('[data-field="start-date"]', plus(20));
+await page.fill('[data-field="end-date"]', plus(21));
+await page.click("[data-admin-action='save-placement']");
+await page.waitForSelector("[data-modal='placement-form'] [data-form-error]", { timeout: 8000 });
+const fitErr = (await page.textContent("[data-modal='placement-form'] [data-form-error]")) || "";
+ok(fitErr.includes("длина причала 120 м"), `судно длиннее причала не приняли: «${fitErr}»`);
 await page.click("[data-modal='placement-form'] [data-admin-action='close-modal']");
 await page.waitForSelector("[data-modal='placement-form']", { state: "detached" });
 
@@ -231,6 +287,12 @@ await page.waitForSelector("[data-modal='placement-form']");
 await page.fill('[data-field="cargo"]', "БАНАНЫ-ПАЛЛЕТ");
 await page.click("[data-admin-action='save-placement']");
 await page.waitForSelector("[data-modal='placement-form']", { state: "detached", timeout: 8000 });
+// сетка перезагружается после сохранения: читать надо дождавшись, иначе ловим
+// старый бар и «правка не применилась» на ровном месте
+await page.waitForFunction((name) => {
+  const el = [...document.querySelectorAll("[data-vp-bar]")].find((b) => b.textContent.includes(name));
+  return el?.getAttribute("data-cargo") === "БАНАНЫ-ПАЛЛЕТ";
+}, VESSEL, { timeout: 8000 });
 const cargoNow = await page.evaluate((name) => {
   const el = [...document.querySelectorAll("[data-vp-bar]")].find((b) => b.textContent.includes(name));
   return el?.getAttribute("data-cargo");

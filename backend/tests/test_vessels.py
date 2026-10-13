@@ -1,5 +1,5 @@
 """Тесты документа «Постановка судов»: справочник причалов, ручные строки плана,
-просмотр за любой период, пересечения на дорожке и права."""
+просмотр за любой период, пересечения по времени и по длине причала и права."""
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
@@ -93,19 +93,79 @@ def test_period_reversed_is_normalized(client, admin_hdr):
 # ------------------------------------------------------------------- правила ----
 
 
-def test_conflict_same_lane(client, admin_hdr):
-    a = _mk(client, admin_hdr, code="РП-3", lane=1, vessel="FIRST",
+def test_length_overlap_conflicts(client, admin_hdr):
+    """Два судна в одно время у одного причала мешают друг другу только по длине.
+
+    Шкала внутри причала — метровая: 100 м = 10 ячеек по 10 м. РП-3 — 130 м,
+    значит у него могут стоять два судна одновременно, если они не наезжают
+    друг на друга по длине.
+    """
+    a = _mk(client, admin_hdr, code="РП-3", vessel="FIRST", length_m=60, offset_m=0,
             start="2026-05-10T00:00:00", end="2026-05-12T00:00:00")
     assert a.status_code == 201, a.text
-    b = _mk(client, admin_hdr, code="РП-3", lane=1, vessel="SECOND",
-            start="2026-05-11T12:00:00", end="2026-05-13T00:00:00")
-    assert b.status_code == 409
-    assert "FIRST" in b.json()["detail"] and "РП-3" in b.json()["detail"]
+    assert a.json()["length_m"] == 60 and a.json()["offset_m"] == 0
 
-    # та же дата, но другая дорожка — можно
-    c = _mk(client, admin_hdr, code="РП-3", lane=2, vessel="SECOND",
+    # 40–100 м наезжает на 0–60 м
+    b = _mk(client, admin_hdr, code="РП-3", vessel="SECOND", length_m=60, offset_m=40,
+            start="2026-05-11T12:00:00", end="2026-05-13T00:00:00")
+    assert b.status_code == 409, b.text
+    detail = b.json()["detail"]
+    assert "FIRST" in detail and "РП-3" in detail and "40–60 м" in detail, detail
+
+    # 70–130 м — вдоль причала места хватило
+    c = _mk(client, admin_hdr, code="РП-3", vessel="THIRD", length_m=60, offset_m=70,
             start="2026-05-11T12:00:00", end="2026-05-13T00:00:00")
     assert c.status_code == 201, c.text
+
+
+def test_vessel_must_fit_the_berth(client, admin_hdr):
+    """Длина судна сверяется с метражом причала: РП-1 — 100 м."""
+    too_long = _mk(client, admin_hdr, code="РП-1", vessel="TOO LONG", length_m=140,
+                   start="2026-07-01T00:00:00", end="2026-07-02T00:00:00")
+    assert too_long.status_code == 400
+    assert "длина причала 100 м" in too_long.json()["detail"], too_long.text
+
+    over_edge = _mk(client, admin_hdr, code="РП-1", vessel="OVER THE EDGE", length_m=60, offset_m=60,
+                    start="2026-07-01T00:00:00", end="2026-07-02T00:00:00")
+    assert over_edge.status_code == 400
+    assert "отметка 60 м" in over_edge.json()["detail"], over_edge.text
+
+
+def test_unknown_length_takes_whole_berth(client, admin_hdr):
+    """Длина не указана — считаем занятым весь причал, иначе кабинет разрешил бы
+    вторую постановку «рядом», не зная, сколько на самом деле стоит."""
+    a = _mk(client, admin_hdr, code="РП-5", vessel="NO LENGTH",
+            start="2026-09-01T00:00:00", end="2026-09-02T00:00:00")
+    assert a.status_code == 201, a.text
+    b = _mk(client, admin_hdr, code="РП-5", vessel="NEXT TO IT", length_m=30, offset_m=50,
+            start="2026-09-01T06:00:00", end="2026-09-01T18:00:00")
+    assert b.status_code == 409, b.text
+
+    # без длины нельзя поставить и не с начала причала — непонятно, сколько занято
+    c = _mk(client, admin_hdr, code="РП-5", vessel="OFFSET WITHOUT LENGTH", offset_m=20,
+            start="2026-09-05T00:00:00", end="2026-09-06T00:00:00")
+    assert c.status_code == 400 and "Укажите длину" in c.json()["detail"]
+
+
+def test_free_offset_suggests_free_spot(client, admin_hdr):
+    """Форма подсказывает, где свободно: не заставляем диспетчера гадать и ловить 409."""
+    _mk(client, admin_hdr, code="РП-3", vessel="BLOCKS START", length_m=50, offset_m=0,
+        start="2026-10-05T00:00:00", end="2026-10-06T00:00:00")
+    r = client.get("/api/vessels/free-offset",
+                   params={"berth_id": _berth_id(client, admin_hdr, "РП-3"),
+                           "starts_at": "2026-10-05T00:00:00", "ends_at": "2026-10-06T00:00:00",
+                           "length_m": 40},
+                   headers=admin_hdr)
+    assert r.status_code == 200, r.text
+    assert r.json()["offset_m"] == 50 and r.json()["fits"] is True
+
+
+def test_length_cells_scale(client, admin_hdr):
+    """Сетка длины: 10 м на ячейку. 130 м → 13 ячеек, 100 м → 10."""
+    rows = client.get("/api/vessels/berths", headers=admin_hdr).json()
+    by_code = {b["code"]: b for b in rows}
+    assert by_code["РП-1"]["length_cells"] == 10
+    assert by_code["РП-3"]["length_cells"] == 13
 
 
 def test_touching_slots_do_not_conflict(client, admin_hdr):
@@ -133,13 +193,6 @@ def test_end_before_start(client, admin_hdr):
     r = _mk(client, admin_hdr, code="РП-5", vessel="BACKWARD", start="2026-05-06T00:00:00",
             end="2026-05-04T00:00:00")
     assert r.status_code == 400
-
-
-def test_lane_beyond_berth(client, admin_hdr):
-    """У РП-1 две дорожки — третья не помещается физически."""
-    r = _mk(client, admin_hdr, code="РП-1", lane=3, vessel="EXTRA LANE",
-            start="2026-07-01T00:00:00", end="2026-07-02T00:00:00")
-    assert r.status_code == 400 and "дорожка" in r.json()["detail"]
 
 
 def test_unknown_berth(client, admin_hdr):

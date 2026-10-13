@@ -274,7 +274,17 @@ class VesselPlacement(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     berth_id: Mapped[int] = mapped_column(ForeignKey("berths.id", ondelete="RESTRICT"), index=True)
-    lane: Mapped[int] = mapped_column(Integer, default=1)    # «дорожка» внутри причала
+    # Устарело: раньше причал делился на «дорожки» (1..N). Теперь шкала другая —
+    # длина причала сверху вниз, 10 м на ячейку. Колонку оставили, старые строки
+    # никуда не деваются; на проверку конфликта она больше не влияет.
+    lane: Mapped[int] = mapped_column(Integer, default=1)
+
+    # Длина судна (м) и отметка, от которой оно швартуется (м от начала причала).
+    # length_m = NULL — длина неизвестна: считаем, что судно занимает весь причал,
+    # и оно конфликтует со всем, что встанет рядом по времени. Так честнее, чем
+    # молча разрешить вторую постановку.
+    length_m: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    offset_m: Mapped[int] = mapped_column(Integer, default=0)
 
     vessel: Mapped[str] = mapped_column(String(128))         # CROWN SAPPHIRE
     volume: Mapped[str | None] = mapped_column(String(64), nullable=True)   # «5 500», «(100+40) + 4 000»

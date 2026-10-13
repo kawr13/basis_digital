@@ -366,12 +366,18 @@ export type Berth = {
   lanes: number;
   sort_order: number;
   is_active: boolean;
+  /** ячеек шкалы длины (10 м на ячейку): 130 м → 13. Считает бэкенд. */
+  length_cells: number;
 };
 
 export type Placement = {
   id: number;
   berth_id: number;
   lane: number;
+  /** длина судна в метрах; null — неизвестна, занимает причал до конца */
+  length_m: number | null;
+  /** отметка швартовки в метрах от начала причала */
+  offset_m: number;
   vessel: string;
   volume: string | null;
   cargo: string | null;
@@ -385,12 +391,22 @@ export type Placement = {
 export type PlacementInput = {
   berth_id: number;
   lane: number;
+  length_m: number | null;
+  offset_m: number;
   vessel: string;
   volume?: string | null;
   cargo?: string | null;
   note?: string | null;
   starts_at: string;
   ends_at: string;
+};
+
+/** Ответ /api/vessels/free-offset — где судно такой длины встаёт без пересечений. */
+export type FreeOffset = {
+  offset_m: number | null;
+  length_m: number;
+  berth_length_m: number;
+  fits: boolean;
 };
 
 export type VesselPlan = {
@@ -503,6 +519,15 @@ export const api = {
   updatePlacement: (id: number, body: Partial<PlacementInput>) =>
     request<Placement>(`/api/vessels/placements/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
   deletePlacement: (id: number) => request<void>(`/api/vessels/placements/${id}`, { method: "DELETE" }),
+  freeOffset: (berthId: number, startsAt: string, endsAt: string, lengthM: number) => {
+    const q = new URLSearchParams({
+      berth_id: String(berthId),
+      starts_at: startsAt,
+      ends_at: endsAt,
+      length_m: String(lengthM),
+    });
+    return request<FreeOffset>(`/api/vessels/free-offset?${q}`);
+  },
 };
 
 export type ReportParams = { from?: string; to?: string; warehouses?: number[] };

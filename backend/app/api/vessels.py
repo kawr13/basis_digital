@@ -12,7 +12,7 @@
 """
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy.orm import Session
@@ -126,6 +126,42 @@ def list_placements(
     }
 
 
+@router.get("/free-offset")
+def free_offset(
+    berth_id: int = Query(...),
+    # время принимаем строкой: `from __future__ import annotations` превращает
+    # аннотации в строки, и pydantic не разбирает datetime в Query
+    starts_at: str = Query(...),
+    ends_at: str = Query(...),
+    length_m: int = Query(..., ge=1, le=500),
+    db: Session = Depends(get_db),
+    user: User = Depends(current_user),
+):
+    """Первая отметка (м), где судно такой длины встаёт без пересечений.
+
+    Нужна, чтобы форма не заставляла диспетчера гадать: он видит «свободно с 60 м»,
+    а не получает 409 после отправки. Окончательное слово всё равно за validate().
+    """
+    _allow(db, user, "view", "План постановки судов закрыт")
+    berth = db.get(Berth, berth_id)
+    if not berth:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Причал не найден")
+    try:
+        start, end = svc.normalize(datetime.fromisoformat(starts_at)), svc.normalize(datetime.fromisoformat(ends_at))
+    except ValueError:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                            "Не понял время: нужен вид 2026-05-10T06:00:00") from None
+    offset = svc.first_free_offset(
+        db, berth_id=berth_id, starts_at=start, ends_at=end, length_m=length_m
+    )
+    return {
+        "offset_m": offset,
+        "length_m": length_m,
+        "berth_length_m": svc.berth_length(berth),
+        "fits": offset is not None and (not berth.length_m or offset + length_m <= berth.length_m),
+    }
+
+
 @router.post("/placements", response_model=PlacementOut, status_code=status.HTTP_201_CREATED)
 def create_placement(
     payload: PlacementIn,
@@ -136,8 +172,8 @@ def create_placement(
     _allow(db, user, "edit", "Поставить судно")
     try:
         svc.validate(
-            db, berth_id=payload.berth_id, lane=payload.lane,
-            starts_at=payload.starts_at, ends_at=payload.ends_at,
+            db, berth_id=payload.berth_id, starts_at=payload.starts_at, ends_at=payload.ends_at,
+            offset_m=payload.offset_m, length_m=payload.length_m,
         )
     except svc.Conflict as e:
         raise HTTPException(status.HTTP_409_CONFLICT, str(e)) from e
@@ -146,6 +182,7 @@ def create_placement(
 
     row = VesselPlacement(
         berth_id=payload.berth_id, lane=payload.lane,
+        length_m=payload.length_m, offset_m=payload.offset_m,
         vessel=payload.vessel.strip(), volume=(payload.volume or "").strip() or None,
         cargo=(payload.cargo or "").strip() or None, note=(payload.note or "").strip() or None,
         starts_at=svc.normalize(payload.starts_at), ends_at=svc.normalize(payload.ends_at),
@@ -174,12 +211,14 @@ def update_placement(
 
     berth_id = payload.berth_id if payload.berth_id is not None else row.berth_id
     lane = payload.lane if payload.lane is not None else row.lane
+    length_m = payload.length_m if "length_m" in payload.model_fields_set else row.length_m
+    offset_m = payload.offset_m if payload.offset_m is not None else row.offset_m
     starts_at = payload.starts_at or row.starts_at
     ends_at = payload.ends_at or row.ends_at
     try:
         svc.validate(
-            db, berth_id=berth_id, lane=lane, starts_at=starts_at, ends_at=ends_at,
-            exclude_id=row.id,
+            db, berth_id=berth_id, starts_at=starts_at, ends_at=ends_at,
+            offset_m=offset_m, length_m=length_m, exclude_id=row.id,
         )
     except svc.Conflict as e:
         raise HTTPException(status.HTTP_409_CONFLICT, str(e)) from e
@@ -187,6 +226,7 @@ def update_placement(
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e)) from e
 
     row.berth_id, row.lane = berth_id, lane
+    row.length_m, row.offset_m = length_m, offset_m
     row.starts_at, row.ends_at = svc.normalize(starts_at), svc.normalize(ends_at)
     if payload.vessel is not None:
         row.vessel = payload.vessel.strip()
