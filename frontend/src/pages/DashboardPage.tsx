@@ -165,8 +165,6 @@ export default function DashboardPage() {
     <AppShell
       asOf={asOf(data?.summary.data_as_of ?? null)}
       scopeLabel={user?.all_warehouses ? "все склады" : `${user?.warehouse_ids.length} склада(ов)`}
-      // при открытой панели деталей контент уходит влево: панель ничего не перекрывает
-      contentClassName={drilldown ? "md:pr-[404px]" : undefined}
       live={live}
       actions={
         <>

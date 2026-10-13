@@ -92,6 +92,29 @@ const overlap = await page.evaluate(() => {
   return !h || !p ? null : { top: p.top >= h.bottom - 1, right: p.right <= innerWidth + 1 };
 });
 ok(overlap && overlap.top && overlap.right, "панель не перекрывает шапку и влезает в окно");
+
+// панель лежит ПОВЕРХ виджетов: сетка ради неё не должна сжиматься
+const widthWith = await page.evaluate(
+  () => document.querySelector("section[data-widget]")?.getBoundingClientRect().width ?? 0,
+);
+await page.keyboard.press("Escape");
+await page.waitForSelector("[data-drilldown]", { state: "detached", timeout: 5000 });
+const widthWithout = await page.evaluate(
+  () => document.querySelector("section[data-widget]")?.getBoundingClientRect().width ?? 0,
+);
+ok(
+  Math.abs(widthWith - widthWithout) < 2,
+  `сетка не сжимается под панель: ${widthWithout.toFixed(0)}px → ${widthWith.toFixed(0)}px`,
+);
+
+// панель накладная — значит закрывается и по клику мимо
+await bar.click();
+await page.waitForSelector("[data-drilldown]", { timeout: 5000 });
+await page.mouse.click(8, 500);
+await page.waitForTimeout(400);
+ok((await page.$("[data-drilldown]")) === null, "клик мимо панели закрывает её");
+await bar.click();
+await page.waitForSelector("[data-drilldown]", { timeout: 5000 });
 ok(reqs.some((u) => u.includes("/api/reports/processing?from=") && !u.includes("warehouses=")),
   "админ: отчёт за день запрошен без ограничения складами");
 

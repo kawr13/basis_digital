@@ -101,6 +101,27 @@ export function DrilldownPanel({
     return () => document.removeEventListener("keydown", onKey);
   }, [onClose]);
 
+  // Панель лежит ПОВЕРХ виджетов (контент ради неё не сжимаем — иначе между
+  // сеткой и панелью возникала «километровая» пустота). Поэтому закрываем её
+  // и по клику вне: но только когда это действительно клик, а не выделение
+  // текста в таблице под панелью.
+  useEffect(() => {
+    const onDown = (e: PointerEvent) => {
+      const panel = panelRef.current;
+      if (!panel || panel.contains(e.target as Node)) return;
+      // столбец графика и строка ёмкости — это переключатели самой детализации:
+      // закрывать панель по «клику вне» нельзя, иначе их собственный toggle
+      // превратился бы в «закрыли и тут же открыли заново»
+      const t = e.target as HTMLElement | null;
+      if (t?.closest?.("[data-bar], [data-warehouse]")) return;
+      // выделение текста мышкой под панелью — тоже не команда на закрытие
+      if (window.getSelection()?.toString()) return;
+      onClose();
+    };
+    document.addEventListener("pointerdown", onDown);
+    return () => document.removeEventListener("pointerdown", onDown);
+  }, [onClose]);
+
   // Фокус при открытии уходит в панель; точка возврата (столбец/строка, с которой
   // кликнули) запоминается один раз — при смене выбора внутри панели она та же.
   // При закрытии фокус возвращается на элемент, открывший панель.
@@ -197,8 +218,9 @@ export function DrilldownPanel({
         "dd-panel panel fixed z-30 outline-none",
         // мобильный: во всю ширину снизу, шапку не задеваем
         "inset-x-0 bottom-0 max-h-[72vh] overflow-y-auto p-4 rounded-b-none",
-        // десктоп: фиксированная колонка справа
-        "md:inset-x-auto md:right-6 md:top-[104px] md:bottom-6 md:w-[380px] md:max-h-none md:rounded-b-lg",
+        // десктоп: плавающая колонка справа — лежит поверх виджетов,
+        // поэтому усилена тенью, чтобы считалась отдельным слоем
+        "md:inset-x-auto md:right-6 md:top-[104px] md:bottom-6 md:w-[400px] md:max-h-none md:rounded-b-lg md:shadow-[0_30px_70px_-25px_rgba(15,27,45,.55)]",
       ].join(" ")}
     >
       <div className="flex items-start justify-between gap-3">

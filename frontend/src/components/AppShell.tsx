@@ -17,15 +17,12 @@ export function AppShell({
   asOf,
   scopeLabel,
   actions,
-  contentClassName,
   live,
 }: {
   children: React.ReactNode;
   asOf?: string;
   scopeLabel?: string;
   actions?: React.ReactNode;
-  /** дополнительные классы для <main>: напр. отступ под фиксированную панель деталей */
-  contentClassName?: string;
   /** возраст данных из useLive: «обновлено N мин назад» + бейдж устаревания */
   live?: Live;
 }) {
@@ -111,7 +108,7 @@ export function AppShell({
         </div>
       </header>
 
-      <main className={`mx-auto max-w-[1500px] px-6 py-6 space-y-5 ${contentClassName ?? ""}`}>{children}</main>
+      <main className="mx-auto max-w-[1500px] px-6 py-6 space-y-5">{children}</main>
     </div>
   );
 }
