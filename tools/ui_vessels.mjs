@@ -72,7 +72,7 @@ const api = (path, method = "GET", body) =>
 async function cleanup() {
   const plan = await api("/api/vessels/placements?from=2000-01-01&to=2100-01-01").then((r) => r.json());
   for (const p of plan.placements) {
-    if (/^(QA SHIP|SECOND SHIP|DBG SHIP|MANAGER TRY)/.test(p.vessel)) {
+    if (/^(QA SHIP|SECOND SHIP|DBG SHIP|MANAGER TRY|PER USER RIGHT)/.test(p.vessel)) {
       await api(`/api/vessels/placements/${p.id}`, "DELETE");
     }
   }
@@ -264,6 +264,55 @@ await page.waitForSelector("[data-modal='placement-detail']");
 await page.click("[data-admin-action='delete-placement']");
 await page.waitForSelector("[data-modal='placement-detail']", { state: "detached", timeout: 8000 });
 ok((await page.locator(`[data-vp-bar]`).filter({ hasText: VESSEL }).count()) === 0, "постановка удалена");
+
+
+// ── право по конкретному человеку, а не по роли (как доступ к складам) ──
+// стартуем честно: снимаем право, если его оставил прошлый незавершённый прогон
+const users0 = await api("/api/admin/users").then((r) => r.json());
+const sidorovaId = users0.find((u) => u.login === "sidorova").id;
+await api(`/api/admin/users/${sidorovaId}`, "PATCH", { vessel_right: null });
+
+await page.click("[data-nav='admin']");
+await page.waitForSelector("tr[data-user='sidorova']", { timeout: 8000 });
+await page.locator("tr[data-user='sidorova'] [data-admin-action='edit-user']").click();
+await page.waitForSelector('[data-modal="user-edit"] select[data-field="vessel-right"]');
+ok((await page.locator('select[data-field="vessel-right"]').inputValue()) === "",
+  "в карточке менеджера право стоит «по роли»");
+await page.locator('select[data-field="vessel-right"]').selectOption("edit");
+await page.click('[data-modal="user-edit"] [data-admin-action="save-user"]');
+await page.waitForSelector('[data-modal="user-edit"]', { state: "detached", timeout: 8000 });
+await page.waitForFunction(() =>
+  document.querySelector("tr[data-user='sidorova'] td[data-vessel-right]")?.dataset.vesselRight === "edit",
+  null, { timeout: 8000 });
+ok((await page.locator("tr[data-user='sidorova'] td[data-vessel-right]").textContent()) === "править",
+  "в списке право видно прямо в строке пользователя");
+
+await login(page, "sidorova", "demo1234");
+await page.click("[data-nav='vessels']");
+await page.waitForSelector("[data-vessels-page]");
+ok((await page.locator("[data-admin-action='new-placement']").count()) === 1,
+  "менеджеру выдали «ставить и править» — кнопка появилась без смены роли");
+const berths = await api("/api/vessels/berths").then((r) => r.json());
+const berthId = berths.find((b) => b.code === "РП-4")?.id;
+const byRight = await api("/api/vessels/placements", "POST", {
+  berth_id: berthId, lane: 2, vessel: "PER USER RIGHT", cargo: "Кофе", volume: "300 т",
+  starts_at: "2028-02-01T00:00:00", ends_at: "2028-02-02T00:00:00",
+});
+ok(byRight.status === 201, `менеджер ставит судно по личному праву (${byRight.status})`);
+if (byRight.status === 201) await api(`/api/vessels/placements/${(await byRight.json()).id}`, "DELETE");
+
+await login(page, "admin", PASS);
+await page.click("[data-nav='admin']");
+await page.waitForSelector("tr[data-user='sidorova']", { timeout: 8000 });
+await page.locator("tr[data-user='sidorova'] [data-admin-action='edit-user']").click();
+await page.waitForSelector('[data-modal="user-edit"] select[data-field="vessel-right"]');
+await page.locator('select[data-field="vessel-right"]').selectOption("");
+await page.click('[data-modal="user-edit"] [data-admin-action="save-user"]');
+await page.waitForSelector('[data-modal="user-edit"]', { state: "detached", timeout: 8000 });
+await page.waitForFunction(() =>
+  document.querySelector("tr[data-user='sidorova'] td[data-vessel-right]")?.dataset.vesselRight === "role",
+  null, { timeout: 8000 });
+ok(true, "право сняли — снова «по роли»");
 
 await page.screenshot({ path: "shot_vessels.png", fullPage: false });
 await cleanup();

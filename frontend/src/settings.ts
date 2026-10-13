@@ -65,6 +65,44 @@ export function roleAllowed(settings: PublicSettings | null, key: string, role: 
     .includes(role);
 }
 
+/** Разрешения пользователя на «Постановку судов». */
+export type VesselRights = { view: boolean; edit: boolean; delete: boolean };
+
+const RIGHT_LEVEL: Record<string, number> = { none: 0, view: 1, edit: 2, manage: 3 };
+
+/**
+ * Та же логика, что в `app/services/vessels.py::rights_for`: личная графа
+ * пользователя (`users.vessel_right`) перекрывает ролевые настройки.
+ */
+export function resolveVesselRights(
+  user: { role: string; vessel_right?: string | null } | null,
+  settings: PublicSettings | null,
+): VesselRights {
+  if (!user) return { view: false, edit: false, delete: false };
+  const personal = user.vessel_right;
+  if (personal) {
+    const level = RIGHT_LEVEL[personal] ?? 0;
+    return { view: level >= 1, edit: level >= 2, delete: level >= 3 };
+  }
+  return {
+    view: roleAllowed(settings, "vessels.view_roles", user.role),
+    edit: roleAllowed(settings, "vessels.edit_roles", user.role),
+    delete: roleAllowed(settings, "vessels.delete_roles", user.role),
+  };
+}
+
+export const VESSEL_RIGHT_OPTIONS: { value: string; label: string }[] = [
+  { value: "", label: "по роли (как в настройках)" },
+  { value: "none", label: "нет доступа" },
+  { value: "view", label: "только смотреть" },
+  { value: "edit", label: "ставить и править" },
+  { value: "manage", label: "полный доступ, с удалением" },
+];
+
+export function vesselRightLabel(right?: string | null): string {
+  return VESSEL_RIGHT_OPTIONS.find((o) => o.value === (right ?? ""))?.label ?? "по роли";
+}
+
 const ROLE_LABEL: Record<string, string> = {
   admin: "администратор",
   top: "топ-менеджмент",

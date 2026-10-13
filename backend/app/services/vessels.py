@@ -16,7 +16,25 @@ from datetime import date, datetime, timedelta
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
-from ..models import Berth, VesselPlacement
+from .app_settings import role_set
+from ..models import Berth, User, VesselPlacement
+
+# Личное право пользователя на постановку судов (колонка users.vessel_right).
+# Пусто = «по роли», дальше — по нарастающей: смотреть → ставить → ещё и удалять.
+VESSEL_RIGHTS = ("none", "view", "edit", "manage")
+_RIGHT_LEVEL = {"none": 0, "view": 1, "edit": 2, "manage": 3}
+
+
+def rights_for(db: Session, user: User) -> dict[str, bool]:
+    """Что разрешено пользователю: личная настройка перекрывает ролевую."""
+    if user.vessel_right:
+        level = _RIGHT_LEVEL.get(user.vessel_right, 0)
+        return {"view": level >= 1, "edit": level >= 2, "delete": level >= 3}
+    return {
+        "view": user.role.value in role_set(db, "vessels.view_roles"),
+        "edit": user.role.value in role_set(db, "vessels.edit_roles"),
+        "delete": user.role.value in role_set(db, "vessels.delete_roles"),
+    }
 
 class BadPlan(ValueError):
     """Строка плана не проходит правила: не тот слот, конец раньше начала и т. п."""
@@ -191,5 +209,6 @@ def place_summary(p: VesselPlacement) -> str:
 __all__ = [
     "SLOT", "SLOT_HOURS", "DEFAULT_BERTHS", "BadPlan", "Conflict",
     "berths", "find_conflict", "normalize", "period_of", "place_summary",
-    "placements_in_period", "seed_berths", "slots_count", "slots_in_range", "validate",
+    "placements_in_period", "rights_for", "seed_berths", "slots_count", "slots_in_range",
+    "validate", "VESSEL_RIGHTS",
 ]

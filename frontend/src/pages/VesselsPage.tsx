@@ -18,7 +18,7 @@ import { useAuth } from "../auth";
 import { AppShell } from "../components/AppShell";
 import { Field, FormError, Modal, Notice, errText } from "../components/admin/ui";
 import { dmy } from "../format";
-import { roleAllowed, roleListLabel, usePublicSettings } from "../settings";
+import { resolveVesselRights, roleListLabel, usePublicSettings } from "../settings";
 import {
   addDays, barGeometry, barText, cargoColor, daysInRange, isWeekend, parseLocal,
   periodLabel, slotLabel, slotsCount, SLOT_HOURS, ymd,
@@ -91,8 +91,9 @@ export default function VesselsPage() {
   // те же значения проверяет бэкенд. Кнопки просто так показывать нельзя: пользователь
   // упрётся в 403 и решит, что кабинет сломан.
   const settings = usePublicSettings();
-  const canEdit = !!user && roleAllowed(settings, "vessels.edit_roles", user.role);
-  const canDelete = !!user && roleAllowed(settings, "vessels.delete_roles", user.role);
+  const rights = resolveVesselRights(user, settings);
+  const canEdit = rights.edit;
+  const canDelete = rights.delete;
 
   const [today] = useState(() => ymd(new Date()));
   const [from, setFrom] = useState(today);

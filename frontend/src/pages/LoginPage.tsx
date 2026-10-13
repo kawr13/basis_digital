@@ -27,18 +27,21 @@ export default function LoginPage() {
     <div className="grid h-full lg:grid-cols-[1.1fr_1fr]">
       {/* Левая панель — ГЛУХОЙ фирменный navy (#1b3360): белый текст, акценты brand-sky. */}
       <aside className="relative hidden lg:block overflow-hidden bg-brand-navy text-white border-r border-brand-sky/30">
-        <div className="relative h-full flex flex-col justify-between p-12">
-          {/* Фирменный знак: на глухом navy — светлая версия логотипа */}
-          <img src="/logo-light.svg" alt="БазисПорт" width={230} height={35} className="h-10 w-auto" />
-          <div>
-            {/* Продукт называется Basis.Indicators — без описаний и перечислений:
-                вход смотрит человек, который кабинет уже знает, а не тот, кого нужно
-                уговаривать. Точка — фирменным голубым. */}
+        <div className="relative h-full flex flex-col p-12">
+          {/* Фирменный знак: маленький (h-7) и в правом верхнем углу панели —
+              на глухом navy светлая версия логотипа. Внизу слева — строка про доступ,
+              так что углы диагональю не спорят. */}
+          <img src="/logo-light.svg" alt="БазисПорт" width={230} height={35} className="h-7 w-auto self-end" />
+          <div className="my-auto">
+            {/* Продукт — Basis.Indicators, раскрашен как сам логотип: белое первое слово,
+                голубое второе. Голубой взят из знака (#26AAE1), а не из темы, — иначе
+                «как лого» не получается. На navy даёт 4.7:1, то есть AA даже для мелкого. */}
             <h1 className="text-5xl leading-tight font-semibold max-w-md">
-              Basis<span className="text-brand-sky">.</span>Indicators
+              <span className="text-white">Basis</span>
+              <span className="text-[#26AAE1]">.Indicators</span>
             </h1>
           </div>
-          <p className="text-xs text-white/60">
+          <p className="mt-auto pt-8 text-xs text-white/60 max-w-sm">
             Доступ выдаёт администратор кабинета. Вопросы по учёткам — служба поддержки.
           </p>
         </div>

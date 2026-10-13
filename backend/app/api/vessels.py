@@ -19,7 +19,6 @@ from sqlalchemy.orm import Session
 
 from ..db import get_db
 from ..deps import current_user, require_roles
-from ..services import app_settings
 from ..models import AuditLog, Berth, Role, User, VesselPlacement
 from ..schemas import (
     BerthOut, BerthUpsert, PlacementIn, PlacementOut, PlacementUpdate,
@@ -30,20 +29,14 @@ router = APIRouter(prefix="/api/vessels", tags=["vessels"])
 
 admin_only = require_roles(Role.ADMIN)
 
-VIEW_KEY = "vessels.view_roles"
-EDIT_KEY = "vessels.edit_roles"
-DELETE_KEY = "vessels.delete_roles"
-
-ROLE_LABEL = {"admin": "администратор", "top": "топ-менеджмент", "manager": "менеджер"}
+RIGHT_LABEL = {"view": "смотреть", "edit": "ставить и править", "delete": "удалять"}
 
 
-def _allow(db: Session, user: User, key: str, what: str) -> None:
-    """Проверяем роль по настройке; текст ошибки говорит, у кого право есть."""
-    roles = app_settings.role_set(db, key)
-    if user.role.value in roles:
+def _allow(db: Session, user: User, right: str, what: str) -> None:
+    """Право считается так: личная настройка пользователя → иначе роли из настроек."""
+    if svc.rights_for(db, user).get(right):
         return
-    who = ", ".join(ROLE_LABEL.get(r, r) for r in sorted(roles)) or "никого"
-    raise HTTPException(status.HTTP_403_FORBIDDEN, f"{what}: право есть у {who}")
+    raise HTTPException(status.HTTP_403_FORBIDDEN, f"{what}: вам нельзя {RIGHT_LABEL[right]}")
 
 
 def _audit(db: Session, user: User, action: str, detail: str, request: Request) -> None:
@@ -60,7 +53,7 @@ def _placement_out(p: VesselPlacement) -> PlacementOut:
 
 @router.get("/berths", response_model=list[BerthOut])
 def list_berths(db: Session = Depends(get_db), user: User = Depends(current_user)):
-    _allow(db, user, VIEW_KEY, "Справочник причалов закрыт")
+    _allow(db, user, "view", "Справочник причалов закрыт")
     return svc.berths(db)
 
 
@@ -122,7 +115,7 @@ def list_placements(
     user: User = Depends(current_user),
 ):
     """Сетка плана за период: причалы + попавшие в период постановки."""
-    _allow(db, user, VIEW_KEY, "План постановки судов закрыт")
+    _allow(db, user, "view", "План постановки судов закрыт")
     d_from, d_to = svc.period_of(date_from, date_to)
     rows = svc.placements_in_period(db, date_from=d_from, date_to=d_to, berth_id=berth_id)
     return {
@@ -140,7 +133,7 @@ def create_placement(
     db: Session = Depends(get_db),
     user: User = Depends(current_user),
 ):
-    _allow(db, user, EDIT_KEY, "Поставить судно")
+    _allow(db, user, "edit", "Поставить судно")
     try:
         svc.validate(
             db, berth_id=payload.berth_id, lane=payload.lane,
@@ -174,7 +167,7 @@ def update_placement(
     db: Session = Depends(get_db),
     user: User = Depends(current_user),
 ):
-    _allow(db, user, EDIT_KEY, "Править постановку")
+    _allow(db, user, "edit", "Править постановку")
     row = db.get(VesselPlacement, placement_id)
     if not row:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Постановка не найдена")
@@ -217,7 +210,7 @@ def delete_placement(
     db: Session = Depends(get_db),
     user: User = Depends(current_user),
 ):
-    _allow(db, user, DELETE_KEY, "Удалить постановку")
+    _allow(db, user, "delete", "Удалить постановку")
     row = db.get(VesselPlacement, placement_id)
     if not row:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Постановка не найдена")

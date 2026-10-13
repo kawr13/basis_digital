@@ -125,10 +125,16 @@ statcab/
   `!mt-0` — иначе `space-y-5` у `<main>` добавляет соседям `margin-top:20px`, и наклонная
   панель уезжает на 20px ниже шапки (селектор `space-y-*` специфичнее `.mt-0`, нужен `!`).
 - **Права на постановку судов — из настроек, не из кода**: `vessels.view_roles` /
-  `vessels.edit_roles` / `vessels.delete_roles` (роли через запятую). Бэкенд проверяет их в
-  `app/api/vessels.py::_allow`, фронт читает те же значения из `/api/settings/public`
-  (`src/settings.ts`, кэш на загрузку страницы). Правильная проверка UI: не роль пользователя,
-  а `roleAllowed(settings, "vessels.edit_roles", user.role)`.
+  `vessels.edit_roles` / `vessels.delete_roles` (роли через запятую). Бэкенд считает их в
+  `app/services/vessels.py::rights_for` (через `_allow` во всех эндпоинтах), фронт читает те же
+  значения из `/api/settings/public` (`src/settings.ts`, кэш на загрузку страницы). Правильная
+  проверка UI: не роль пользователя, а `resolveVesselRights(user, settings)`.
+- **Личное право важнее роли**: `users.vessel_right` (none|view|edit|manage, NULL = по роли)
+  — то же, что доступ к складам, только по постановке. Меняется в карточке пользователя, в
+  таблице админки показывается короткой подписью. Правила совпадают в `rights_for` (Python) и
+  `resolveVesselRights` (TS) — правь обе сразу, иначе кнопки разойдутся с API. Колонка в
+  существующей БД появляется через `_ADDED_COLUMNS` в `app/db.py`: `create_all` колонки не
+  добавляет, а Alembic ради одной графы не заводили.
 - **Постановка судов — не витрина**: таблицы `berths`/`vessel_placements` синхронизация 1С
   не трогает. Время кратное слоту (00/06/12/18), `ends_at` — начало последнего занятого слота
   (включительно), пересечение на одной дорожке = 409. Правила в `app/services/vessels.py`.

@@ -14,8 +14,10 @@ import {
   type AdminUserPatch,
   type AdminWarehouse,
   type TempPassword,
+  type VesselRight,
 } from "../../api";
 import { asOf, roleLabel } from "../../format";
+import { VESSEL_RIGHT_OPTIONS } from "../../settings";
 import {
   BusyNote,
   ConfirmInline,
@@ -44,6 +46,15 @@ type FormState = {
   password: string;
   password2: string;
   warehouse_ids: number[];
+  /** "" = по роли; иначе none|view|edit|manage */
+  vessel_right: string;
+};
+
+const RIGHT_SHORT: Record<string, string> = {
+  none: "нет",
+  view: "смотреть",
+  edit: "править",
+  manage: "полный",
 };
 
 const EMPTY: FormState = {
@@ -54,6 +65,7 @@ const EMPTY: FormState = {
   password: "",
   password2: "",
   warehouse_ids: [],
+  vessel_right: "",
 };
 
 /**
@@ -116,6 +128,9 @@ export function UsersTab() {
 
   const codeById = useMemo(() => new Map(warehouses.map((w) => [w.id, w.code])), [warehouses]);
 
+  /** Короткая подпись права на постановку судов — для таблицы. */
+  const rightShort = (r?: string | null) => (r ? RIGHT_SHORT[r] ?? r : "по роли");
+
   const scopeLabel = (u: AdminUser) => {
     if (u.all_warehouses || u.warehouse_ids.length === 0) return "все склады";
     return u.warehouse_ids.map((id) => codeById.get(id) ?? `#${id}`).join(", ");
@@ -143,6 +158,7 @@ export function UsersTab() {
       password: "",
       password2: "",
       warehouse_ids: u.warehouse_ids,
+      vessel_right: u.vessel_right ?? "",
     });
     setNewPassword("");
     setFormError("");
@@ -185,6 +201,7 @@ export function UsersTab() {
           password: form.password,
           email: email || null,
           warehouse_ids: form.warehouse_ids,
+          vessel_right: (form.vessel_right || null) as VesselRight | null,
         };
         const created = await api.adminCreateUser(body);
         setUsers((list) => [...list.filter((u) => u.id !== created.id), created].sort((a, b) => a.login.localeCompare(b.login, "ru")));
@@ -194,6 +211,7 @@ export function UsersTab() {
           full_name: fullName,
           role: form.role,
           warehouse_ids: form.warehouse_ids,
+          vessel_right: (form.vessel_right || null) as VesselRight | null,
         };
         if (newPassword) {
           const problem = passwordProblem(newPassword);
@@ -331,6 +349,7 @@ export function UsersTab() {
               <Th>ФИО</Th>
               <Th>Роль</Th>
               <Th>Склады</Th>
+              <Th>Постановка</Th>
               <Th>Последний вход</Th>
               <Th>Статус</Th>
               <Th>Действия</Th>
@@ -345,6 +364,9 @@ export function UsersTab() {
                   <td className="py-2 pr-3">{u.full_name}</td>
                   <td className="py-2 pr-3 text-ink-300">{roleLabel[u.role] ?? u.role}</td>
                   <td className="py-2 pr-3 text-ink-300">{scopeLabel(u)}</td>
+                  <td className="py-2 pr-3 text-ink-300" data-vessel-right={u.vessel_right ?? "role"}>
+                    {rightShort(u.vessel_right)}
+                  </td>
                   <td className="py-2 pr-3 num text-ink-300">{asOf(u.last_login_at)}</td>
                   <td className="py-2 pr-3">{statusChip(s)}</td>
                   <td className="py-2">
@@ -446,6 +468,25 @@ export function UsersTab() {
                 {ROLES.map((r) => (
                   <option key={r} value={r}>
                     {roleLabel[r]}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            {/* Право на «Постановку судов» — так же точечно, как доступ к складам:
+                диспетчеру дают постановку, не превращая его в топ-менеджмент. */}
+            <Field
+              label="Постановка судов"
+              hint="по роли = как в настройках (vessels.*_roles); выбор здесь перекрывает роль"
+            >
+              <select
+                className="field"
+                value={form.vessel_right}
+                onChange={(e) => setForm((f) => ({ ...f, vessel_right: e.target.value }))}
+                data-field="vessel-right"
+              >
+                {VESSEL_RIGHT_OPTIONS.map((o) => (
+                  <option key={o.value} value={o.value}>
+                    {o.label}
                   </option>
                 ))}
               </select>

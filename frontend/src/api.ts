@@ -14,7 +14,11 @@ export type User = {
   all_warehouses: boolean;
   warehouse_ids: number[];
   last_login_at: string | null;
+  /** право на «Постановку судов»: null = по роли, иначе none|view|edit|manage */
+  vessel_right?: VesselRight | null;
 };
+
+export type VesselRight = "none" | "view" | "edit" | "manage";
 
 export type Tokens = { access_token: string; expires_in: number; user: User };
 
@@ -164,6 +168,7 @@ export type AdminUserCreate = {
   password: string;
   email?: string | null;
   warehouse_ids: number[];
+  vessel_right?: VesselRight | null;
 };
 
 export type AdminUserPatch = {
@@ -172,6 +177,7 @@ export type AdminUserPatch = {
   is_active?: boolean;
   password?: string;
   warehouse_ids?: number[];
+  vessel_right?: VesselRight | null;
 };
 
 export type TempPassword = { login: string; temporary_password: string };

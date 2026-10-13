@@ -280,3 +280,86 @@ def test_public_settings_expose_roles(client, manager_hdr):
     assert roles("vessels.view_roles") == {"admin", "top", "manager"}
     assert roles("vessels.edit_roles") == {"admin", "top"}
     assert roles("vessels.delete_roles") == {"admin"}
+
+
+# ------------------------------------------- личное право пользователя (как склады) ----
+
+
+def _user_id(client, hdr, login):
+    return next(u["id"] for u in client.get("/api/admin/users", headers=hdr).json() if u["login"] == login)
+
+
+def _token(client, login, password):
+    return client.post("/api/auth/login", json={"login": login, "password": password}).json()["access_token"]
+
+
+def test_personal_right_beats_role(client, admin_hdr):
+    """Диспетчеру можно выдать постановку прямо в карточке пользователя, не меняя роль."""
+    uid = _user_id(client, admin_hdr, "sidorova")
+    hdr = {"Authorization": f"Bearer {_token(client, 'sidorova', 'demo1234')}"}
+    try:
+        # по роли менеджер ставить не может
+        assert _mk(client, hdr, code="РП-5", lane=2, vessel="BEFORE GRANT",
+                   start="2027-03-01T00:00:00", end="2027-03-02T00:00:00").status_code == 403
+
+        r = client.patch(f"/api/admin/users/{uid}", json={"vessel_right": "edit"}, headers=admin_hdr)
+        assert r.status_code == 200, r.text
+        assert r.json()["vessel_right"] == "edit"
+
+        made = _mk(client, hdr, code="РП-5", lane=2, vessel="DISPATCHER",
+                   start="2027-03-01T00:00:00", end="2027-03-02T00:00:00")
+        assert made.status_code == 201, made.text
+        # но удаление остаётся закрытым: «edit» не включает «delete»
+        assert client.delete(f"/api/vessels/placements/{made.json()['id']}", headers=hdr).status_code == 403
+    finally:
+        client.patch(f"/api/admin/users/{uid}", json={"vessel_right": None}, headers=admin_hdr)
+
+    assert client.get("/api/admin/users", headers=admin_hdr).json()  # не упало
+    assert _mk(client, hdr, code="РП-5", lane=2, vessel="AFTER REVOKE",
+               start="2027-04-01T00:00:00", end="2027-04-02T00:00:00").status_code == 403
+
+
+def test_personal_none_closes_even_admin(client, admin_hdr):
+    """Личное «нет доступа» перекрывает роль: админу закрыли — админ не видит."""
+    uid = _user_id(client, admin_hdr, "admin")
+    try:
+        assert client.patch(f"/api/admin/users/{uid}", json={"vessel_right": "none"},
+                            headers=admin_hdr).status_code == 200
+        assert client.get("/api/vessels/placements", params=PERIOD, headers=admin_hdr).status_code == 403
+        assert client.get("/api/vessels/berths", headers=admin_hdr).status_code == 403
+    finally:
+        assert client.patch(f"/api/admin/users/{uid}", json={"vessel_right": None},
+                            headers=admin_hdr).status_code == 200
+    assert client.get("/api/vessels/placements", params=PERIOD, headers=admin_hdr).status_code == 200
+
+
+def test_view_only_right(client, admin_hdr):
+    uid = _user_id(client, admin_hdr, "petrov")
+    hdr = {"Authorization": f"Bearer {_token(client, 'petrov', 'demo1234')}"}
+    try:
+        assert client.patch(f"/api/admin/users/{uid}", json={"vessel_right": "view"},
+                            headers=admin_hdr).status_code == 200
+        assert client.get("/api/vessels/placements", params=PERIOD, headers=hdr).status_code == 200
+        assert _mk(client, hdr, code="РП-6", lane=2, vessel="READER",
+                   start="2027-05-01T00:00:00", end="2027-05-02T00:00:00").status_code == 403
+    finally:
+        client.patch(f"/api/admin/users/{uid}", json={"vessel_right": None}, headers=admin_hdr)
+
+
+def test_bad_right_rejected(client, admin_hdr):
+    uid = _user_id(client, admin_hdr, "sidorova")
+    r = client.patch(f"/api/admin/users/{uid}", json={"vessel_right": "superuser"}, headers=admin_hdr)
+    assert r.status_code == 400 and "none, view, edit, manage" in r.json()["detail"]
+
+
+def test_manage_right_includes_delete(client, admin_hdr):
+    uid = _user_id(client, admin_hdr, "sidorova")
+    hdr = {"Authorization": f"Bearer {_token(client, 'sidorova', 'demo1234')}"}
+    try:
+        assert client.patch(f"/api/admin/users/{uid}", json={"vessel_right": "manage"},
+                            headers=admin_hdr).status_code == 200
+        pid = _mk(client, hdr, code="РП-1", lane=1, vessel="MANAGER DELETES",
+                  start="2027-06-01T00:00:00", end="2027-06-02T00:00:00").json()["id"]
+        assert client.delete(f"/api/vessels/placements/{pid}", headers=hdr).status_code == 204
+    finally:
+        client.patch(f"/api/admin/users/{uid}", json={"vessel_right": None}, headers=admin_hdr)

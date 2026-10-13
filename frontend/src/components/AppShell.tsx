@@ -3,7 +3,7 @@ import { NavLink } from "react-router-dom";
 import { useAuth } from "../auth";
 import { roleLabel } from "../format";
 import { ageLabel, type Live } from "../live";
-import { roleAllowed, usePublicSettings } from "../settings";
+import { resolveVesselRights, usePublicSettings } from "../settings";
 
 const tabs = [
   { to: "/", label: "Сводка", end: true, nav: "summary" },
@@ -34,7 +34,7 @@ export function AppShell({
 }) {
   const { user, logout } = useAuth();
   const settings = usePublicSettings();
-  const canSeeVessels = !!user && roleAllowed(settings, "vessels.view_roles", user.role);
+  const canSeeVessels = resolveVesselRights(user, settings).view;
   const navTabs = [
     ...tabs,
     ...(canSeeVessels ? [VESSELS_TAB] : []),

@@ -47,6 +47,11 @@ class User(Base):
     # Отпечаток ЭЦП — задел на авторизацию по КриптоПро (шаг 2)
     ecnp_thumbprint: Mapped[str | None] = mapped_column(String(128), nullable=True)
 
+    # Право на документ «Постановка судов» — по той же логике, что и доступ к складам:
+    # NULL = «по роли» (настройки vessels.*_roles), иначе явное для человека:
+    # none | view | edit | manage. Диспетчеру можно дать постановку, не трогая его роль.
+    vessel_right: Mapped[str | None] = mapped_column(String(16), nullable=True)
+
     failed_attempts: Mapped[int] = mapped_column(Integer, default=0)
     locked_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

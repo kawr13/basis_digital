@@ -25,6 +25,8 @@ class UserOut(BaseModel):
     all_warehouses: bool
     warehouse_ids: list[int]
     last_login_at: datetime | None = None
+    # право на «Постановку судов»: пусто = по роли, иначе none|view|edit|manage
+    vessel_right: str | None = None
 
 
 class TokensOut(BaseModel):
@@ -48,6 +50,8 @@ class UserCreate(BaseModel):
     role: str = "manager"
     email: str | None = None
     warehouse_ids: list[int] = []
+    # "" / null = по роли; иначе none | view | edit | manage
+    vessel_right: str | None = None
 
 
 class UserUpdate(BaseModel):
@@ -56,6 +60,7 @@ class UserUpdate(BaseModel):
     is_active: bool | None = None
     password: str | None = Field(default=None, min_length=8, max_length=128)
     warehouse_ids: list[int] | None = None
+    vessel_right: str | None = None
 
 
 # --------------------------------------------------------------- metrics ----

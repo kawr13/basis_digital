@@ -1,6 +1,6 @@
 import { Navigate, Route, Routes } from "react-router-dom";
 import { useAuth } from "./auth";
-import { roleAllowed, usePublicSettings } from "./settings";
+import { resolveVesselRights, usePublicSettings } from "./settings";
 import DashboardPage from "./pages/DashboardPage";
 import LoginPage from "./pages/LoginPage";
 import ReportsPage from "./pages/ReportsPage";
@@ -36,7 +36,7 @@ function VesselsGuard({ children }: { children: React.ReactNode }) {
   const settings = usePublicSettings();
   if (booting) return <Boot />;
   if (!user) return <Navigate to="/login" replace />;
-  if (!roleAllowed(settings, "vessels.view_roles", user.role)) return <Navigate to="/" replace />;
+  if (!resolveVesselRights(user, settings).view) return <Navigate to="/" replace />;
   return <>{children}</>;
 }
 

@@ -58,6 +58,7 @@ def _user_out(user: User) -> UserOut:
         id=user.id, login=user.login, full_name=user.full_name, role=user.role.value,
         email=user.email, all_warehouses=user.all_warehouses,
         warehouse_ids=user.warehouse_ids, last_login_at=user.last_login_at,
+        vessel_right=user.vessel_right,
     )
 
 

@@ -12,6 +12,7 @@ from ..models import (
 )
 from ..schemas import AuditOut, UserCreate, UserOut, UserUpdate
 from ..security import hash_password, password_is_strong, random_password
+from ..services.vessels import VESSEL_RIGHTS
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
@@ -22,6 +23,7 @@ def _out(u: User) -> UserOut:
     return UserOut(
         id=u.id, login=u.login, full_name=u.full_name, role=u.role.value, email=u.email,
         all_warehouses=u.all_warehouses, warehouse_ids=u.warehouse_ids, last_login_at=u.last_login_at,
+        vessel_right=u.vessel_right,
     )
 
 
@@ -43,6 +45,7 @@ def create_user(payload: UserCreate, db: Session = Depends(get_db), _: User = De
         login=login, full_name=payload.full_name.strip(), email=payload.email,
         role=Role(payload.role), password_hash=hash_password(payload.password),
     )
+    _set_vessel_right(user, payload.vessel_right)
     db.add(user)
     db.flush()
     _set_scopes(db, user, payload.warehouse_ids)
@@ -61,6 +64,12 @@ def update_user(user_id: int, payload: UserUpdate, db: Session = Depends(get_db)
 
     if payload.full_name:
         user.full_name = payload.full_name.strip()
+    if "vessel_right" in payload.model_fields_set:
+        before = user.vessel_right
+        _set_vessel_right(user, payload.vessel_right)
+        if before != user.vessel_right:
+            db.add(AuditLog(user_id=actor.id, login=actor.login, action="admin.vessel_right",
+                            detail=f"{user.login}: {before or 'по роли'} → {user.vessel_right or 'по роли'}"))
     if payload.role:
         if user.id == actor.id and payload.role != Role.ADMIN.value:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "Нельзя снять роль со себя")
@@ -154,6 +163,20 @@ def audit_log(limit: int = Query(default=100, ge=1, le=1000),
     """Последние записи журнала: кто входил, что менял в настройках и складах."""
     return list(db.scalars(select(AuditLog).order_by(AuditLog.created_at.desc(), AuditLog.id.desc())
                            .limit(limit)))
+
+
+def _set_vessel_right(user: User, raw: str | None) -> None:
+    """Личное право на постановку судов. Пусто — «по роли», как до настройки."""
+    value = (raw or "").strip().lower()
+    if not value:
+        user.vessel_right = None
+        return
+    if value not in VESSEL_RIGHTS:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Право на постановку судов: допустимо " + ", ".join(VESSEL_RIGHTS) + " или пусто",
+        )
+    user.vessel_right = value
 
 
 def _set_scopes(db: Session, user: User, warehouse_ids: list[int]) -> None:

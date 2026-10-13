@@ -38,10 +38,32 @@ def get_db():
         db.close()
 
 
+# create_all создаёт недостающие таблицы, но не добавляет колонки в существующие.
+# Перечисляем такие колонки явно: это дешевле и предсказуемее, чем тянуть Alembic
+# ради одной графы. DDL одинаково проходит и на SQLite, и на PostgreSQL.
+_ADDED_COLUMNS = [
+    ("users", "vessel_right", "VARCHAR(16)"),
+]
+
+
 def init_db() -> None:
     from . import models  # noqa: F401  — регистрирует таблицы
 
     Base.metadata.create_all(bind=engine)
+    _ensure_columns()
+
+
+def _ensure_columns() -> None:
+    from sqlalchemy import inspect, text
+
+    insp = inspect(engine)
+    for table, column, ddl in _ADDED_COLUMNS:
+        if table not in insp.get_table_names():
+            continue
+        if column in {c["name"] for c in insp.get_columns(table)}:
+            continue
+        with engine.begin() as conn:
+            conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}"))
 
 
 def db_filename() -> str:
