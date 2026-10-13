@@ -93,6 +93,15 @@ const overlap = await page.evaluate(() => {
 });
 ok(overlap && overlap.top && overlap.right, "панель не перекрывает шапку и влезает в окно");
 
+// панель должна быть прижата к низу шапки, а не висеть через полэкрана:
+// раньше её top был зашит числом и съезжал после смены логотипа
+const gap = await page.evaluate(() => {
+  const h = document.querySelector("header")?.getBoundingClientRect();
+  const p = document.querySelector("[data-drilldown]")?.getBoundingClientRect();
+  return h && p ? Math.round(p.top - h.bottom) : null;
+});
+ok(gap !== null && gap >= 0 && gap <= 16, `панель прижата к шапке: зазор ${gap}px`);
+
 // панель лежит ПОВЕРХ виджетов: сетка ради неё не должна сжиматься
 const widthWith = await page.evaluate(
   () => document.querySelector("section[data-widget]")?.getBoundingClientRect().width ?? 0,

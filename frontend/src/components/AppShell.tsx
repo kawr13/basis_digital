@@ -1,3 +1,4 @@
+import { useEffect, useRef } from "react";
 import { NavLink } from "react-router-dom";
 import { useAuth } from "../auth";
 import { roleLabel } from "../format";
@@ -28,22 +29,50 @@ export function AppShell({
 }) {
   const { user, logout } = useAuth();
   const navTabs = user?.role === "admin" ? [...tabs, ADMIN_TAB] : tabs;
+  const headerRef = useRef<HTMLElement>(null);
+
+  // Высоту шапки нельзя зашить числом: логотип, перенос навигации на узких
+  // экранах и длина ФИО её меняют. Публикуем её в CSS-переменной — панель
+  // детализации и всё остальное позиционируются от реального низа шапки.
+  useEffect(() => {
+    const el = headerRef.current;
+    if (!el) return;
+    const publish = () =>
+      document.documentElement.style.setProperty("--header-h", `${Math.round(el.getBoundingClientRect().height)}px`);
+    publish();
+    const ro = new ResizeObserver(publish);
+    ro.observe(el);
+    window.addEventListener("resize", publish);
+    return () => {
+      ro.disconnect();
+      window.removeEventListener("resize", publish);
+    };
+  }, []);
 
   return (
     <div className="min-h-full">
       {/* Шапка — матовое стекло в фирменном navy (.glass-navy): под ней прокручивается
           контент, и blur(16px) размывает его в мягкое navy-марево. Текст белый —
           контраст 11.5:1, снизу тонкая голубая рамка brand-sky. */}
-      <header className="glass-navy sticky top-0 z-20 text-white">
+      <header ref={headerRef} className="glass-navy sticky top-0 z-20 text-white">
         <div className="mx-auto max-w-[1500px] px-6">
           {/* flex-wrap: на узком экране навигация и блок пользователя перестают
               влезать в одну строку — без переноса страница уезжает в горизонт */}
           <div className="flex flex-wrap items-center gap-x-4 gap-y-1 pt-3">
-            <div>
-              {/* white/75, не white/60: шапка стала полупрозрачной (3.9:1 — ниже AA),
-                  на стекле /75 даёт 5.0:1 */}
-              <div className="text-[11px] uppercase tracking-[0.18em] text-white/75">БазисПорт</div>
-              <div className="text-sm font-medium text-white">Кабинет веб-статистики</div>
+            <div className="flex items-center gap-3">
+              {/* Фирменный знак БазисПорта (public/logo-light.svg): в navy-шапке
+                  обычный логотип не годится — его тёмно-синие пути #063058 на #1b3360
+                  сливаются, поэтому для тёмных фонов лежит перекрашенная версия. */}
+              <img
+                src="/logo-light.svg"
+                alt="БазисПорт"
+                width={230}
+                height={35}
+                className="h-8 w-auto shrink-0"
+              />
+              <span className="hidden sm:block pl-3 border-l border-white/25 text-[11px] uppercase tracking-[0.18em] text-white/75">
+                Кабинет веб-статистики
+              </span>
             </div>
 
             <nav className="ml-6 flex flex-wrap items-center gap-1">

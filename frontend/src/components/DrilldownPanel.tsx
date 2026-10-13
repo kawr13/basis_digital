@@ -216,11 +216,16 @@ export function DrilldownPanel({
       {...(warehouseId != null ? { "data-drilldown-warehouse": String(warehouseId) } : {})}
       className={[
         "dd-panel panel fixed z-30 outline-none",
+        // панель лежит внутри <main class="space-y-5">, а Tailwind выдаёт всем
+        // соседям margin-top:20px — для fixed это плюс к top, и панель уезжала
+        // на 20px ниже шапки. ! важно: селектор space-y-* специфичнее, чем .mt-0.
+        "!mt-0",
         // мобильный: во всю ширину снизу, шапку не задеваем
         "inset-x-0 bottom-0 max-h-[72vh] overflow-y-auto p-4 rounded-b-none",
         // десктоп: плавающая колонка справа — лежит поверх виджетов,
-        // поэтому усилена тенью, чтобы считалась отдельным слоем
-        "md:inset-x-auto md:right-6 md:top-[104px] md:bottom-6 md:w-[400px] md:max-h-none md:rounded-b-lg md:shadow-[0_30px_70px_-25px_rgba(15,27,45,.55)]",
+        // поэтому усилена тенью, чтобы считалась отдельным слоем.
+        // top считается от фактической высоты шапки (--header-h ставит AppShell)
+        "md:inset-x-auto md:right-6 md:top-[calc(var(--header-h,89px)+8px)] md:bottom-6 md:w-[400px] md:max-h-none md:rounded-b-lg md:shadow-[0_30px_70px_-25px_rgba(15,27,45,.55)]",
       ].join(" ")}
     >
       <div className="flex items-start justify-between gap-3">

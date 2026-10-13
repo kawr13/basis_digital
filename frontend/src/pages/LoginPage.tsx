@@ -28,7 +28,8 @@ export default function LoginPage() {
       {/* Левая панель — ГЛУХОЙ фирменный navy (#1b3360): белый текст, акценты brand-sky. */}
       <aside className="relative hidden lg:block overflow-hidden bg-brand-navy text-white border-r border-brand-sky/30">
         <div className="relative h-full flex flex-col justify-between p-12">
-          <div className="text-[13px] tracking-[0.2em] uppercase text-brand-sky">БазисПорт</div>
+          {/* Фирменный знак: на глухом navy — светлая версия логотипа */}
+          <img src="/logo-light.svg" alt="БазисПорт" width={230} height={35} className="h-10 w-auto" />
           <div>
             <h1 className="text-4xl leading-tight font-semibold max-w-md">
               Кабинет <span className="text-brand-sky">веб-статистики</span>
@@ -58,7 +59,11 @@ export default function LoginPage() {
 
       {/* Карточка входа — обычная белая плашка с мягкой тенью (стекла больше нет) */}
       <main className="grid place-items-center p-6">
-        <form onSubmit={submit} className="panel w-full max-w-sm p-6">
+        <div className="w-full max-w-sm">
+          {/* На мобильных левая navy-панель скрыта — без этого знака на телефоне
+              кабинет вообще без бренда. Здесь фон светлый, поэтому логотип обычный. */}
+          <img src="/logo.svg" alt="БазисПорт" width={230} height={35} className="mb-5 h-8 w-auto lg:hidden" />
+          <form onSubmit={submit} className="panel w-full p-6">
           <h2 className="text-xl font-semibold">Вход в кабинет</h2>
           <p className="mt-1 text-sm text-ink-300">Рабочая учётная запись, не учётка 1С.</p>
 
@@ -104,6 +109,7 @@ export default function LoginPage() {
             получается — обратитесь к администратору.
           </p>
         </form>
+        </div>
       </main>
     </div>
   );
