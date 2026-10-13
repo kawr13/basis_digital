@@ -80,6 +80,20 @@ export default function ReportsPage() {
     load();
   }, [load]);
 
+  // Отчёты смотрят реже, чем дашборд, но при возврате на вкладку цифры
+  // должны быть свежими — перезапрашиваем при появлении вкладки/фокусе
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState === "visible") void load();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("focus", onVisible);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("focus", onVisible);
+    };
+  }, [load]);
+
   // Сохраняем фильтры только после того, как отработала загрузка сохранённых:
   // иначе первый же рендер перезаписывает настройку дефолтом (гонка mount-vs-restore).
   useEffect(() => {

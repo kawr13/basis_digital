@@ -10,6 +10,7 @@ import { DrilldownPanel, type DrilldownTarget } from "../components/DrilldownPan
 import { CapacityPanel } from "../components/CapacityPanel";
 import { DynamicsChart } from "../components/DynamicsChart";
 import { KpiCard } from "../components/KpiCard";
+import { useLive } from "../live";
 import { WidgetGrid, mergeLayout, type WidgetDef } from "../components/WidgetGrid";
 import { asOf, nf, pct, signed } from "../format";
 
@@ -24,6 +25,8 @@ type Selection = {
   selectedWarehouseId?: number | null;
 };
 
+// Период полной авто-перезагрузки по умолчанию; если админ задал
+// `ui.refresh_seconds` в кабинете — берём его.
 const REFRESH_MS = 60_000;
 const LAYOUT_KEY = "dashboard_layout";
 
@@ -93,8 +96,10 @@ export default function DashboardPage() {
   }, []);
 
   // ---- данные --------------------------------------------------------------
-  const load = useCallback(async () => {
-    setBusy(true);
+  // quiet = true: автообновление не показывает спиннер, иначе экран
+  // подёргивался бы каждую минуту
+  const load = useCallback(async (quiet = false) => {
+    if (!quiet) setBusy(true);
     try {
       const [summary, cargo, capacity, dynamics] = await Promise.all([
         api.summary(),
@@ -105,17 +110,41 @@ export default function DashboardPage() {
       setData({ summary, cargo, capacity, dynamics });
       setError("");
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Не удалось загрузить данные");
+      if (!quiet) setError(e instanceof Error ? e.message : "Не удалось загрузить данные");
     } finally {
-      setBusy(false);
+      if (!quiet) setBusy(false);
     }
   }, []);
 
+  // «Почти реальное время»: раз в 15 с спрашиваем свежесть; как только 1С
+  // прислала новый срез — сами перезапрашиваем метрики, без перезагрузки
+  const [liveNote, setLiveNote] = useState("");
+  const live = useLive(() => {
+    void load(true);
+    setLiveNote("данные обновлены");
+    window.setTimeout(() => setLiveNote(""), 8000);
+  });
+
+  const [refreshMs, setRefreshMs] = useState(REFRESH_MS);
+
   useEffect(() => {
     load();
-    const t = setInterval(load, REFRESH_MS);
-    return () => clearInterval(t);
+    api
+      .publicSettings()
+      .then((s) => {
+        const sec = Number(s["ui.refresh_seconds"]);
+        if (sec >= 5) setRefreshMs(sec * 1000);
+      })
+      .catch(() => undefined);
   }, [load]);
+
+  useEffect(() => {
+    const t = window.setInterval(() => {
+      // скрытую вкладку не обновляем: при возврате useLive сам всё догрузит
+      if (!document.hidden) void load(true);
+    }, refreshMs);
+    return () => window.clearInterval(t);
+  }, [load, refreshMs]);
 
   const defs: WidgetDef[] = useMemo(
     () => buildWidgets(data, { onSelectDay: selectDay, onSelectWarehouse: selectWarehouse, selectedDay, selectedWarehouseId }),
@@ -138,8 +167,14 @@ export default function DashboardPage() {
       scopeLabel={user?.all_warehouses ? "все склады" : `${user?.warehouse_ids.length} склада(ов)`}
       // при открытой панели деталей контент уходит влево: панель ничего не перекрывает
       contentClassName={drilldown ? "md:pr-[404px]" : undefined}
+      live={live}
       actions={
         <>
+          {liveNote && !busy && (
+            <span className="text-[11px] text-ok" data-live-note>
+              {liveNote}
+            </span>
+          )}
           {edit && savedAt && (
             <span className="text-[11px] text-ok">раскладка сохранена ✓</span>
           )}
@@ -148,7 +183,7 @@ export default function DashboardPage() {
               Сбросить
             </button>
           )}
-          <button className="btn-ghost text-xs" onClick={load} disabled={busy}>
+          <button className="btn-ghost text-xs" onClick={() => load()} disabled={busy}>
             {busy ? "Обновление…" : "Обновить"}
           </button>
           <button
@@ -173,7 +208,7 @@ export default function DashboardPage() {
       {error && (
         <div className="panel border-crit/40 p-3 text-sm text-crit">
           {error}{" "}
-          <button className="underline underline-offset-2" onClick={load}>
+          <button className="underline underline-offset-2" onClick={() => load()}>
             повторить
           </button>
         </div>

@@ -330,6 +330,22 @@ async function request<T>(path: string, init: RequestInit = {}, retry = true): P
   return (text ? JSON.parse(text) : undefined) as T;
 }
 
+/** Ответ `/api/meta/freshness` — насколько свежи витринные данные. */
+export type Freshness = {
+  data_as_of: string | null;
+  last_sync: {
+    id: number;
+    started_at: string | null;
+    finished_at: string | null;
+    status: string;
+    source: string;
+    rows: number;
+  } | null;
+  stale: boolean;
+  sync_interval_minutes: number;
+  server_time: string;
+};
+
 export const api = {
   async login(login: string, password: string): Promise<User> {
     const data = await request<Tokens>("/api/auth/login", {
@@ -364,6 +380,7 @@ export const api = {
 
   // публичные настройки: пороги и периоды — чтобы UI и бэкенд считали одинаково
   publicSettings: () => request<Record<string, number>>("/api/settings/public"),
+  freshness: () => request<Freshness>("/api/meta/freshness"),
 
   // ------------------------------------------- администрирование: пользователи ---
   adminUsers: () => request<AdminUser[]>("/api/admin/users"),

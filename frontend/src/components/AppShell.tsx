@@ -1,6 +1,7 @@
 import { NavLink } from "react-router-dom";
 import { useAuth } from "../auth";
 import { roleLabel } from "../format";
+import { ageLabel, type Live } from "../live";
 
 const tabs = [
   { to: "/", label: "Сводка", end: true, nav: "summary" },
@@ -17,6 +18,7 @@ export function AppShell({
   scopeLabel,
   actions,
   contentClassName,
+  live,
 }: {
   children: React.ReactNode;
   asOf?: string;
@@ -24,6 +26,8 @@ export function AppShell({
   actions?: React.ReactNode;
   /** дополнительные классы для <main>: напр. отступ под фиксированную панель деталей */
   contentClassName?: string;
+  /** возраст данных из useLive: «обновлено N мин назад» + бейдж устаревания */
+  live?: Live;
 }) {
   const { user, logout } = useAuth();
   const navTabs = user?.role === "admin" ? [...tabs, ADMIN_TAB] : tabs;
@@ -80,8 +84,26 @@ export function AppShell({
 
           <div className="flex items-center gap-2 py-2 text-xs text-white/70">
             {asOf && (
-              <span className="chip bg-white/10 border border-white/15 text-white/70">
+              <span
+                className="chip bg-white/10 border border-white/15 text-white/85"
+                data-live={live?.ready ? "on" : undefined}
+                data-live-age={live?.ageSeconds != null ? String(live.ageSeconds) : undefined}
+                data-stale={live?.stale ? "1" : undefined}
+              >
                 данные 1С на <span className="num ml-1 text-white">{asOf}</span>
+                {live?.ageSeconds != null && (
+                  <span className="ml-1 text-white/85">· обновлено {ageLabel(live.ageSeconds)}</span>
+                )}
+              </span>
+            )}
+            {live?.stale && (
+              // честно предупреждаем: цифры могли устареть, 1С давно ничего не присылала
+              <span
+                className="chip bg-warn/25 border border-warn/40 text-white"
+                title={`последняя загрузка из 1С: ${live.lastSyncAt ? new Date(live.lastSyncAt).toLocaleString("ru-RU") : "не известна"}`}
+                data-stale="1"
+              >
+                данные устарели
               </span>
             )}
             {scopeLabel && <span className="chip bg-white/10 border border-white/15 text-white/70">{scopeLabel}</span>}

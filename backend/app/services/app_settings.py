@@ -70,6 +70,9 @@ SPEC: dict[str, Spec] = {
                              label="Динамика на дашборде, суток"),
     "reports.default_days": Spec("int", 30, minimum=7, maximum=366,
                                  label="Период отчёта по умолчанию, суток"),
+    "ui.refresh_seconds": Spec("int", 60, minimum=5, maximum=900,
+                               label="Как часто фронт сам подтягивает данные, сек",
+                               hint="только когда вкладка видна; 15 с — интервал опроса свежести"),
     "thresholds.capacity_warn": Spec("int", 85, minimum=50, maximum=100,
                                      label="Порог «внимание», % загрузки склада"),
     "thresholds.capacity_crit": Spec("int", 95, minimum=50, maximum=100,
@@ -83,7 +86,7 @@ SPEC: dict[str, Spec] = {
 
 # Публичный набор: любой авторизованный пользователь (менеджеру — пороги и
 # периоды, чтобы UI и бэкенд считали одинаково).
-PUBLIC_KEYS = ("ui.dynamics_days", "reports.default_days",
+PUBLIC_KEYS = ("ui.dynamics_days", "reports.default_days", "ui.refresh_seconds",
                "thresholds.capacity_warn", "thresholds.capacity_crit")
 
 DEFAULTS: dict[str, Any] = {key: spec.default for key, spec in SPEC.items()}

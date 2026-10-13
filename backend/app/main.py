@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
-from .api import (admin, admin_settings, admin_warehouses, auth, metrics, onec_push, reports,
+from .api import (admin, admin_settings, admin_warehouses, auth, meta, metrics, onec_push, reports,
                   settings)
 from .config import get_settings
 from .db import SessionLocal, get_db, init_db
@@ -76,6 +76,7 @@ app.add_middleware(
 
 app.include_router(auth.router)
 app.include_router(metrics.router)
+app.include_router(meta.router)
 app.include_router(admin.router)
 app.include_router(admin_settings.router)
 app.include_router(admin_warehouses.router)
