@@ -83,10 +83,11 @@ async function cleanup() {
       await api(`/api/vessels/placements/${p.id}`, "DELETE");
     }
   }
-  // тестовые причалы не удаляем (удаления в кабинете нет) — выключаем
+  // тестовые причалы удаляем совсем: выключенный причал остаётся в справочнике,
+  // и после десятка прогонов администратор видит в плане мусор вместо причалов
   for (const b of await api("/api/vessels/berths").then((r) => r.json())) {
-    if (b.code.startsWith("QA-") && b.is_active) {
-      await api(`/api/vessels/berths/${b.id}`, "PATCH", { ...b, is_active: false });
+    if (b.code.startsWith("QA-")) {
+      await api(`/api/vessels/berths/${b.id}`, "DELETE");
     }
   }
 }
@@ -445,11 +446,18 @@ try {
 await login(page, "admin", PASS);
 await page.click("[data-nav='vessels']");
 await page.waitForSelector("[data-vessels-page]");
-await page.locator(`[data-vp-bar]`).filter({ hasText: VESSEL }).first().click();
-await page.waitForSelector("[data-modal='placement-detail']");
+const delBar = page.locator(`[data-vp-bar]`).filter({ hasText: VESSEL }).first();
+const delBox = await delBar.boundingBox();
+// перетаскивание выключено, но клик по полосе обязан открывать карточку
+await page.mouse.click(delBox.x + delBox.width / 2, delBox.y + delBox.height / 2);
+await page.waitForSelector("[data-modal='placement-detail']", { timeout: 8000 });
 await page.click("[data-admin-action='delete-placement']");
 await page.waitForSelector("[data-modal='placement-detail']", { state: "detached", timeout: 8000 });
-ok((await page.locator(`[data-vp-bar]`).filter({ hasText: VESSEL }).count()) === 0, "постановка удалена");
+await page.waitForFunction(
+  (name) => ![...document.querySelectorAll("[data-vp-bar]")].some((b) => b.textContent.includes(name)),
+  VESSEL, { timeout: 8000 },
+);
+ok(true, "постановка удалена");
 
 
 // ── право по конкретному человеку, а не по роли (как доступ к складам) ──
@@ -501,8 +509,14 @@ await page.waitForFunction(() =>
 ok(true, "право сняли — снова «по роли»");
 
 await page.screenshot({ path: "shot_vessels.png", fullPage: false });
-await cleanup();
 await browser.close();
+// cleanup — после закрытия браузера и обязательно: упавший прогон не должен
+// оставлять в dev-базе тестовые причалы, следующий прогон показывает их в сетке
+try {
+  await cleanup();
+} catch (e) {
+  console.log("чистка не удалась:", e.message);
+}
 
 console.log(problems.length ? `\nПРОБЛЕМЫ:\n${problems.join("\n")}` : "\nвсе проверки прошли");
 process.exit(problems.length ? 1 : 0);

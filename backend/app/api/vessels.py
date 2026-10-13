@@ -15,6 +15,7 @@ from __future__ import annotations
 from datetime import date, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..db import get_db
@@ -53,7 +54,10 @@ def _placement_out(p: VesselPlacement) -> PlacementOut:
 
 @router.get("/berths", response_model=list[BerthOut])
 def list_berths(db: Session = Depends(get_db), user: User = Depends(current_user)):
-    _allow(db, user, "view", "Справочник причалов закрыт")
+    # администратор справочник видит всегда: он его и ведёт, даже если ему
+    # лично закрыли доступ к самому плану постановки
+    if user.role != Role.ADMIN:
+        _allow(db, user, "view", "Справочник причалов закрыт")
     return svc.berths(db)
 
 
@@ -103,6 +107,36 @@ def update_berth(
     return berth
 
 
+@router.delete("/berths/{berth_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_berth(
+    berth_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(admin_only),
+):
+    """Удалить причал можно, только если на нём нет ни одной постановки.
+
+    Иначе история плана повиснет на несуществующем причале. Такой причал нужно
+    снять с линии (`is_active=false`) — он уйдёт из сетки, а строки останутся.
+    """
+    berth = db.get(Berth, berth_id)
+    if not berth:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Причал не найден")
+    used = db.execute(
+        select(func.count()).select_from(VesselPlacement).where(VesselPlacement.berth_id == berth_id)
+    ).scalar_one()
+    if used:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"На причале {berth.code} постановок: {used}. Удалить нельзя — снимите его с линии, "
+            "он скроется из плана, а история останется",
+        )
+    code = berth.code
+    db.delete(berth)
+    _audit(db, user, "vessels.berth_delete", code, request)
+    db.commit()
+
+
 # ---------------------------------------------------------- постановки ----
 
 
@@ -121,7 +155,7 @@ def list_placements(
     return {
         "period": {"from": d_from, "to": d_to},
         "slot_hours": list(svc.SLOT_HOURS),
-        "berths": [BerthOut.model_validate(b) for b in svc.berths(db)],
+        "berths": [BerthOut.model_validate(b) for b in svc.berths(db, only_active=True)],
         "placements": [_placement_out(p) for p in rows],
     }
 

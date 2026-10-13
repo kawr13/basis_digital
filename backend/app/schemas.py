@@ -289,7 +289,9 @@ class BerthOut(BaseModel):
 
 
 class BerthUpsert(BaseModel):
-    code: str = Field(min_length=1, max_length=32)
+    # код печатают в плане и ищут глазами: без пробелов и пунктуации он сливается
+    code: str = Field(min_length=2, max_length=32,
+                      pattern=r"^[0-9A-Za-zА-Яа-яЁё][0-9A-Za-zА-Яа-яЁё .\-/]*$")
     depth: float | None = Field(default=None, ge=0, le=100)
     length_m: int | None = Field(default=None, ge=1, le=2000)
     lanes: int = Field(default=1, ge=1, le=12)

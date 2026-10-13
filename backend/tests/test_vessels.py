@@ -39,6 +39,70 @@ def test_berth_create_and_duplicate(client, admin_hdr):
     assert again.status_code == 409
 
 
+def test_berth_code_must_be_readable(client, admin_hdr):
+    """Код причала печатают в плане — пустой или из знаков не пропустим."""
+    for bad in ("", " ", "-", "  ", "A"):
+        r = client.post("/api/vessels/berths", json={"code": bad}, headers=admin_hdr)
+        assert r.status_code == 422, (bad, r.text)
+
+
+def test_berth_deactivate_hides_from_plan(client, admin_hdr, manager_hdr):
+    """Снят с линии: в справочнике есть, в сетке плана его нет."""
+    bid = _berth_id(client, admin_hdr)
+    berth = next(b for b in client.get("/api/vessels/berths", headers=admin_hdr).json()
+                 if b["id"] == bid)
+    berth["is_active"] = False
+    r = client.patch(f"/api/vessels/berths/{bid}", json=berth, headers=admin_hdr)
+    assert r.status_code == 200, r.text
+    plan = client.get("/api/vessels/placements", params=PERIOD, headers=manager_hdr).json()
+    assert bid not in {b["id"] for b in plan["berths"]}
+    assert bid in {b["id"] for b in client.get("/api/vessels/berths", headers=admin_hdr).json()}
+
+
+def test_berth_delete_only_if_empty(client, admin_hdr):
+    """Причал с историей удалить нельзя — только снять с линии."""
+    created = client.post("/api/vessels/berths",
+                          json={"code": "ПУСТОЙ-77", "length_m": 120}, headers=admin_hdr)
+    assert created.status_code == 201, created.text
+    empty_id = created.json()["id"]
+
+    # свой причал под историю: чужие тесты не должны зависеть от этого судна
+    busy = client.post("/api/vessels/berths", json={"code": "ЗАНЯТОЙ-78", "length_m": 150},
+                       headers=admin_hdr).json()["id"]
+    body = {"berth_id": busy, "vessel": "НОСИТЕЛЬ ИСТОРИИ", "length_m": 60, "offset_m": 0,
+            "starts_at": "2027-01-03T06:00:00", "ends_at": "2027-01-05T12:00:00"}
+    assert client.post("/api/vessels/placements", json=body, headers=admin_hdr).status_code == 201
+    blocked = client.delete(f"/api/vessels/berths/{busy}", headers=admin_hdr)
+    assert blocked.status_code == 409
+    assert "снимите его с линии" in blocked.json()["detail"]
+
+    ok = client.delete(f"/api/vessels/berths/{empty_id}", headers=admin_hdr)
+    assert ok.status_code == 204
+    assert empty_id not in {b["id"] for b in client.get("/api/vessels/berths", headers=admin_hdr).json()}
+
+
+def test_admin_sees_berth_book_even_if_plan_closed(client, admin_hdr):
+    """Личный запрет на план не должен ломать админскую вкладку «Причалы»."""
+    users = client.get("/api/admin/users", headers=admin_hdr).json()
+    aid = next(u["id"] for u in users if u["login"] == "admin")
+    assert client.patch(f"/api/admin/users/{aid}", json={"vessel_right": "none"},
+                        headers=admin_hdr).status_code == 200
+    try:
+        assert client.get("/api/vessels/berths", headers=admin_hdr).status_code == 200
+    finally:
+        client.patch(f"/api/admin/users/{aid}", json={"vessel_right": None}, headers=admin_hdr)
+
+
+def test_berth_delete_needs_admin(client, admin_hdr):
+    """Справочник причалов — админская зона: топ-менеджмент править справочник не может."""
+    top = client.post("/api/auth/login", json={"login": "ivanova", "password": "demo1234"})
+    assert top.status_code == 200, top.text
+    hdr = {"Authorization": f"Bearer {top.json()['access_token']}"}
+    bid = _berth_id(client, admin_hdr)
+    assert client.delete(f"/api/vessels/berths/{bid}", headers=hdr).status_code == 403
+    assert client.post("/api/vessels/berths", json={"code": "НОВЫЙ-ТОП"}, headers=hdr).status_code == 403
+
+
 # ------------------------------------------------------------------- создание ----
 
 
@@ -373,13 +437,17 @@ def test_personal_right_beats_role(client, admin_hdr):
 
 
 def test_personal_none_closes_even_admin(client, admin_hdr):
-    """Личное «нет доступа» перекрывает роль: админу закрыли — админ не видит."""
+    """Личное «нет доступа» перекрывает роль: админу закрыли план — плана нет.
+
+    Справочник причалов — исключение: его администратор ведёт сам, иначе
+    админская вкладка «Причалы» ломается из-за запрета на другой документ.
+    """
     uid = _user_id(client, admin_hdr, "admin")
     try:
         assert client.patch(f"/api/admin/users/{uid}", json={"vessel_right": "none"},
                             headers=admin_hdr).status_code == 200
         assert client.get("/api/vessels/placements", params=PERIOD, headers=admin_hdr).status_code == 403
-        assert client.get("/api/vessels/berths", headers=admin_hdr).status_code == 403
+        assert client.get("/api/vessels/berths", headers=admin_hdr).status_code == 200
     finally:
         assert client.patch(f"/api/admin/users/{uid}", json={"vessel_right": None},
                             headers=admin_hdr).status_code == 200

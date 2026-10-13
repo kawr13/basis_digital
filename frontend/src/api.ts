@@ -370,6 +370,15 @@ export type Berth = {
   length_cells: number;
 };
 
+export type BerthInput = {
+  code: string;
+  depth?: number | null;
+  length_m?: number | null;
+  lanes?: number;
+  sort_order?: number;
+  is_active?: boolean;
+};
+
 export type Placement = {
   id: number;
   berth_id: number;
@@ -506,6 +515,11 @@ export const api = {
 
   // ---- постановка судов ----
   berths: () => request<Berth[]>("/api/vessels/berths"),
+  createBerth: (body: BerthInput) =>
+    request<Berth>("/api/vessels/berths", { method: "POST", body: JSON.stringify(body) }),
+  patchBerth: (id: number, body: BerthInput) =>
+    request<Berth>(`/api/vessels/berths/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
+  deleteBerth: (id: number) => request<void>(`/api/vessels/berths/${id}`, { method: "DELETE" }),
   vesselPlan: (from?: string, to?: string, berthId?: number) => {
     const q = new URLSearchParams();
     if (from) q.set("from", from);

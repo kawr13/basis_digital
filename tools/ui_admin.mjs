@@ -15,6 +15,7 @@
 import { chromium } from "playwright-core";
 
 const BASE = process.env.BASE || "http://localhost:5173";
+const API = process.env.API || "http://localhost:8000";
 const ADMIN_LOGIN = process.env.ADMIN_LOGIN || "admin";
 const PASS = process.env.PASS;
 const exe = process.env.PW_CHROMIUM;
@@ -25,6 +26,15 @@ if (!PASS) {
 }
 
 const problems = [];
+// прямой запрос к API (без UI) нужен, чтобы проверить: снятый с линии причал
+// действительно исчезает из ответа плана, а не только из сетки
+const loginRes = await fetch(`${API}/api/auth/login`, {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ login: ADMIN_LOGIN, password: PASS }),
+});
+const tok = (await loginRes.json()).access_token;
+
 // ru-RU разделяет разряды неразрывным пробелом — в проверках нормализуем
 const norm = (s) => (s || "").replace(/\u00a0|\u202f/g, " ").replace(/\s+/g, " ");
 const ok = (cond, msg) => {
@@ -215,6 +225,79 @@ await whRow.locator('[data-admin-action="enable-warehouse"]').click();
 await page.waitForTimeout(600);
 ok(((await whRow.textContent()) || "").includes("активен"), "склад снова активен");
 await page.screenshot({ path: "shot_admin_warehouses.png", fullPage: true });
+
+// --------------------------------------------------------------- причалы ---
+const NEW_BERTH = `QA-${stamp.slice(-5)}`.toUpperCase();
+await page.click('[data-tab="berths"]');
+await page.waitForSelector('[data-tab-panel="berths"]');
+ok((await page.textContent("[data-tab-panel='berths']")).includes("Причалы"), "вкладка «Причалы» открылась");
+
+await page.click('[data-admin-action="create-berth"]');
+await page.waitForSelector('[data-modal="berth-form"]');
+await page.fill('[data-modal="berth-form"] [data-field="code"]', NEW_BERTH);
+await page.fill('[data-modal="berth-form"] [data-field="length-m"]', "130");
+await page.fill('[data-modal="berth-form"] [data-field="depth"]', "9.5");
+ok((await page.textContent("[data-free-hint]")).includes("13 ячеек"),
+   `длина сразу превращается в шкалу: ${await page.textContent("[data-free-hint]")}`);
+await page.click('[data-admin-action="save-berth"]');
+await page.waitForSelector(`tr[data-berth-code="${NEW_BERTH}"]`, { timeout: 8000 });
+ok(true, `причал «${NEW_BERTH}» добавлен из админки`);
+const bRow = page.locator(`tr[data-berth-code="${NEW_BERTH}"]`);
+ok((await bRow.textContent()).includes("13 × 10 м"), "шкала причала показана в строке");
+ok((await bRow.textContent()).includes("9.5"), "осадка у причала видна");
+
+// код обязан быть читаемым: бэкенд не примет «-»
+await bRow.locator('[data-admin-action="edit-berth"]').click();
+await page.waitForSelector('[data-modal="berth-edit"]');
+await page.fill('[data-modal="berth-edit"] [data-field="code"]', "-");
+await page.click('[data-admin-action="save-berth"]');
+await page.waitForSelector('[data-modal="berth-edit"] [data-form-error]', { timeout: 8000 });
+ok((await page.textContent("[data-modal='berth-edit'] [data-form-error]")).length > 10,
+   "нечитаемый код причала не приняли");
+await page.fill('[data-modal="berth-edit"] [data-field="code"]', NEW_BERTH);
+await page.fill('[data-modal="berth-edit"] [data-field="length-m"]', "90");
+await page.click('[data-admin-action="save-berth"]');
+await page.waitForFunction(
+  (code) => document.querySelector(`tr[data-berth-code="${code}"]`)?.textContent.includes("9 × 10 м"),
+  NEW_BERTH, { timeout: 8000 },
+);
+ok(true, "длину причала поправили, шкала пересчиталась");
+
+// сняли с линии — причал уходит из плана, но остаётся в справочнике
+await bRow.locator('[data-admin-action="deactivate-berth-ask"]').click();
+await bRow.locator('[data-admin-action="deactivate-berth"]').click();
+await page.waitForFunction(
+  (code) => document.querySelector(`tr[data-berth-code="${code}"]`)?.textContent.includes("снят с линии"),
+  NEW_BERTH, { timeout: 8000 },
+);
+ok(true, "причал снят с линии (из сетки плана уйдёт, история останется)");
+const hidden = await fetch(`${API}/api/vessels/placements`, {
+  headers: { Authorization: `Bearer ${tok}` },
+}).then((r) => r.json());
+ok(!hidden.berths.some((b) => b.code === NEW_BERTH), "снятого причала нет в ответе плана");
+await bRow.locator('[data-admin-action="enable-berth"]').click();
+await page.waitForFunction(
+  (code) => document.querySelector(`tr[data-berth-code="${code}"]`)?.textContent.includes("в плане"),
+  NEW_BERTH, { timeout: 8000 },
+);
+ok(true, "причал вернулся в план");
+
+// пустой причал удаляется полностью — это справочник, а не витрина
+await bRow.locator('[data-admin-action="delete-berth-ask"]').click();
+await bRow.locator('[data-admin-action="delete-berth"]').click();
+await page.waitForFunction(
+  (code) => !document.querySelector(`tr[data-berth-code="${code}"]`),
+  NEW_BERTH, { timeout: 8000 },
+);
+ok(true, "пустой причал удалён из справочника");
+// а причал с постановками удалить нельзя — только снять с линии
+const busyRow = page.locator("tr[data-berth-code='РП-1']");
+await busyRow.locator('[data-admin-action="delete-berth-ask"]').click();
+await busyRow.locator('[data-admin-action="delete-berth"]').click();
+await page.waitForSelector("[data-tab-panel='berths'] [role=alert], [data-tab-panel='berths'] [data-form-error], [data-tab-panel='berths'] .text-crit", { timeout: 8000 });
+const delErr = (await page.textContent("[data-tab-panel='berths']")).toLowerCase();
+ok(delErr.includes("снимите его с линии"), "причал с историей удалять не дали — предложили снять с линии");
+await page.screenshot({ path: "shot_admin_berths.png", fullPage: true });
 
 // ------------------------------------------------------- 1С: проверка и загрузка ---
 await page.click('[data-tab="onec"]');

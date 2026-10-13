@@ -11,17 +11,19 @@ import { Navigate } from "react-router-dom";
 import { useAuth } from "../auth";
 import { AppShell } from "../components/AppShell";
 import { AuditTab } from "../components/admin/AuditTab";
+import { BerthsTab } from "../components/admin/BerthsTab";
 import { OneCTab } from "../components/admin/OneCTab";
 import { SettingsTab } from "../components/admin/SettingsTab";
 import { UsersTab } from "../components/admin/UsersTab";
 import { WarehousesTab } from "../components/admin/WarehousesTab";
 import { useAdminSettings } from "../components/admin/useSettings";
 
-type TabId = "users" | "warehouses" | "onec" | "settings" | "audit";
+type TabId = "users" | "warehouses" | "berths" | "onec" | "settings" | "audit";
 
 const TABS: { id: TabId; label: string }[] = [
   { id: "users", label: "Пользователи" },
   { id: "warehouses", label: "Склады" },
+  { id: "berths", label: "Причалы" },
   { id: "onec", label: "1С и синхронизация" },
   { id: "settings", label: "Настройки" },
   { id: "audit", label: "Журнал" },
@@ -63,14 +65,17 @@ export default function AdminPage() {
 
       {tab === "users" && <UsersTab />}
       {tab === "warehouses" && <WarehousesTab />}
+      {tab === "berths" && <BerthsTab />}
       {tab === "onec" && <OneCTab settings={settings} />}
       {tab === "settings" && <SettingsTab settings={settings} />}
       {tab === "audit" && <AuditTab />}
 
       <p className="text-[11px] text-ink-300 leading-relaxed">
         Все действия администратора попадают в журнал: создание и отключение учётных записей,
-        сброс паролей, правку складов и настроек. Удаления нет ни у пользователей, ни у складов —
-        только выключение, чтобы аудит и история загрузок переживали увольнение и закрытие склада.
+        сброс паролей, правку складов, причалов и настроек. Удаления нет ни у пользователей, ни у
+        складов — только выключение, чтобы аудит и история загрузок переживали увольнение и закрытие
+        склада. Причал удалить можно, но только пока на нём нет ни одной постановки: иначе история
+        плана повиснет на несуществующем причале.
       </p>
     </AppShell>
   );

@@ -381,7 +381,7 @@ export default function VesselsPage() {
               title="Перетаскивание судов мышью: горизонталь — время, вертикаль — место у причала"
               data-admin-action="wysiwyg"
             >
-              ✏ Карандаш
+              ✏ Корректировка
             </button>
           )}
           {saved && (
