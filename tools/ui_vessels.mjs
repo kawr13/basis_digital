@@ -337,6 +337,27 @@ ok(printStyle.header === "none" && printStyle.toolbar === "none",
    "в PDF не уедут шапка кабинета и панель управления");
 ok(printStyle.grid === "none" && printStyle.sheet === "block",
    "в PDF идёт отдельный лист с видимой областью, а не экранная сетка целиком");
+
+// лист обязан влезать в любую бумагу: его ширины — проценты, а не пиксели.
+// пиксельный лист на A4 расползался на три страницы по горизонтали
+for (const [paper, w] of [["A3 landscape", 1527], ["A4 landscape", 1047], ["A4 portrait", 700]]) {
+  await page.setViewportSize({ width: w, height: 700 });
+  await page.waitForTimeout(350);
+  const fit = await page.evaluate(() => {
+    const s = document.querySelector(".vp-print-sheet");
+    const days = [...s.querySelectorAll("[data-print-day]")];
+    const last = days[days.length - 1].getBoundingClientRect();
+    return {
+      right: Math.round(s.getBoundingClientRect().right),
+      lastRight: Math.round(last.right),
+      overflow: Math.round(s.scrollWidth - s.clientWidth),
+      days: days.length,
+    };
+  });
+  ok(fit.lastRight <= fit.right + 1 && fit.overflow <= 1,
+     `лист прижат к ширине страницы (${paper}): ${fit.days} сут, край ${fit.lastRight} из ${fit.right}`);
+}
+await page.setViewportSize({ width: 1500, height: 950 });
 await page.emulateMedia({ media: "screen" });
 await page.evaluate(() => { const g = document.querySelector("[data-vp-grid]"); g.scrollLeft = 0; g.scrollTop = 0; });
 await page.waitForTimeout(400);

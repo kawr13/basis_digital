@@ -443,11 +443,11 @@ export default function VesselsPage() {
       berthIds: visible.length ? visible : blocks.map((b) => b.berth.id),
     };
     setPrintWin(win);
-    // A3 landscape с полями 8 мм ≈ 1527 px при 96 dpi: лист подгоняем под ширину
-    // страницы, а не под ширину всего периода
-    const printable = 1527;
-    const sheetW = LEFT_W + (win.d1 - win.d0 + 1) * SLOT_HOURS.length * slotW;
-    document.documentElement.style.setProperty("--vp-print-scale", String(Math.min(1, +(printable / sheetW).toFixed(3))));
+    // Масштаб не считаем: лист построен в процентах и сам прижимается к ширине
+    // страницы. Из JS размер бумаги в диалоге печати не узнать (A4 портрет,
+    // A4 альбом, A3 — что выберут), поэтому пиксельный лист расползался на
+    // несколько страниц по горизонтали.
+    //
     // печать синхронная: React должен успеть нарисовать лист до открытия диалога
     window.setTimeout(() => window.print(), 60);
   };
@@ -511,7 +511,7 @@ export default function VesselsPage() {
           <button
             className="btn btn-mini btn-ghost"
             onClick={exportPdf}
-            title="Сохранить план в PDF: в файл уходит выбранный период целиком"
+            title="PDF: в файл уходит только то, что видно в окне плана. В диалоге печати выберите альбомную ориентацию"
             data-admin-action="export-pdf"
           >
             ⤓ PDF
@@ -738,15 +738,7 @@ export default function VesselsPage() {
             Состав — ровно тот кадр, который сейчас в окне сетки. */}
         <div className="vp-print-only">
           {printWin && (
-            <VesselPlanPrint
-              days={days}
-              from={from}
-              blocks={blocks}
-              win={printWin}
-              slotW={slotW}
-              leftW={LEFT_W}
-              cellH={CELL_H}
-            />
+            <VesselPlanPrint days={days} from={from} blocks={blocks} win={printWin} cellH={CELL_H} />
           )}
         </div>
       </div>
