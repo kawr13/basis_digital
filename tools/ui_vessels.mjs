@@ -288,26 +288,58 @@ await page.waitForSelector("[data-modal='placement-form']", { state: "detached" 
 const pdfBtn = page.locator("[data-admin-action='export-pdf']");
 ok((await pdfBtn.count()) === 1, "кнопка «⤓ PDF» на месте");
 await page.evaluate(() => { window.print = () => {}; });   // диалог в headless не открываем
+
+// сдвигаем кадр: в PDF должно уйти ровно то, что видно, а не весь период
+await page.evaluate(() => {
+  const g = document.querySelector("[data-vp-grid]");
+  g.scrollLeft = 700;
+  g.scrollTop = 120;
+});
+await page.waitForTimeout(500);
+const frame = await page.evaluate(() => {
+  const g = document.querySelector("[data-vp-grid]").getBoundingClientRect();
+  const days = [...document.querySelectorAll("[data-vp-grid] [data-day]")]
+    .filter((d) => { const r = d.getBoundingClientRect(); return r.right > g.left + 1 && r.left < g.right - 1; })
+    .map((d) => d.dataset.day);
+  const berthIds = [...document.querySelectorAll("[data-vp-grid] [data-berth-block]")]
+    .filter((n) => { const r = n.getBoundingClientRect(); return r.bottom > g.top + 1 && r.top < g.bottom - 1; })
+    .map((n) => Number(n.dataset.berthId));
+  return { days, berthIds, totalDays: document.querySelectorAll("[data-vp-grid] [data-day]").length };
+});
+ok(frame.days.length < frame.totalDays, `кадр меньше периода: видно ${frame.days.length} сут из ${frame.totalDays}`);
+
 await pdfBtn.click();
-const scale = await page.evaluate(() =>
-  getComputedStyle(document.documentElement).getPropertyValue("--vp-print-scale").trim());
-ok(+scale > 0 && +scale <= 1, `план подгоняется под ширину страницы: масштаб ${scale}`);
-await page.emulateMedia({ media: "print" });
-await page.waitForTimeout(300);
-const printStyle = await page.evaluate(() => {
-  const g = getComputedStyle(document.querySelector("[data-vp-grid]"));
+await page.waitForTimeout(500);
+const sheet = await page.evaluate(() => {
+  const s = document.querySelector(".vp-print-sheet");
   return {
-    header: getComputedStyle(document.querySelector("header.glass-navy")).display,
-    toolbar: getComputedStyle(document.querySelector("[data-vessels-toolbar]")).display,
-    maxH: g.maxHeight,
-    overflow: g.overflowY,
+    days: [...s.querySelectorAll("[data-print-day]")].map((d) => d.dataset.printDay),
+    fields: [...s.querySelectorAll("[data-print-field]")].map((n) => Number(n.dataset.printField)),
+    bars: [...s.querySelectorAll("[data-print-bar]")].map((b) => b.dataset.berth),
   };
 });
+ok(sheet.days.length > 0 && sheet.days.length < frame.totalDays,
+   `в PDF только видимые сутки: ${sheet.days.length} из ${frame.totalDays} (${sheet.days[0]} … ${sheet.at === undefined ? sheet.days[sheet.days.length - 1] : ""})`);
+ok(sheet.days.every((d) => frame.days.includes(d)), "суток за кадром в PDF нет");
+ok(JSON.stringify([...sheet.fields].sort()) === JSON.stringify([...frame.berthIds].sort()),
+   `в PDF только причалы из кадра: ${sheet.fields.join(", ")}`);
+ok(sheet.bars.every((code) => code), `полосы в листе на своих причалах: ${[...new Set(sheet.bars)].join(", ")}`);
+
+await page.emulateMedia({ media: "print" });
+await page.waitForTimeout(400);
+const printStyle = await page.evaluate(() => ({
+  header: getComputedStyle(document.querySelector("header.glass-navy")).display,
+  toolbar: getComputedStyle(document.querySelector("[data-vessels-toolbar]")).display,
+  grid: getComputedStyle(document.querySelector("[data-vp-grid]")).display,
+  sheet: getComputedStyle(document.querySelector(".vp-print-only")).display,
+}));
 ok(printStyle.header === "none" && printStyle.toolbar === "none",
    "в PDF не уедут шапка кабинета и панель управления");
-ok(printStyle.maxH === "none" && printStyle.overflow === "visible",
-   "сетка в печати разворачивается целиком, без прокрутки");
+ok(printStyle.grid === "none" && printStyle.sheet === "block",
+   "в PDF идёт отдельный лист с видимой областью, а не экранная сетка целиком");
 await page.emulateMedia({ media: "screen" });
+await page.evaluate(() => { const g = document.querySelector("[data-vp-grid]"); g.scrollLeft = 0; g.scrollTop = 0; });
+await page.waitForTimeout(400);
 
 // ───────────────────────────── WYSIWYG: перетаскивание мышью ─────────────────────────
 const pencil = page.locator("[data-admin-action='wysiwyg']");

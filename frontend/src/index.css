@@ -365,6 +365,10 @@
    Всё лишнее — шапка, навигация, панель периода, подсказки — прячем, сетку
    разворачиваем без прокрутки и сжимаем до ширины страницы (--vp-print-scale),
    иначе правый край периода отрезался бы на второй лист. */
+.vp-print-only {
+  display: none;
+}
+
 @media print {
   @page {
     size: A3 landscape;
@@ -398,13 +402,17 @@
     border: 1px solid #cfd8e3;
   }
 
+  /* экранная сетка — это прокручиваемый кадр; в PDF вместо неё печатается
+     отдельный лист с ровно той же видимой областью (см. VesselPlanPrint) */
   [data-vp-grid] {
-    max-height: none !important;
-    overflow: visible !important;
-    border: 0 !important;
+    display: none !important;
   }
 
-  [data-vp-print] {
+  .vp-print-only {
+    display: block !important;
+  }
+
+  .vp-print-sheet {
     zoom: var(--vp-print-scale, 1);
   }
 

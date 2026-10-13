@@ -18,6 +18,7 @@ import {
 } from "../api";
 import { useAuth } from "../auth";
 import { AppShell } from "../components/AppShell";
+import { VesselPlanPrint, type PrintWindow } from "../components/VesselPlanPrint";
 import { Field, FormError, Modal, Notice, errText } from "../components/admin/ui";
 import { dmy } from "../format";
 import { resolveVesselRights, roleListLabel, usePublicSettings } from "../settings";
@@ -156,6 +157,8 @@ export default function VesselsPage() {
   // поле плана обязано доставать до правого края: ширину слота считаем от
   // реальной ширины контейнера, а не зашиваем
   const gridRef = useRef<HTMLDivElement>(null);
+  // какой кадр уйдёт в PDF: считается в момент нажатия «⤓ PDF»
+  const [printWin, setPrintWin] = useState<PrintWindow | null>(null);
   const [availW, setAvailW] = useState(0);
   useEffect(() => {
     const el = gridRef.current;
@@ -418,11 +421,35 @@ export default function VesselsPage() {
    * чтобы правый край не отрезался.
    */
   const exportPdf = () => {
-    // A3 landscape с полями 8 мм ≈ 1527 px при 96 dpi
+    const el = gridRef.current;
+    if (!el) return;
+    // В PDF уходит кадр, а не весь период: пользователь смотрит на конкретные
+    // сутки и причалы и хочет получить их крупно, а не сжатый до нечитаемого
+    // кегля месяц. Границы берём из реального прокрученного положения.
+    const dayPx = slotW * SLOT_HOURS.length;
+    const d0 = Math.max(0, Math.floor((el.scrollLeft - LEFT_W) / dayPx));
+    const d1 = Math.min(days.length - 1, Math.ceil((el.scrollLeft + el.clientWidth - LEFT_W) / dayPx) - 1);
+    const box = el.getBoundingClientRect();
+    const visible = [...el.querySelectorAll<HTMLElement>("[data-berth-block]")]
+      .filter((node) => {
+        const r = node.getBoundingClientRect();
+        return r.bottom > box.top + 1 && r.top < box.bottom - 1;
+      })
+      .map((node) => Number(node.dataset.berthId))
+      .filter(Number.isFinite);
+    const win: PrintWindow = {
+      d0,
+      d1: Math.max(d0, d1),
+      berthIds: visible.length ? visible : blocks.map((b) => b.berth.id),
+    };
+    setPrintWin(win);
+    // A3 landscape с полями 8 мм ≈ 1527 px при 96 dpi: лист подгоняем под ширину
+    // страницы, а не под ширину всего периода
     const printable = 1527;
-    const scale = Math.min(1, +(printable / Math.max(gridWidth, 1)).toFixed(3));
-    document.documentElement.style.setProperty("--vp-print-scale", String(scale));
-    window.print();
+    const sheetW = LEFT_W + (win.d1 - win.d0 + 1) * SLOT_HOURS.length * slotW;
+    document.documentElement.style.setProperty("--vp-print-scale", String(Math.min(1, +(printable / sheetW).toFixed(3))));
+    // печать синхронная: React должен успеть нарисовать лист до открытия диалога
+    window.setTimeout(() => window.print(), 60);
   };
 
   return (
@@ -702,10 +729,26 @@ export default function VesselsPage() {
           </div>
         </div>
 
-        <p className="mt-3 text-[11px] text-ink-400">
+        <p className="mt-3 text-[11px] text-ink-400 no-print">
           Пунктирный край — постановка началась раньше выбранного периода. Клик по полосе — подробности,
           правка и удаление.
         </p>
+
+        {/* Печатный лист: на экране его нет, он появляется только в печати и в PDF.
+            Состав — ровно тот кадр, который сейчас в окне сетки. */}
+        <div className="vp-print-only">
+          {printWin && (
+            <VesselPlanPrint
+              days={days}
+              from={from}
+              blocks={blocks}
+              win={printWin}
+              slotW={slotW}
+              leftW={LEFT_W}
+              cellH={CELL_H}
+            />
+          )}
+        </div>
       </div>
 
       {detail && (
