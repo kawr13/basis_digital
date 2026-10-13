@@ -30,15 +30,18 @@ export function AppShell({
 
   return (
     <div className="min-h-full">
-      {/* Шапка — ГЛУХОЙ фирменный navy (#1b3360), без стекла и blur: строгая деловая
-          шапка. Снизу тонкая голубая рамка brand-sky — единственный «светлый» акцент. */}
-      <header className="sticky top-0 z-20 bg-brand-navy text-white border-b border-brand-sky/30">
+      {/* Шапка — матовое стекло в фирменном navy (.glass-navy): под ней прокручивается
+          контент, и blur(16px) размывает его в мягкое navy-марево. Текст белый —
+          контраст 11.5:1, снизу тонкая голубая рамка brand-sky. */}
+      <header className="glass-navy sticky top-0 z-20 text-white">
         <div className="mx-auto max-w-[1500px] px-6">
           {/* flex-wrap: на узком экране навигация и блок пользователя перестают
               влезать в одну строку — без переноса страница уезжает в горизонт */}
           <div className="flex flex-wrap items-center gap-x-4 gap-y-1 pt-3">
             <div>
-              <div className="text-[11px] uppercase tracking-[0.18em] text-white/60">БазисПорт</div>
+              {/* white/75, не white/60: шапка стала полупрозрачной (3.9:1 — ниже AA),
+                  на стекле /75 даёт 5.0:1 */}
+              <div className="text-[11px] uppercase tracking-[0.18em] text-white/75">БазисПорт</div>
               <div className="text-sm font-medium text-white">Кабинет веб-статистики</div>
             </div>
 

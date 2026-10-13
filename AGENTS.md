@@ -48,7 +48,7 @@ statcab/
 │   ├── src/auth.tsx         # AuthProvider: восстановление сессии, login/logout
 │   ├── src/pages/           # LoginPage, DashboardPage, ReportsPage, AdminPage (вкладки админки)
 │   ├── src/components/      # AppShell (шапка+навигация), WidgetGrid (drag&drop плашек),
-│   │                        # KpiCard, DynamicsChart (SVG, кликабельный), CapacityPanel,
+│   │                        # KpiCard (+Sparkline), DynamicsChart (SVG: сплейн, тултип, перекрестие), CapacityPanel,
 │   │                        # CargoTable, DrilldownPanel (детализация за день / по складу)
 │   │                        # admin/ — вкладки админки (UsersTab, WarehousesTab, OneCTab,
 │   │                        # SettingsTab, AuditTab), SettingsForm (форма из specs бэкенда)
@@ -99,10 +99,20 @@ statcab/
 - **Время** храним наивным UTC (`models.utcnow()`), чтобы SQLite и PG вели себя одинаково.
 - **Ошибки входа** — всегда один текст («Неверный логин или пароль»), чтобы не светить существование учётки.
 - **Пароли**: `scrypt$N$r$salt$hash` (stdlib, без нативных зависимостей).
-- **Тема оформления** — строгая светлая: цвета фирменные, сняты с `cab.basisport.ru`
+- **Тема оформления** — светлая, плашки — **матовое стекло**: `rgba(255,255,255,.62)` +
+  `linear-gradient(160deg, rgba(255,255,255,.78), rgba(255,255,255,.42))` +
+  `backdrop-filter: blur(18px) saturate(150%)`, рамка `rgba(255,255,255,.7)`, тень `shadow-panel`
+  c внутренним бликом `inset 0 1px 0 rgba(255,255,255,.9)`. Чтобы blur было ЧТО размывать,
+  на `body` лежат 3 радиальных пятна (brand.sky/mid/navy, 12–18%) и сетка 44px
+  (`background-attachment: fixed`); без них панель = просто белая. Шапка — `.glass-navy`
+  (`rgba(27,51,96,.82)` + `blur(16px) saturate(140%)`), модалка и панель деталей получают
+  стекло от `.panel`, подложка модалки `rgba(15,27,45,.35)`.
+  Цвета фирменные, сняты с `cab.basisport.ru`
   (`brand.navy #1b3360` — шапка, `brand.sky #2fbaec` — акцент на синем, `accent #1668a8` — на белом).
   Шкала `ink` в светлой теме перевёрнута (100 — тёмный текст, 900 — белая поверхность).
-  Контраст проверяем расчётом: второстепенный текст не ниже 4.5:1.
+  Контраст проверяем расчётом (`node tools/contrast_check.mjs`): второстепенный текст не ниже
+  4.5:1 — в худшей точке стекла ink-400 = 4.59:1, ink-300 = 6.28:1, ink-100 = 15.9:1,
+  белый на шапке = 7.4:1; из-за полупрозрачности шапки `text-white/60` поднят до `text-white/75`.
 - **Питфалли фронтенда**: правки в `tailwind.config.js` dev-сервер подхватывает не всегда —
   после смены палитры перезапускать vite и чистить `node_modules/.vite`, иначе браузер
   отдаёт старый CSS и проверки «по скриншотам» врут. Проверять вычисленными стилями
@@ -124,6 +134,9 @@ statcab/
 | `node tools/ui_customization.mjs` | браузерная проверка drag&drop, отчётов и CSV |
 | `node tools/ui_drilldown.mjs` | браузерная проверка кликабельных графиков и панели деталей |
 | `node tools/ui_admin.mjs` | браузерная проверка админки (нужны `ADMIN_LOGIN` и `PASS`) |
+| `node tools/ui_admin.mjs` | браузерная проверка админки (нужны `ADMIN_LOGIN` и `PASS`) |
+| `node tools/ui_glass_chart.mjs` | проверка стиля вычисленными свойствами: стекло, тултип, анимации, `prefers-reduced-motion` |
+| `node tools/contrast_check.mjs` | расчёт WCAG-контраста для стекла (скриншоты не нужны) |
 
 **После браузерных смоков чистим dev-БД** — тесты создают учётки `qa*`/`zz*` и склады `QA-*`:
 ```sql

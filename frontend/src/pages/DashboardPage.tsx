@@ -249,6 +249,8 @@ function buildWidgets(data: Data | null, sel: Selection = {}): WidgetDef[] {
           label="Обработано за 7 суток"
           value={nf(s?.processed_7d_t ?? 0, 0)}
           unit="т"
+          // спарклайн берём из того же среза, что и график рядом: цифры не разойдутся
+          spark={data ? data.dynamics.points.slice(-14).map((p) => p.processed_t) : undefined}
           sub={
             delta === null ? (
               "нет данных за предыдущий период"

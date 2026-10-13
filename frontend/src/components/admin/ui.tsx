@@ -4,6 +4,7 @@
  * Здесь нет бизнес-логики: только разметка (модалка, поля формы, статусы,
  * состояния «загрузка / пуст / ошибка»), одинаковая для всех вкладок админки.
  * Классы сняты с ReportsPage — админка должна выглядеть как остальной кабинет.
+ * (модалка затемняет подложку rgba(15,27,45,.35), а стекло даёт сам .panel).
  */
 import { useEffect } from "react";
 
@@ -39,10 +40,12 @@ export function Modal({
 
   return (
     <div
-      className="fixed inset-0 z-30 overflow-y-auto bg-ink-100/40 p-4 py-8"
+      className="fixed inset-0 z-30 overflow-y-auto bg-[rgba(15,27,45,.35)] p-4 py-8"
       onClick={onClose}
       data-modal-overlay
     >
+      {/* сама модалка — .panel, а значит уже матовое стекло: blur(18px) размывает
+          затемнённую подложку и страницу за ней */}
       <div
         className={`panel dd-panel relative mx-auto w-full ${wide ? "max-w-3xl" : "max-w-xl"} p-0`}
         role="dialog"

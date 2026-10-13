@@ -6,9 +6,11 @@
  * Палитра — фирменная, снята с cab.basisport.ru: navy шапки #1b3360,
  * голубой акцент #2fbaec, bootstrap-синие #337ab7 / #428bca / #66afe9.
  *
- * Тема СТРОГАЯ СВЕТЛАЯ: белый/светло-серый фон, белые плашки с мягкой
- * рассеянной тенью (shadow-panel), никаких blur/полупрозрачности —
- * «liquid glass» убран вместе со слоем орбов под ним (размывать было нечего).
+ * Тема СВЕТЛАЯ, но плашки — матовое стекло (frosted glass). Стекло работает
+ * только тогда, когда под ним есть ЧТО размывать: поэтому на фоне страницы
+ * живут три голубых пятна и тонкая сетка 44px. Без них панель с blur(18px)
+ * выглядела бы просто белой, а на тёмном фоне (как было раньше) то же стекло
+ * читалось как грязь — на светлом оно молочное и лёгкое.
  */
 @layer base {
   html,
@@ -18,9 +20,20 @@
   }
   body {
     @apply text-ink-100 font-sans antialiased;
-    background-color: #f4f7fb;
-    /* едва заметный холодный уход вниз: страница не выглядит выжженно-белой */
-    background-image: linear-gradient(180deg, #f7f9fc 0%, #f4f7fb 40%, #eef2f8 100%);
+    background-color: #e8eef7;
+    /*
+     * Подложка под матовое стекло: три радиальных голубых пятна (фирменные
+     * brand.sky / brand.mid / brand.navy) и сетка 44px. Насыщенность подобрана
+     * так, чтобы СНАРУЖИ панели сетка и пятна были резкими и заметными
+     * (rgb ~157..180), а ИЗ-ПОД панели — размытыми и светлыми (rgb ~228..234):
+     * именно контраст «резкое снаружи / мутное внутри» и продаёт матовость.
+     * Порядок слоёв: первая строка рисуется поверх остальных.
+     */
+    background-image: radial-gradient(760px 460px at 10% -6%, rgba(47, 186, 236, 0.3), transparent 62%),
+      radial-gradient(900px 560px at 92% 2%, rgba(51, 122, 183, 0.34), transparent 60%),
+      radial-gradient(700px 520px at 60% 104%, rgba(27, 51, 96, 0.18), transparent 62%),
+      repeating-linear-gradient(0deg, rgba(27, 51, 96, 0.09) 0 1px, transparent 1px 44px),
+      repeating-linear-gradient(90deg, rgba(27, 51, 96, 0.09) 0 1px, transparent 1px 44px);
     background-attachment: fixed;
     /* нативные контролы (date, скроллбар, календарь) — в светлой теме */
     color-scheme: light;
@@ -40,12 +53,37 @@
 
 @layer components {
   /*
-   * Плашка: белая поверхность + мягкая многослойная тень + тонкий светлый ободок.
-   * Никакого blur и полупрозрачности: контент под плашкой не просвечивает.
+   * Плашка — матовое стекло поверх светлого фона: полупрозрачная белая база
+   * + молочный градиент 160deg (сверху плотнее, снизу прозрачнее), blur(18px)
+   * с saturate(150%) — поэтому сетка и пятна фона размываются, но остаются
+   * видны мягкими разводами. Рамка белёсая (не серая): серая рамка на стекле
+   * выглядит «вдавленной». Тень — shadow-panel + внутренняя верхняя
+   * подсветка (см. tailwind.config.js), она даёт блик по верхнему краю.
+   *
+   * Контраст текста не пострадал: даже в худшей точке (текст над голубым
+   * пятном brand.mid, где стекло тоньше всего) ink-100 = 15.9:1, ink-300 = 6.3:1,
+   * ink-400 = 4.6:1 — см. tools/contrast_check.mjs.
    */
   .panel {
-    @apply rounded-lg shadow-panel bg-ink-900;
-    border: 1px solid #e6ebf3; /* ink-700 */
+    @apply rounded-lg shadow-panel;
+    /* суммарная белизна стекла .55 + .38 ≈ .72: под ним видно размытую сетку,
+       но текст остаётся ≥4.5:1 (ink-400 #566a85 даёт 4.6:1 в худшем месте) */
+    background-color: rgba(255, 255, 255, 0.55);
+    background-image: linear-gradient(160deg, rgba(255, 255, 255, 0.75), rgba(255, 255, 255, 0.38));
+    -webkit-backdrop-filter: blur(20px) saturate(160%);
+    backdrop-filter: blur(20px) saturate(160%);
+    border: 1px solid rgba(255, 255, 255, 0.62);
+  }
+  /*
+   * Шапка — то же стекло, только navy: rgba(27,51,96,.82) + blur(16px).
+   * Белому тексту нужно 4.5:1 — здесь 7.5:1 в худшем месте (navy просветляет
+   * светлый фон; см. tools/contrast_check.mjs), приглушённый белый /75 = 5.0:1.
+   */
+  .glass-navy {
+    background-color: rgba(27, 51, 96, .82);
+    -webkit-backdrop-filter: blur(16px) saturate(140%);
+    backdrop-filter: blur(16px) saturate(140%);
+    border-bottom: 1px solid rgba(47, 186, 236, .35);
   }
   .panel-title {
     /* ink-400: caps + tracking уже дают вес, тёмный текст не нужен */
@@ -178,6 +216,86 @@
   outline-offset: -2px;
 }
 
+/*
+ * График: карточка-тултип вместо нативного <title>. Позиционируется из
+ * DynamicsChart в процентах по X (svg рисуется в реальных пикселях, но при
+ * очень узкой плашке viewBox сжимается — проценты не врут).
+ * pointer-events: none обязательно: иначе карточка отнимает наведение у колонки.
+ */
+.dc-tip {
+  position: absolute;
+  z-index: 5;
+  pointer-events: none;
+  min-width: 196px;
+  padding: 7px 10px 8px;
+  border-radius: 9px;
+  border: 1px solid rgba(255, 255, 255, .8);
+  background-color: rgba(255, 255, 255, .74);
+  background-image: linear-gradient(160deg, rgba(255, 255, 255, .8), rgba(255, 255, 255, .5));
+  -webkit-backdrop-filter: blur(12px) saturate(150%);
+  backdrop-filter: blur(12px) saturate(150%);
+  box-shadow: 0 1px 2px rgba(16, 24, 40, .08), 0 10px 24px -10px rgba(16, 24, 40, .28);
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: nowrap;
+}
+.dc-tip-title {
+  color: #0f1b2d; /* ink-100 */
+  font-weight: 600;
+  margin-bottom: 3px;
+}
+.dc-tip-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  color: #4a5c75; /* ink-300 — на стекле 6.4:1 */
+}
+.dc-tip-row b {
+  color: #0f1b2d;
+  font-weight: 600;
+}
+/* Легенда-пилюли: наведение на пилюлю подсвечивает ряд, остальные глушатся */
+.dc-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 9px 2px 7px;
+  border-radius: 999px;
+  border: 1px solid rgba(27, 51, 96, .14);
+  background-color: rgba(255, 255, 255, .55);
+  color: #4a5c75;
+  font-size: 11px;
+  line-height: 1.6;
+  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+.dc-pill:hover,
+.dc-pill:focus-visible,
+.dc-pill[data-on="1"] {
+  border-color: rgba(22, 104, 168, .45);
+  background-color: rgba(255, 255, 255, .9);
+  color: #0f1b2d;
+}
+.dc-pill:focus-visible {
+  outline: 2px solid #1668a8;
+  outline-offset: 1px;
+}
+.dc-swatch {
+  display: inline-block;
+  border-radius: 2px;
+}
+.dc-swatch-bar {
+  width: 10px;
+  height: 10px;
+  border-radius: 3px 3px 1px 1px;
+  background: linear-gradient(180deg, #4a8ecb, #337ab7);
+}
+.dc-swatch-line {
+  width: 14px;
+  height: 3px;
+  border-radius: 2px;
+}
+
+
 /* Панель детализации: мягкий выезд (справа на десктопе, снизу на мобильном) */
 @keyframes dd-in {
   from {
@@ -202,8 +320,29 @@
   height: 2px;
   background: linear-gradient(90deg, transparent, rgba(22, 104, 168, 0.55), transparent);
 }
+/*
+ * Анимация появления графика (столбцы растут, линия рисуется) живёт в inline-
+ * стилях DynamicsChart, но при prefers-reduced-motion её не должно быть вовсе:
+ * здесь снимаем переходы, а сам компонент стартует с «уже дорисовано».
+ */
 @media (prefers-reduced-motion: reduce) {
   .dd-panel {
     animation: none;
+  }
+  .dc-bar,
+  .dc-line,
+  .dc-area,
+  .dc-series {
+    transition: none !important;
+    animation: none !important;
+  }
+  .dc-bar {
+    transform: none !important;
+  }
+  .dc-line {
+    stroke-dashoffset: 0 !important;
+  }
+  .dc-area {
+    opacity: 1 !important;
   }
 }
