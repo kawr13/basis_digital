@@ -18,6 +18,7 @@ import { useAuth } from "../auth";
 import { AppShell } from "../components/AppShell";
 import { Field, FormError, Modal, Notice, errText } from "../components/admin/ui";
 import { dmy } from "../format";
+import { roleAllowed, roleListLabel, usePublicSettings } from "../settings";
 import {
   addDays, barGeometry, barText, cargoColor, daysInRange, isWeekend, parseLocal,
   periodLabel, slotLabel, slotsCount, SLOT_HOURS, ymd,
@@ -86,7 +87,12 @@ function formFrom(p: Placement | null, berths: Berth[]): Form {
 
 export default function VesselsPage() {
   const { user } = useAuth();
-  const canEdit = user?.role === "admin" || user?.role === "top";
+  // Права на план — из настроек админки (vessels.edit_roles / vessels.delete_roles),
+  // те же значения проверяет бэкенд. Кнопки просто так показывать нельзя: пользователь
+  // упрётся в 403 и решит, что кабинет сломан.
+  const settings = usePublicSettings();
+  const canEdit = !!user && roleAllowed(settings, "vessels.edit_roles", user.role);
+  const canDelete = !!user && roleAllowed(settings, "vessels.delete_roles", user.role);
 
   const [today] = useState(() => ymd(new Date()));
   const [from, setFrom] = useState(today);
@@ -271,7 +277,7 @@ export default function VesselsPage() {
         )}
         {!canEdit && (
           <p className="mt-3 text-xs text-ink-300">
-            План можно смотреть и печатать; добавляют и правят его администратор и топ-менеджмент.
+            План можно смотреть и печатать; ставят и правят его: {roleListLabel(settings, "vessels.edit_roles", "admin,top")}.
           </p>
         )}
 
@@ -416,7 +422,7 @@ export default function VesselsPage() {
                 Править
               </button>
             )}
-            {user?.role === "admin" && (
+            {canDelete && (
               <button className="btn-ghost text-sm text-crit" onClick={() => remove(detail)} data-admin-action="delete-placement">
                 Удалить
               </button>

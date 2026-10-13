@@ -1,8 +1,10 @@
 """API документа «Постановка судов».
 
-Права: смотреть — любой вошедший (план читают все), править — администратор и
-топ-менеджмент (это планировочный документ, он меняет картину по всему порту),
-удалять — только администратор. Все правки уходят в журнал аудита.
+Права берутся из настроек кабинета (вкладка «Настройки» в админке), а не зашиты
+в код: `vessels.view_roles` — кто видит план, `vessels.edit_roles` — кто ставит и
+правит суда, `vessels.delete_roles` — кто удаляет. Значение — список ролей через
+запятую (admin, top, manager). Так диспетчеру можно дать право ставить суда, не
+превращая его в топ-менеджмента. Все правки уходят в журнал аудита.
 
 Период: `from`/`to` — календарные даты; в выборку попадает любое судно, которое
 хоть одним слотом задевает период, поэтому «посмотреть любой период» работает и
@@ -17,6 +19,7 @@ from sqlalchemy.orm import Session
 
 from ..db import get_db
 from ..deps import current_user, require_roles
+from ..services import app_settings
 from ..models import AuditLog, Berth, Role, User, VesselPlacement
 from ..schemas import (
     BerthOut, BerthUpsert, PlacementIn, PlacementOut, PlacementUpdate,
@@ -25,8 +28,22 @@ from ..services import vessels as svc
 
 router = APIRouter(prefix="/api/vessels", tags=["vessels"])
 
-editor = require_roles(Role.ADMIN, Role.TOP)
 admin_only = require_roles(Role.ADMIN)
+
+VIEW_KEY = "vessels.view_roles"
+EDIT_KEY = "vessels.edit_roles"
+DELETE_KEY = "vessels.delete_roles"
+
+ROLE_LABEL = {"admin": "администратор", "top": "топ-менеджмент", "manager": "менеджер"}
+
+
+def _allow(db: Session, user: User, key: str, what: str) -> None:
+    """Проверяем роль по настройке; текст ошибки говорит, у кого право есть."""
+    roles = app_settings.role_set(db, key)
+    if user.role.value in roles:
+        return
+    who = ", ".join(ROLE_LABEL.get(r, r) for r in sorted(roles)) or "никого"
+    raise HTTPException(status.HTTP_403_FORBIDDEN, f"{what}: право есть у {who}")
 
 
 def _audit(db: Session, user: User, action: str, detail: str, request: Request) -> None:
@@ -43,6 +60,7 @@ def _placement_out(p: VesselPlacement) -> PlacementOut:
 
 @router.get("/berths", response_model=list[BerthOut])
 def list_berths(db: Session = Depends(get_db), user: User = Depends(current_user)):
+    _allow(db, user, VIEW_KEY, "Справочник причалов закрыт")
     return svc.berths(db)
 
 
@@ -104,6 +122,7 @@ def list_placements(
     user: User = Depends(current_user),
 ):
     """Сетка плана за период: причалы + попавшие в период постановки."""
+    _allow(db, user, VIEW_KEY, "План постановки судов закрыт")
     d_from, d_to = svc.period_of(date_from, date_to)
     rows = svc.placements_in_period(db, date_from=d_from, date_to=d_to, berth_id=berth_id)
     return {
@@ -119,8 +138,9 @@ def create_placement(
     payload: PlacementIn,
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(editor),
+    user: User = Depends(current_user),
 ):
+    _allow(db, user, EDIT_KEY, "Поставить судно")
     try:
         svc.validate(
             db, berth_id=payload.berth_id, lane=payload.lane,
@@ -152,8 +172,9 @@ def update_placement(
     payload: PlacementUpdate,
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(editor),
+    user: User = Depends(current_user),
 ):
+    _allow(db, user, EDIT_KEY, "Править постановку")
     row = db.get(VesselPlacement, placement_id)
     if not row:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Постановка не найдена")
@@ -194,8 +215,9 @@ def delete_placement(
     placement_id: int,
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(admin_only),
+    user: User = Depends(current_user),
 ):
+    _allow(db, user, DELETE_KEY, "Удалить постановку")
     row = db.get(VesselPlacement, placement_id)
     if not row:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Постановка не найдена")

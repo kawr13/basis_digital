@@ -77,6 +77,18 @@ SPEC: dict[str, Spec] = {
                                      label="Порог «внимание», % загрузки склада"),
     "thresholds.capacity_crit": Spec("int", 95, minimum=50, maximum=100,
                                      label="Порог «критично», % загрузки склада"),
+    # --- доступ к «Постановке судов» ----------------------------------------
+    # Роли через запятую. Раздельно: просмотр / постановка судна / удаление.
+    # Смысл: план ведёт диспетчер, но остальной кабинет он — менеджер.
+    "vessels.view_roles": Spec("str", "admin,top,manager",
+                                label="Кто видит постановку судов",
+                                hint="роли через запятую: admin, top, manager"),
+    "vessels.edit_roles": Spec("str", "admin,top",
+                               label="Кто ставит и правит суда",
+                               hint="роли через запятую: admin, top, manager"),
+    "vessels.delete_roles": Spec("str", "admin",
+                                 label="Кто удаляет постановки",
+                                 hint="роли через запятую: admin, top, manager"),
     # --- безопасность входа --------------------------------------------------
     "security.max_failed_logins": Spec("int", 5, env="max_failed_logins", minimum=3, maximum=20,
                                        label="Неудачных входов до блокировки"),
@@ -87,7 +99,11 @@ SPEC: dict[str, Spec] = {
 # Публичный набор: любой авторизованный пользователь (менеджеру — пороги и
 # периоды, чтобы UI и бэкенд считали одинаково).
 PUBLIC_KEYS = ("ui.dynamics_days", "reports.default_days", "ui.refresh_seconds",
-               "thresholds.capacity_warn", "thresholds.capacity_crit")
+               "thresholds.capacity_warn", "thresholds.capacity_crit",
+               "vessels.view_roles", "vessels.edit_roles", "vessels.delete_roles")
+
+# Допустимые роли для настроек доступа к постановке судов.
+ROLE_TOKENS = ("admin", "top", "manager")
 
 DEFAULTS: dict[str, Any] = {key: spec.default for key, spec in SPEC.items()}
 
@@ -242,7 +258,22 @@ def _coerce(key: str, spec: Spec, value: Any) -> Any:
     value = value.strip()
     if len(value) > _MAX_STR_LEN:
         raise ValueError(f"«{label}»: не длиннее {_MAX_STR_LEN} символов")
+    if key.endswith("_roles"):
+        tokens = [t.strip().lower() for t in value.split(",") if t.strip()]
+        if not tokens:
+            raise ValueError(f"«{label}»: укажите хотя бы одну роль")
+        bad = [t for t in tokens if t not in ROLE_TOKENS]
+        if bad:
+            raise ValueError(f"«{label}»: роли не такие: {', '.join(bad)}. Можно: admin, top, manager")
+        # нормализуем: без дублей и пробелов, в алфавитном порядке
+        return ",".join(sorted(dict.fromkeys(tokens)))
     return value
+
+
+def role_set(db: Session, key: str) -> set[str]:
+    """Роли, которым разрешено действие (настройка вида `vessels.*_roles`)."""
+    raw = get_all(db).get(key) or ""
+    return {t.strip().lower() for t in str(raw).split(",") if t.strip()}
 
 
 def _validate_together(values: dict[str, Any]) -> None:

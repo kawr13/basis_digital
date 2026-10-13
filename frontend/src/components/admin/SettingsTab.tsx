@@ -19,8 +19,15 @@ const SECTIONS = [
   },
   {
     title: "Что видит пользователь",
-    keys: ["ui.dynamics_days", "reports.default_days", "thresholds.capacity_warn", "thresholds.capacity_crit"],
+    keys: ["ui.dynamics_days", "reports.default_days", "ui.refresh_seconds",
+           "thresholds.capacity_warn", "thresholds.capacity_crit"],
     note: "Пороги загрузки склада: «критично» не может быть ниже «внимания» (крит ≥ варн).",
+  },
+  {
+    title: "Постановка судов: доступ",
+    keys: ["vessels.view_roles", "vessels.edit_roles", "vessels.delete_roles"],
+    note: "Роли через запятую: admin, top, manager. Право ставить суда можно выдать "
+        + "менеджеру-диспетчеру, не повышая его роль; закрытый просмотр убирает и вкладку, и маршрут.",
   },
   {
     title: "Безопасность входа",
@@ -35,7 +42,7 @@ const SECTIONS = [
 ];
 
 export function SettingsTab({ settings }: { settings: AdminSettings }) {
-  const [pub, setPub] = useState<Record<string, number> | null>(null);
+  const [pub, setPub] = useState<Record<string, number | string> | null>(null);
 
   // публичный срез настроек: их читает любой авторизованный пользователь,
   // именно с этими значениями дашборд и отчёты считают пороги и периоды

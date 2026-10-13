@@ -1,5 +1,6 @@
 import { Navigate, Route, Routes } from "react-router-dom";
 import { useAuth } from "./auth";
+import { roleAllowed, usePublicSettings } from "./settings";
 import DashboardPage from "./pages/DashboardPage";
 import LoginPage from "./pages/LoginPage";
 import ReportsPage from "./pages/ReportsPage";
@@ -29,6 +30,16 @@ function AdminOnly({ children }: { children: React.ReactNode }) {
   return <>{children}</>;
 }
 
+/** Просмотр плана постановки судов — по настройке vessels.view_roles (как и на бэкенде). */
+function VesselsGuard({ children }: { children: React.ReactNode }) {
+  const { user, booting } = useAuth();
+  const settings = usePublicSettings();
+  if (booting) return <Boot />;
+  if (!user) return <Navigate to="/login" replace />;
+  if (!roleAllowed(settings, "vessels.view_roles", user.role)) return <Navigate to="/" replace />;
+  return <>{children}</>;
+}
+
 export default function App() {
   const { user, booting } = useAuth();
   return (
@@ -53,9 +64,9 @@ export default function App() {
       <Route
         path="/vessels"
         element={
-          <Protected>
+          <VesselsGuard>
             <VesselsPage />
-          </Protected>
+          </VesselsGuard>
         }
       />
       <Route

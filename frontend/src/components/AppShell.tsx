@@ -3,12 +3,16 @@ import { NavLink } from "react-router-dom";
 import { useAuth } from "../auth";
 import { roleLabel } from "../format";
 import { ageLabel, type Live } from "../live";
+import { roleAllowed, usePublicSettings } from "../settings";
 
 const tabs = [
   { to: "/", label: "Сводка", end: true, nav: "summary" },
   { to: "/reports", label: "Отчёты", end: false, nav: "reports" },
-  { to: "/vessels", label: "Постановка", end: false, nav: "vessels" },
 ];
+
+// Вкладка постановки судов показывается только тем ролям, которым разрешён
+// просмотр плана (настройка vessels.view_roles) — маршрут закрыт и на бэкенде.
+const VESSELS_TAB = { to: "/vessels", label: "Постановка", end: false, nav: "vessels" };
 
 // Вкладка администратора видна только роли admin: маршрут /admin всё равно
 // закрыт редиректом, но лишний раз подсказывать про доступ не стоит.
@@ -29,7 +33,13 @@ export function AppShell({
   live?: Live;
 }) {
   const { user, logout } = useAuth();
-  const navTabs = user?.role === "admin" ? [...tabs, ADMIN_TAB] : tabs;
+  const settings = usePublicSettings();
+  const canSeeVessels = !!user && roleAllowed(settings, "vessels.view_roles", user.role);
+  const navTabs = [
+    ...tabs,
+    ...(canSeeVessels ? [VESSELS_TAB] : []),
+    ...(user?.role === "admin" ? [ADMIN_TAB] : []),
+  ];
   const headerRef = useRef<HTMLElement>(null);
 
   // Высоту шапки нельзя зашить числом: логотип, перенос навигации на узких

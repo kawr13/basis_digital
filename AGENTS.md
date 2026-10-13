@@ -124,6 +124,11 @@ statcab/
   `--header-h` (её публикует `AppShell` через `ResizeObserver`), а сам элемент получает
   `!mt-0` — иначе `space-y-5` у `<main>` добавляет соседям `margin-top:20px`, и наклонная
   панель уезжает на 20px ниже шапки (селектор `space-y-*` специфичнее `.mt-0`, нужен `!`).
+- **Права на постановку судов — из настроек, не из кода**: `vessels.view_roles` /
+  `vessels.edit_roles` / `vessels.delete_roles` (роли через запятую). Бэкенд проверяет их в
+  `app/api/vessels.py::_allow`, фронт читает те же значения из `/api/settings/public`
+  (`src/settings.ts`, кэш на загрузку страницы). Правильная проверка UI: не роль пользователя,
+  а `roleAllowed(settings, "vessels.edit_roles", user.role)`.
 - **Постановка судов — не витрина**: таблицы `berths`/`vessel_placements` синхронизация 1С
   не трогает. Время кратное слоту (00/06/12/18), `ends_at` — начало последнего занятого слота
   (включительно), пересечение на одной дорожке = 409. Правила в `app/services/vessels.py`.

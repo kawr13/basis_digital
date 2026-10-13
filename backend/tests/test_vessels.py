@@ -218,3 +218,65 @@ def test_audit_records_actions(client, admin_hdr):
     assert "vessels.create" in actions
     detail = next(r["detail"] for r in rows if r["action"] == "vessels.create")
     assert "AUDIT SHIP" in detail
+
+
+# ----------------------------------------------------- роли из настроек админки ----
+
+
+def _set_settings(client, hdr, patch: dict):
+    return client.put("/api/admin/settings", json=patch, headers=hdr)
+
+
+def _reset(client, hdr, keys):
+    return client.post("/api/admin/settings/reset", json=keys, headers=hdr)
+
+
+def test_roles_come_from_settings(client, admin_hdr, manager_hdr):
+    """Право ставить суда можно выдать менеджеру настройкой, без смены роли."""
+    keys = ["vessels.view_roles", "vessels.edit_roles", "vessels.delete_roles"]
+    try:
+        r = _set_settings(client, admin_hdr, {"vessels.edit_roles": "manager"})
+        assert r.status_code == 200, r.text
+
+        made = _mk(client, manager_hdr, code="РП-4", lane=2, vessel="MANAGER NOW",
+                   start="2027-01-05T00:00:00", end="2027-01-06T00:00:00")
+        assert made.status_code == 201, made.text
+        pid = made.json()["id"]
+        # но удалять по-прежнему нельзя: право на удаление — отдельная настройка
+        assert client.delete(f"/api/vessels/placements/{pid}", headers=manager_hdr).status_code == 403
+        assert client.delete(f"/api/vessels/placements/{pid}", headers=admin_hdr).status_code == 204
+    finally:
+        _reset(client, admin_hdr, keys)
+
+    # после сброса менеджер снова только наблюдает
+    assert _mk(client, manager_hdr, code="РП-4", lane=2, vessel="AFTER RESET",
+               start="2027-02-05T00:00:00", end="2027-02-06T00:00:00").status_code == 403
+
+
+def test_view_can_be_closed_for_role(client, admin_hdr, manager_hdr):
+    keys = ["vessels.view_roles"]
+    try:
+        assert _set_settings(client, admin_hdr, {"vessels.view_roles": "admin,top"}).status_code == 200
+        r = client.get("/api/vessels/placements", params=PERIOD, headers=manager_hdr)
+        assert r.status_code == 403 and "закрыт" in r.json()["detail"]
+        assert client.get("/api/vessels/berths", headers=manager_hdr).status_code == 403
+        assert client.get("/api/vessels/placements", params=PERIOD, headers=admin_hdr).status_code == 200
+    finally:
+        _reset(client, admin_hdr, keys)
+
+
+def test_unknown_role_in_setting_rejected(client, admin_hdr):
+    r = _set_settings(client, admin_hdr, {"vessels.edit_roles": "dispatcher"})
+    assert r.status_code == 422
+    assert "admin, top, manager" in r.json()["detail"]
+    # пустой список тоже не проходят: план не должен остаться без владельцев
+    assert _set_settings(client, admin_hdr, {"vessels.delete_roles": ""}).status_code == 422
+
+
+def test_public_settings_expose_roles(client, manager_hdr):
+    """Фронт рисует кнопки по этим же значениям — иначе права расходятся с UI."""
+    pub = client.get("/api/settings/public", headers=manager_hdr).json()
+    roles = lambda k: set(pub[k].split(","))
+    assert roles("vessels.view_roles") == {"admin", "top", "manager"}
+    assert roles("vessels.edit_roles") == {"admin", "top"}
+    assert roles("vessels.delete_roles") == {"admin"}

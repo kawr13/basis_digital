@@ -20,7 +20,7 @@ const ok = (cond, msg) => {
 const ymd = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 const plus = (n) => ymd(new Date(Date.now() + n * 86400_000));
 
-const login = async (page, who, pass) => {
+const login = async (page, who, pass, attempt = 0) => {
   // если сессия уже есть — выходим: маршрут /login у авторизованного редиректит
   // на сводку, и форма входа просто не появится
   await page.goto(`${BASE}/`, { waitUntil: "networkidle" });
@@ -35,7 +35,19 @@ const login = async (page, who, pass) => {
   await page.fill("input[autocomplete=username]", who);
   await page.fill("input[autocomplete=current-password]", pass);
   await page.click("button.btn-primary");
-  await page.waitForSelector("[data-live]", { timeout: 15000 });
+  const entered = await page
+    .waitForSelector("[data-live]", { timeout: 15000 })
+    .then(() => true)
+    .catch(() => false);
+  if (!entered) {
+    // на локалхосте все тесты идут под одним IP, а вход троттлится 20 попытками
+    // в минуту: при запуске нескольких наборов подряд попадаем в 429
+    if (attempt < 3) {
+      await page.waitForTimeout(15_000);   // окно троттлинга — минута
+      return login(page, who, pass, attempt + 1);
+    }
+    throw new Error(`не удалось войти как ${who}`);
+  }
 };
 
 const browser = await chromium.launch({ executablePath: process.env.PW_CHROMIUM, headless: true });
@@ -84,6 +96,9 @@ page.on("pageerror", (e) => problems.push(`JS: ${e.message}`));
 await login(page, "admin", PASS);
 await page.click("[data-nav='vessels']");
 await page.waitForSelector("[data-vessels-page]");
+// ждём именно строк сетки: панель появляется раньше, чем приходят причалы,
+// и иначе первый же подсчёт ловит пустой экран
+await page.waitForSelector("[data-lane]", { timeout: 15000 });
 
 // -------------------------------------------------------------- сетка ----
 const lanes = await page.locator("[data-lane]").count();
@@ -201,8 +216,44 @@ await page.waitForSelector("[data-vessels-page]");
 ok((await page.locator("[data-admin-action='new-placement']").count()) === 0,
    "менеджер не видит кнопку «Новая постановка»");
 ok((await page.locator("[data-vp-bar]").count()) > 0, "менеджер план видит");
-ok(((await page.textContent("[data-vessels-page]")) || "").includes("добавляют и правят"),
-   "менеджеру объяснено, кто ведёт план");
+const hint = (await page.textContent("[data-vessels-page]")) || "";
+ok(hint.includes("ставят и правят") && hint.includes("топ-менеджмент"),
+   `менеджеру сказано, кто ведёт план: «${(hint.match(/План можно смотреть[^]*?\./) || ["—"])[0]}»`);
+
+// ------------------------------------------- права берутся из настроек админки ----
+const SETTINGS_KEYS = ["vessels.view_roles", "vessels.edit_roles", "vessels.delete_roles"];
+try {
+  await api("/api/admin/settings", "PUT", { "vessels.edit_roles": "manager" });
+  await login(page, "petrov", "demo1234");
+  await page.click("[data-nav='vessels']");
+  await page.waitForSelector("[data-vessels-page]");
+  ok((await page.locator("[data-admin-action='new-placement']").count()) === 1,
+     "vessels.edit_roles=manager: менеджеру выросла кнопка «Новая постановка»");
+
+  const MV = `QA SHIP MGR ${Date.now().toString(36)}`;
+  await page.click("[data-admin-action='new-placement']");
+  await page.waitForSelector("[data-modal='placement-form']");
+  await page.selectOption('[data-field="berth"]', String(testBerth.id));
+  await page.fill('[data-field="vessel"]', MV);
+  await page.fill('[data-field="start-date"]', plus(21));
+  await page.fill('[data-field="end-date"]', plus(23));
+  await page.click("[data-admin-action='save-placement']");
+  await page.waitForSelector("[data-modal='placement-form']", { state: "detached", timeout: 8000 });
+  ok((await page.locator("[data-vp-bar]").filter({ hasText: MV }).count()) === 1,
+     "менеджер по настройке реально поставил судно");
+
+  // закрываем просмотр совсем: вкладка обязана исчезнуть, а маршрут — редиректить
+  await api("/api/admin/settings", "PUT", { "vessels.view_roles": "admin,top" });
+  await login(page, "petrov", "demo1234");
+  ok((await page.locator("[data-nav='vessels']").count()) === 0,
+     "vessels.view_roles=admin,top: вкладки «Постановка» у менеджера нет");
+  await page.goto(`${BASE}/vessels`, { waitUntil: "networkidle" });
+  await page.waitForTimeout(600);
+  ok(page.url().endsWith("/") && (await page.locator("[data-vessels-page]").count()) === 0,
+     "прямая ссылка /vessels у закрытой роли ведёт на сводку");
+} finally {
+  await api("/api/admin/settings/reset", "POST", SETTINGS_KEYS);
+}
 
 // ------------------------------------------------------------- удаление ----
 await login(page, "admin", PASS);

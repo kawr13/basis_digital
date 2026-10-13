@@ -423,7 +423,7 @@ export const api = {
   reportCapacity: (p: ReportParams) => request<CapacityTrendReport>(`/api/reports/capacity-trend?${qs(p)}`),
 
   // публичные настройки: пороги и периоды — чтобы UI и бэкенд считали одинаково
-  publicSettings: () => request<Record<string, number>>("/api/settings/public"),
+  publicSettings: () => request<Record<string, number | string>>("/api/settings/public"),
   freshness: () => request<Freshness>("/api/meta/freshness"),
 
   // ------------------------------------------- администрирование: пользователи ---

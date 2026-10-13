@@ -31,25 +31,12 @@ export default function LoginPage() {
           {/* Фирменный знак: на глухом navy — светлая версия логотипа */}
           <img src="/logo-light.svg" alt="БазисПорт" width={230} height={35} className="h-10 w-auto" />
           <div>
-            <h1 className="text-4xl leading-tight font-semibold max-w-md">
-              Кабинет <span className="text-brand-sky">веб-статистики</span>
+            {/* Продукт называется Basis.Indicators — без описаний и перечислений:
+                вход смотрит человек, который кабинет уже знает, а не тот, кого нужно
+                уговаривать. Точка — фирменным голубым. */}
+            <h1 className="text-5xl leading-tight font-semibold max-w-md">
+              Basis<span className="text-brand-sky">.</span>Indicators
             </h1>
-            <p className="mt-4 text-white/70 max-w-md">
-              Остатки грузов, загрузка складов и динамика обработки — в одном окне,
-              данные выгружаются из 1С.
-            </p>
-            <dl className="mt-10 grid grid-cols-3 gap-6 max-w-md">
-              {[
-                ["Остатки", "по всем складам"],
-                ["Ёмкость", "занято / доступно"],
-                ["Динамика", "принято / отгружено"],
-              ].map(([t, d]) => (
-                <div key={t}>
-                  <dt className="text-sm text-white">{t}</dt>
-                  <dd className="text-xs text-white/60 mt-1">{d}</dd>
-                </div>
-              ))}
-            </dl>
           </div>
           <p className="text-xs text-white/60">
             Доступ выдаёт администратор кабинета. Вопросы по учёткам — служба поддержки.
