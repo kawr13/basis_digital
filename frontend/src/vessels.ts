@@ -154,3 +154,103 @@ export function periodLabel(from: string, to: string): string {
     `${to}T00:00:00`,
   ).toLocaleDateString("ru-RU")}`;
 }
+
+/* ----------------------- цепочки перешвартовок ------------------------ */
+
+/**
+ * Номера строк в цепочках перешвартовок — та самая «шаг N» из подписей стрелок.
+ *
+ * Смысл обязан совпадать с `_chain_steps` из backend/app/services/plan_pdf.py:
+ * лист печатает бэкенд, экран рисует браузер, а подписи у стрелок обязаны
+ * сходиться — иначе диспетчер сводит стрелки на распечатке по одним номерам,
+ * а на экране видит другие. Правим одну — правь и вторую.
+ *
+ * Корень — постановка без `moved_from_id` либо с ссылкой на строку, которой нет
+ * в выборке: период вырезают окном, и «висячая» ссылка — это тоже начало
+ * цепочки, а не потеря. Дальше обход в ширину по копиям, копии одного оригинала
+ * упорядочены по starts_at, поэтому номера не зависят от порядка строк в ответе
+ * API. На линейной цепочке счётчик обхода = глубина + 1: «шаг 1» — корень,
+ * «шаг 2» — первая перестановка. Счётчик именно обхода (а не глубина): если от
+ * оригинала пошли две копии, вторая перестановка всё равно получит свой номер,
+ * и стрелки не начнут конкурировать за «шаг 2».
+ */
+export function chainSteps(placements: Placement[]): Map<number, number> {
+  const byId = new Map(placements.map((p) => [p.id, p]));
+  const kids = new Map<number, Placement[]>();
+  for (const p of placements) {
+    if (p.moved_from_id != null && byId.has(p.moved_from_id)) {
+      kids.set(p.moved_from_id, [...(kids.get(p.moved_from_id) ?? []), p]);
+    }
+  }
+  // тот же порядок, что в Python: сначала старт, затем id — иначе две копии,
+  // начатые в один слот, нумеровались бы по случайному порядку строк
+  const cmp = (a: Placement, b: Placement) =>
+    parseLocal(a.starts_at).getTime() - parseLocal(b.starts_at).getTime() || a.id - b.id;
+  const order = new Map<number, number>();
+  const roots = placements
+    .filter((p) => !(p.moved_from_id != null && byId.has(p.moved_from_id)))
+    .slice()
+    .sort(cmp);
+  for (const root of roots) {
+    if (order.has(root.id)) continue;
+    const seq: Placement[] = [root];
+    let i = 0;
+    let n = 0;
+    while (i < seq.length) {
+      const node = seq[i];
+      i += 1;
+      if (order.has(node.id)) continue;
+      n += 1;
+      order.set(node.id, n);
+      seq.push(...(kids.get(node.id) ?? []).slice().sort(cmp));
+    }
+  }
+  // на случай цикла по moved_from_id — осиротевшие строки тоже нумеруем,
+  // иначе у стрелки не будет подписи вообще
+  for (const p of placements) if (!order.has(p.id)) order.set(p.id, order.size + 1);
+  return order;
+}
+
+/**
+ * «шаг 1→2» — тот же формат, что печатает PDF (`step_label` в plan_pdf.py).
+ * Одно слово на двух носителях: экран и лист должны описывать перестановку
+ * одинаковыми буквами, иначе «шаг 2» на бумаге и на экране — разные стрелки.
+ */
+export function stepLabel(steps: Map<number, number>, srcId: number, dstId: number): string {
+  return `шаг ${steps.get(srcId) ?? "?"}→${steps.get(dstId) ?? "?"}`;
+}
+
+/** «2026-11-02T12:00:00» → «02.11 12:00» — короткое время старта в подпись стрелки. */
+export function shortStart(value: string): string {
+  const d = parseLocal(value);
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${p(d.getDate())}.${p(d.getMonth() + 1)} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+/**
+ * Полная подпись у наконечника стрелки: «шаг 1→2 · РП-6 · 02.11 12:00».
+ * Шифр причала и время старта цели — потому что именно их диспетчер ищет
+ * глазами: куда уедет судно и когда. «Ожидание» — не причал, а карман, поэтому
+ * код виртуального причала сюда приходит уже человеческим словом.
+ */
+export function arrowCaption(
+  steps: Map<number, number>,
+  srcId: number,
+  dstId: number,
+  destCode: string,
+  destStartsAt: string,
+): string {
+  return `${stepLabel(steps, srcId, dstId)} · ${destCode} · ${shortStart(destStartsAt)}`;
+}
+
+/**
+ * Непустые связи цепочек: «оригинал → копия», у которой ещё есть стрелка
+ * (состоявшаяся перестановка стрелки не имеет). По этим связям рисуются
+ * стрелки, и той же функцией проверка сверяет их число с данными.
+ */
+export function chainLinks(placements: Placement[]): { srcId: number; dstId: number }[] {
+  const ids = new Set(placements.map((p) => p.id));
+  return placements
+    .filter((p) => !p.committed && p.moved_from_id != null && ids.has(p.moved_from_id))
+    .map((p) => ({ srcId: p.moved_from_id as number, dstId: p.id }));
+}

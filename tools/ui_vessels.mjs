@@ -658,6 +658,126 @@ await page.waitForFunction(() =>
   null, { timeout: 8000 });
 ok(true, "право сняли — снова «по роли»");
 
+// ───────────────────────── стрелки перешвартовок ─────────────────────
+// Цепочка из нескольких перестановок одного судна: раньше все стрелки были
+// одного цвета, без подписей и различий — «паутина», где непонятно, какая линия
+// куда ведёт. Теперь у каждой есть подпись шага (теми же словами, что печатает
+// PDF), кружок «откуда», а чужие цепочки уходят на фон под курсором.
+// Проверка стоит в самом конце прогона не случайно: наведение и клик по полосе
+// могут прокрутить сетку, а мышиные проверки выше считают координаты полос по
+// boundingBox() — сдвинутый скролл меняет их цели. В конце скролл возвращается.
+await page.click("[data-nav='vessels']");
+await page.waitForSelector("[data-vp-bar]", { timeout: 8000 });
+await page.waitForTimeout(700);
+const scroll0 = await page.evaluate(() => {
+  const g = document.querySelector("[data-vp-grid]");
+  return { x: g.scrollLeft, y: g.scrollTop };
+});
+const restoreScroll = () =>
+  page.evaluate((s) => {
+    const g = document.querySelector("[data-vp-grid]");
+    g.scrollLeft = s.x;
+    g.scrollTop = s.y;
+  }, scroll0);
+const arrowRows = () =>
+  page.evaluate(() =>
+    [...document.querySelectorAll("[data-vp-arrows] [data-arrow]")].map((g) => ({
+      id: Number(g.dataset.arrow),
+      tone: g.dataset.arrowTone,
+      opacity: Number(getComputedStyle(g).opacity),
+      text: g.querySelector("text")?.textContent ?? "",
+      circle: !!g.querySelector("circle"),
+      round: (g.querySelector("path")?.getAttribute("d") ?? "").includes("Q"),
+      bend: g.dataset.arrowBend === "1",
+    })),
+  );
+
+{
+  const rows = await arrowRows();
+  const plan = await api(`/api/vessels/placements?from=${plus(0)}&to=${plus(30)}`).then((r) => r.json());
+  const ids = new Set(plan.placements.map((p) => p.id));
+  // непустая связь цепочки = копия со стрелкой (состоявшаяся — уже без неё)
+  const links = plan.placements.filter(
+    (p) => !p.committed && p.moved_from_id && ids.has(p.moved_from_id),
+  );
+  ok(rows.length === links.length,
+     `стрелок ровно по числу непустых связей цепочки: ${rows.length} (в данных ${links.length})`);
+  ok(links.length === 3, `в цепочке «112» три перестановки — три стрелки: ${links.length}`);
+  ok(rows.length > 0 && rows.every((r) => r.text.includes("шаг ")),
+     `у каждой стрелки есть подпись шага: ${rows.map((r) => `«${r.text}»`).join(" / ")}`);
+  ok(
+    rows.length > 0 &&
+      rows.every((r) => /^шаг \d+→\d+ · .+ · \d{2}\.\d{2} \d{2}:\d{2}$/.test(r.text)),
+    "подпись собрана как в PDF: «шаг N→M · причал · дд.мм чч:мм»",
+  );
+  ok(rows.length > 0 && rows.every((r) => r.circle), "у каждой стрелки есть кружок «откуда» (r=3)");
+  // прямая стрела «в одну линию» гнуться не обязана, а вот в ломаной каждый
+  // угол обязан быть скруглён — иначе полотно выглядит «проводом»
+  const bent = rows.filter((r) => r.bend);
+  ok(bent.length > 0 && bent.every((r) => r.round),
+     `углы ломаных путей скруглены: ${bent.filter((r) => r.round).length} из ${bent.length}`);
+  const legend = (await page.textContent("[data-arrows-legend]")) || "";
+  ok(legend.includes("шаг N→M") && legend.includes("кружок"),
+     `подсказка внизу объясняет стрелки: «${(legend.match(/Стрелка перешвартовки[^]*?фон/) || ["—"])[0]}…»`);
+  const over = await page.evaluate(() => {
+    const print = document.querySelector("[data-vp-print]");
+    return Math.round(print.scrollWidth - print.clientWidth);
+  });
+  ok(over <= 1, `подписи не раздули холст и не добавили горизонтального скролла: ${over}px`);
+}
+
+// ────── своя цепочка яркая, чужие — на фоне (hover и «выбор» без hover) ────── //
+// Без второй цепочки проверка была бы честным словом «все свои»: тускнуть нечему.
+const CHAIN = `QA SHIP CHAIN ${Date.now().toString(36)}`;
+const chainFrom = await api("/api/vessels/placements", "POST", {
+  berth_id: testBerth.id, lane: 1, vessel: CHAIN, cargo: "СОЛЬ", length_m: 40, offset_m: 0,
+  starts_at: `${plus(6)}T00:00:00`, ends_at: `${plus(6)}T12:00:00`,
+}).then((r) => r.json());
+const chainTo = await api("/api/vessels/placements", "POST", {
+  berth_id: testBerth.id, lane: 1, vessel: CHAIN, cargo: "СОЛЬ", length_m: 40, offset_m: 0,
+  starts_at: `${plus(8)}T00:00:00`, ends_at: `${plus(8)}T12:00:00`, moved_from_id: chainFrom.id,
+}).then((r) => r.json());
+await page.click("button:has-text('Обновить')");
+await page.waitForSelector(`[data-vp-bar="${chainTo.id}"]`, { timeout: 8000 });
+{
+  const all = await arrowRows();
+  ok(all.length >= 2, `вторая цепочка дала свою стрелку — всего ${all.length}`);
+  // наводимся на ВТОРУЮ полосу своей цепочки — это копия, к ней ведёт стрелка
+  await page.hover(`[data-vp-bar="${chainTo.id}"]`);
+  await page.waitForTimeout(300);
+  const hov = await arrowRows();
+  const bright = hov.filter((r) => r.opacity > 0.9);
+  const dim = hov.filter((r) => r.opacity < 0.2);
+  ok(bright.some((r) => r.id === chainTo.id) && bright.every((r) => r.tone === "focus"),
+     `наведение оставило яркими стрелки своей цепочки: ${bright.map((r) => r.id).join(", ")}`);
+  ok(dim.length > bright.length,
+     `чужие стрелки ушли в фон: тусклых ${dim.length}, ярких ${bright.length}`);
+  const rings = await page.evaluate(() =>
+    [...document.querySelectorAll('[data-chain-focus="1"]')].map((el) => Number(el.dataset.vpBar)),
+  );
+  ok(rings.includes(chainFrom.id) && rings.includes(chainTo.id),
+     `оригинал и копия этой стрелки получили обводку: ${rings.join(", ")}`);
+
+  // мобильного hover нет: тот же акцент обязана давать открытая панель деталей
+  await page.click(`[data-vp-bar="${chainTo.id}"]`);
+  await page.waitForSelector("[data-modal='placement-detail']");
+  await page.mouse.move(4, 4); // курсор убран с полосы — подсветка должна остаться на «выборе»
+  await page.waitForTimeout(300);
+  const sel = await arrowRows();
+  ok(
+    sel.some((r) => r.id === chainTo.id && r.opacity > 0.9) &&
+      sel.filter((r) => r.opacity < 0.2).length > 0,
+    "без hover, по открытой карточке: своя стрелка яркая, чужие на фоне",
+  );
+  await page.keyboard.press("Escape");
+  await page.waitForSelector("[data-modal='placement-detail']", { state: "detached", timeout: 8000 });
+}
+await api(`/api/vessels/placements/${chainTo.id}`, "DELETE");
+await api(`/api/vessels/placements/${chainFrom.id}`, "DELETE");
+await page.click("button:has-text('Обновить')");
+await page.waitForTimeout(600);
+await restoreScroll();
+
 await page.screenshot({ path: "shot_vessels.png", fullPage: false });
 await browser.close();
 // cleanup — после закрытия браузера и обязательно: упавший прогон не должен

@@ -19,14 +19,16 @@ import {
 } from "../api";
 import { useAuth } from "../auth";
 import { AppShell } from "../components/AppShell";
+import { VesselsArrows, type ArrowView } from "../components/VesselsArrows";
 import { Field, FormError, Modal, Notice, errText } from "../components/admin/ui";
 import { dmy } from "../format";
 import { resolveVesselRights, roleListLabel, usePublicSettings } from "../settings";
 import {
-  addDays, addSlots, barColor, barGeometry, barText, cargoColor, daysInRange, displayed, isWeekend,
-  isoLocal, lengthGeometry, lengthLabel, M_PER_CELL, PALETTE, parseLocal, periodLabel, rulerMarks,
-  slotLabel, slotsCount, SLOT_HOURS, textColorOn, ymd,
+  addDays, addSlots, arrowCaption, barColor, barGeometry, barText, cargoColor, chainLinks, chainSteps,
+  daysInRange, displayed, isWeekend, isoLocal, lengthGeometry, lengthLabel, M_PER_CELL, PALETTE,
+  parseLocal, periodLabel, rulerMarks, slotLabel, slotsCount, SLOT_HOURS, textColorOn, ymd,
 } from "../vessels";
+import { arrowGeometry, arrowLabel, type ArrowAnchor } from "../vesselArrows";
 
 /**
  * Ширина слота. Минимум — тот, при котором ещё читается «00»; дальше поле
@@ -45,17 +47,10 @@ const CELL_H_DEFAULT = 12;
 /** Код виртуального причала «Ожидание»: карман для судов вне причалов (заводит бэкенд). */
 const PARK_CODE = "ОЖИДАНИЕ";
 
-type Anchor = { left: number; right: number; y: number };
-
-/** Стрелка перешвартовки: прямоугольная «ёлочка», как диспетчеры рисуют в Excel. */
-function arrowPath(a: Anchor, b: Anchor): string {
-  const right = b.left >= a.left;
-  const x1 = right ? a.right : a.left;
-  const x2 = right ? b.left : b.right;
-  if (Math.abs(a.y - b.y) < 2) return `M ${x1} ${a.y} L ${x2} ${b.y}`;
-  const mx = x1 + (x2 - x1) / 2;
-  return `M ${x1} ${a.y} H ${mx} V ${b.y} H ${x2}`;
-}
+// Геометрия стрелки (путь со скруглёнными углами, наконечник, кружок старта и
+// место подписи) лежит в src/vesselArrows.ts, рисует их src/components/
+// VesselsArrows.tsx. Здесь — только то, что зависит от состояния страницы:
+// якоря по полосам, номера цепочек и подсветка.
 
 const PRESETS = [
   { label: "Неделя", days: 7 },
@@ -145,6 +140,9 @@ export default function VesselsPage() {
   // «⤓ PDF» качает файл с бэкенда, поэтому кнопка обязана показывать, что файл уже летит
   const [pdfBusy, setPdfBusy] = useState(false);
   const [detail, setDetail] = useState<Placement | null>(null);
+  // Наведение на полосу или чип: стрелки чужих цепочек уходят на фон. На
+  // мобильном hover нет — там ту же роль играет открытая панель деталей.
+  const [hoverId, setHoverId] = useState<number | null>(null);
   const [freeHint, setFreeHint] = useState("");
   // WYSIWYG: карандаш превращает полосы в ручки — судно двигают мышью
   const [wysiwyg, setWysiwyg] = useState(false);
@@ -288,7 +286,7 @@ export default function VesselsPage() {
   }, [plan, slotW, availW, cellH]);
 
   /** Якорь стрелки: те же barGeometry/lengthGeometry, что рисуют саму полосу. */
-  const anchorOf = (p: Placement) => {
+  const anchorOf = (p: Placement): ArrowAnchor | null => {
     // карман: чипы лежат не на шкале — якорем служит фактический прямоугольник чипа
     if (parkId != null && p.berth_id === parkId) {
       const r = parkRects.current[p.id];
@@ -320,26 +318,119 @@ export default function VesselsPage() {
     };
   };
 
+  /**
+   * Цепочки перешвартовок: id любой постановки → множество id всех строк её
+   * цепочки. Нужно для подсветки: наведение на одну полосу обязано оставить
+   * яркими ВСЕ стрелки этого судна, иначе цепочка из четырёх постановок
+   * распадается на четыре несвязных штриха и снова не видно, какая стрелка
+   * куда ведёт.
+   */
+  const chains = useMemo(() => {
+    const rows = plan?.placements ?? [];
+    const ids = new Set(rows.map((p) => p.id));
+    const kids = new Map<number, number[]>();
+    const roots: number[] = [];
+    for (const p of rows) {
+      // «висячая» ссылка (оригинал за окном периода или удалён) — это начало цепочки
+      const src = p.moved_from_id != null && ids.has(p.moved_from_id) ? p.moved_from_id : null;
+      if (src === null) roots.push(p.id);
+      else kids.set(src, [...(kids.get(src) ?? []), p.id]);
+    }
+    const byNode = new Map<number, Set<number>>();
+    for (const root of roots) {
+      const group = new Set<number>([root]);
+      const stack = [root];
+      while (stack.length) {
+        const cur = stack.pop() as number;
+        for (const k of kids.get(cur) ?? [])
+          if (!group.has(k)) {
+            group.add(k);
+            stack.push(k);
+          }
+      }
+      for (const id of group) byNode.set(id, group);
+    }
+    // строка, застрявшая в цикле по moved_from_id, — цепочка из одной полосы
+    for (const p of rows) if (!byNode.has(p.id)) byNode.set(p.id, new Set([p.id]));
+    return byNode;
+  }, [plan]);
+
+  /** Что в фокусе: полоса под курсором, а без hover — открытая карточка. */
+  const focusId = hoverId ?? detail?.id ?? null;
+  const focusChain = focusId === null ? null : chains.get(focusId) ?? null;
+
+  /** Шифр причала в подпись стрелки; «Ожидание» — не причал, а карман, поэтому словом. */
+  const berthCode = (id: number) => {
+    const b = berths.find((x) => x.id === id);
+    return !b ? "?" : b.code === PARK_CODE ? "Ожидание" : b.code;
+  };
+
   const arrows = useMemo(() => {
     const rows = plan?.placements ?? [];
     const byId = new Map(rows.map((p) => [p.id, p]));
-    const out: { id: number; d: string; color: string; draft: boolean }[] = [];
-    for (const p of rows) {
-      if (!p.moved_from_id || p.committed) continue; // дата наступила — судно уже передвинуто
-      const src = byId.get(p.moved_from_id);
-      if (!src) continue;  // оригинал удалили — стрелка гаснет вместе с ним
+    const steps = chainSteps(rows); // те же номера шагов, что печатает PDF
+    const out: ArrowView[] = [];
+    for (const link of chainLinks(rows)) {
+      const src = byId.get(link.srcId);
+      const copy = byId.get(link.dstId);
+      if (!src || !copy) continue; // оригинал удалили — стрелка гаснет вместе с ним
       const a = anchorOf(src);
-      const b = anchorOf(previewOf(p));
+      const b = anchorOf(previewOf(copy));
       if (!a || !b) continue;
-      out.push({ id: p.id, d: arrowPath(a, b), color: barColor(p), draft: false });
+      const geom = arrowGeometry(a, b);
+      const caption = arrowCaption(steps, src.id, copy.id, berthCode(copy.berth_id), copy.starts_at);
+      out.push({
+        id: copy.id,
+        srcId: src.id,
+        ...geom,
+        color: barColor(copy),
+        caption,
+        label: arrowLabel(caption, geom, canvasSize.w),
+        tone: !focusChain
+          ? "base"
+          : focusChain.has(copy.id) || focusChain.has(src.id)
+            ? "focus"
+            : "dim",
+      });
     }
     if (ghost) {
       const a = anchorOf(ghost.p);
-      if (a) out.push({ id: -1, d: `M ${a.right} ${a.y} L ${ghost.cx} ${ghost.cy}`, color: barColor(ghost.p), draft: true });
+      // призрак под курсором — прямая линия: она живёт столько, сколько тянут
+      // мышью, и ломаная со скруглениями только мешала бы целиться в ячейку
+      if (a)
+        out.push({
+          id: -1,
+          d: `M ${a.right} ${a.y} L ${ghost.cx} ${ghost.cy}`,
+          startX: a.right,
+          startY: a.y,
+          tipX: ghost.cx,
+          tipY: ghost.cy,
+          rightward: ghost.cx >= a.right,
+          color: barColor(ghost.p),
+          caption: "",
+          label: { x: 0, y: 0, anchor: "start" },
+          draft: true,
+        });
     }
     return out;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [plan, slotW, layoutTick, drag, ghost, from, totalSlots, cellH]);
+  }, [plan, slotW, layoutTick, drag, ghost, from, totalSlots, cellH, focusChain, canvasSize.w]);
+
+  /**
+   * Обводка «откуда/куда»: когда цепочка подсвечена, полосы оригинала и цели
+   * получают рамку цветом своей стрелки. Без неё яркая линия висит над сеткой,
+   * и непонятно, от какой именно полосы она стартует: у плотного причала полосы
+   * стоят в полутора миллиметрах друг от друга.
+   */
+  const ringOf = useMemo(() => {
+    const map = new Map<number, string>();
+    for (const ar of arrows) {
+      if (ar.tone !== "focus" || ar.srcId === undefined) continue;
+      map.set(ar.srcId, ar.color);
+      map.set(ar.id, ar.color);
+    }
+    return map;
+  }, [arrows]);
 
   const legend = useMemo(() => {
     const seen = new Map<string, string>();
@@ -959,6 +1050,7 @@ export default function VesselsPage() {
                           const color = barColor(p);
                           const dragging = drag?.id === p.id;
                           const canDrag = wysiwyg && canEdit && !busy;
+                          const ring = ringOf.get(p.id); // обводка, если это цепочка под курсором
                           return (
                             <button
                               key={p.id}
@@ -970,14 +1062,21 @@ export default function VesselsPage() {
                                 ...(p.moved_from_id && !p.committed
                                   ? { outline: "2px dashed rgba(255,255,255,.95)", outlineOffset: -2, opacity: 0.75 }
                                   : {}),
-                                // судно на другом терминале — красная рамка
-                                ...(p.at_other_terminal ? { boxShadow: "inset 0 0 0 2px #b3312a" } : {}),
+                                // красная рамка «на другом терминале» + обводка своей цепочки
+                                boxShadow: [
+                                  p.at_other_terminal ? "inset 0 0 0 2px #b3312a" : "",
+                                  ring ? `0 0 0 2px ${ring}` : "",
+                                ].filter(Boolean).join(", ") || undefined,
                               }}
                               title={`${barText(p)} · ждёт${p.cargo ? ` · ${p.cargo}` : ""}${p.moved_from_id && !p.committed ? "\nперешвартован: копия, стрелка ведёт от оригинала" : ""}`}
                               onClick={() => {
                                 if (suppressClick.current) return;
                                 setDetail(p);
                               }}
+                              // наведение — единственный способ показать «вот эти стрелки мои»;
+                              // на мобильном его заменяет открытая панель деталей
+                              onMouseEnter={() => setHoverId(p.id)}
+                              onMouseLeave={() => setHoverId((id) => (id === p.id ? null : id))}
                               onContextMenu={
                                 canDrag
                                   ? (e) => {
@@ -995,6 +1094,7 @@ export default function VesselsPage() {
                               data-cargo={(p.cargo || "").toUpperCase()}
                               data-dragging={dragging ? "1" : "0"}
                               data-moved-from={p.moved_from_id ?? ""}
+                              data-chain-focus={ring ? "1" : "0"}
                             >
                               <span className="block truncate">{p.vessel}</span>
                               <span className="block truncate text-[10px] opacity-85">
@@ -1055,6 +1155,7 @@ export default function VesselsPage() {
                       const height = Math.max(10, Math.min(v.height, cells * cellH - v.top) - 2);
                       const dragging = drag?.id === p.id;
                       const canDrag = wysiwyg && canEdit && !busy;
+                      const ring = ringOf.get(p.id); // обводка, если это цепочка под курсором
                       // пока тащим, полоса едет за курсором с тем же шагом, с каким
                       // потом сохранится: слот по горизонтали, 5 м по вертикали
                       const shiftX = dragging ? Math.round(drag.dx / slotW) * slotW : 0;
@@ -1083,15 +1184,20 @@ export default function VesselsPage() {
                             ...(p.moved_from_id && !p.committed
                               ? { outline: "2px dashed rgba(255,255,255,.95)", outlineOffset: -2, opacity: 0.75 }
                               : {}),
-                            // судно на другом терминале — красная рамка (box-shadow, чтобы
-                            // не спорить с пунктиром перешвартовки)
-                            ...(p.at_other_terminal ? { boxShadow: "inset 0 0 0 2px #b3312a" } : {}),
+                            // красная рамка «на другом терминале» + обводка своей цепочки
+                            // (box-shadow, чтобы не спорить с пунктиром перешвартовки)
+                            boxShadow: [
+                              p.at_other_terminal ? "inset 0 0 0 2px #b3312a" : "",
+                              ring ? `0 0 0 2px ${ring}` : "",
+                            ].filter(Boolean).join(", ") || undefined,
                           }}
                           title={`${barText(p)} · ${lengthLabel(p)}${p.cargo ? ` · ${p.cargo}` : ""}\n${parseLocal(p.starts_at).toLocaleString("ru-RU")} — ${parseLocal(p.ends_at).toLocaleString("ru-RU")}${p.moved_from_id && !p.committed ? "\nперешвартован: копия, стрелка ведёт от оригинала" : ""}`}
                           onClick={() => {
                             if (suppressClick.current) return;
                             setDetail(p);
                           }}
+                          onMouseEnter={() => setHoverId(p.id)}
+                          onMouseLeave={() => setHoverId((id) => (id === p.id ? null : id))}
                           onContextMenu={
                             canDrag
                               ? (e) => {
@@ -1112,6 +1218,7 @@ export default function VesselsPage() {
                           data-offset-m={p.offset_m ?? 0}
                           data-dragging={dragging ? "1" : "0"}
                           data-moved-from={p.moved_from_id ?? ""}
+                          data-chain-focus={ring ? "1" : "0"}
                         >
                           <span className="block truncate">{p.vessel}</span>
                           {height >= 24 ? (
@@ -1134,32 +1241,7 @@ export default function VesselsPage() {
                 полосы, поэтому стрелки не разъезжаются ни при каком скролле —
                 оверлей скроллится внутри того же контейнера. pointer-events-none,
                 чтобы не съедать drag. */}
-            <svg className="absolute left-0 top-0 z-[15] pointer-events-none"
-                 width={canvasSize.w} height={canvasSize.h} data-vp-arrows aria-hidden="true">
-              <defs>
-                {/* наконечники — того же цвета, что и полоса судна: стрелка
-                    читается как продолжение конкретной постановки */}
-                {[...new Set(arrows.map((a) => a.color))].map((c) => (
-                  <marker key={c} id={`vp-arrow-${c.slice(1)}`} markerWidth="9" markerHeight="9" refX="7" refY="3.5"
-                          orient="auto" markerUnits="userSpaceOnUse" viewBox="0 0 7 7">
-                    <path d="M0 0 L7 3.5 L0 7 Z" fill={c} />
-                  </marker>
-                ))}
-              </defs>
-              {arrows.map((ar) => (
-                <path
-                  key={ar.id}
-                  d={ar.d}
-                  fill="none"
-                  stroke={ar.color}
-                  strokeWidth={3}
-                  strokeLinejoin="round"
-                  markerEnd={`url(#vp-arrow-${ar.color.slice(1)})`}
-                  strokeDasharray={ar.draft ? "6 5" : undefined}
-                  opacity={ar.draft ? 0.65 : 0.9}
-                />
-              ))}
-            </svg>
+            <VesselsArrows arrows={arrows} width={canvasSize.w} height={canvasSize.h} />
           </div>
         </div>
 
@@ -1229,6 +1311,13 @@ export default function VesselsPage() {
           запланированная перестановка: стрелка ведёт от оригинала, а когда её дата наступает, судно
           автоматически передвигается по стрелке (копия становится обычной постановкой). Красная рамка — судно
           сейчас на другом терминале (без рамки — в проливе). Клик по полосе — подробности, правка и удаление.
+        </p>
+        <p className="mt-1 text-[11px] text-ink-400 no-print" data-arrows-legend>
+          Стрелка перешвартовки: кружок — откуда судно уходит, наконечник — куда. Подпись у
+          наконечника говорит теми же словами, что печатает PDF: «шаг N→M» — номер перестановки
+          в цепочке этого судна, дальше — причал цели и дата/время её старта («Ожидание», если
+          судно ставят в карман). Наведите курсор на полосу или откройте карточку: стрелки
+          остальных судов уйдут на фон, а полосы этой цепочки получат рамку цвета своей стрелки.
         </p>
       </div>
 
