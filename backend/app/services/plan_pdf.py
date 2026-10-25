@@ -8,6 +8,14 @@
 Что попадает в лист решает фронтенд: он знает, что в кадре, и присылает `day_from`
 / `day_to` (сутки окна) и `berth_ids` (причалы окна). Сервер только рисует.
 
+Стрелки перешвартовок через границу листа: лист разрезан по причалам, и пара
+«оригинал → копия» может оказаться на разных листах. Раскладка поэтому считается
+в два прохода: сначала «какой причал на каком листе», потом рисование. На листе
+начала стрелка уходит в нижний край блока причала с подписью «шаг N→M → РП-6 ·
+лист 2», на листе цели входит в полосу сверху с подписью «шаг N→M от РП-3 ·
+лист 1»; у каждой стрелки — свой номер шага цепочки, чтобы на распечатке стрелки
+собирались в цепочку руками.
+
 Проверка прав та же, что у JSON-плана: без права `view` файл не отдаём.
 """
 from __future__ import annotations
@@ -106,6 +114,40 @@ def _clip(text: str, width_pt: float, size: float) -> str:
     return (text + "…") if text else ""
 
 
+def _chain_steps(items: list[VesselPlacement]) -> dict[int, int]:
+    """Порядковые номера строк в цепочках перешвартовок — для подписей «шаг N→M».
+
+    Цепочка идёт по moved_from_id: корень — строка без него, дальше — копии в
+    ширину (у оригинала их может быть несколько, порядок — по дате старта).
+    Лист разрезан по причалам, и только по этим номерам на распечатке видно,
+    какая стрелка какой перешвартовке принадлежит и что за чем идёт.
+    """
+    by = {p.id: p for p in items}
+    kids: dict[int, list[VesselPlacement]] = {}
+    for p in items:
+        if p.moved_from_id and p.moved_from_id in by:
+            kids.setdefault(p.moved_from_id, []).append(p)
+    order: dict[int, int] = {}
+    roots = [p for p in items if not (p.moved_from_id and p.moved_from_id in by)]
+    roots.sort(key=lambda p: (p.starts_at, p.id))
+    for root in roots:
+        if root.id in order:
+            continue
+        seq, i, n = [root], 0, 0
+        while i < len(seq):
+            node = seq[i]
+            i += 1
+            if node.id in order:
+                continue
+            n += 1
+            order[node.id] = n
+            seq.extend(sorted(kids.get(node.id, []), key=lambda p: (p.starts_at, p.id)))
+    for p in items:  # на случай цикла по moved_from_id — остаток тоже нумеруем
+        if p.id not in order:
+            order[p.id] = len(order) + 1
+    return order
+
+
 def build_plan_pdf(
     db: Session,
     *,
@@ -144,10 +186,10 @@ def build_plan_pdf(
     # стрелки не обрезаем: если копия (или её оригинал) осталась на другом
     # причале — берём причал пары целиком, иначе лист показывал бы чип без
     # стрелки, а полоса без начала
+    by_id = {p.id: p for p in placements_all}
+    park_id = park.id if park else -1
     if berth_ids is not None:
         keep = set(berth_ids)
-        by_id = {p.id: p for p in placements_all}
-        park_id = park.id if park else -1
         for p in placements_all:
             if p.moved_from_id and not p.committed and p.moved_from_id in by_id:
                 q = by_id[p.moved_from_id]
@@ -193,11 +235,43 @@ def build_plan_pdf(
     head_h = 26                  # шапка: дата + слоты
     f = font_name()
 
+    # ── первый проход раскладки: на каком листе окажется каждый причал ──────
+    # Стрелка через границу листа обязана быть осмысленной на обоих концах:
+    # на листе начала — «уходит», на листе цели — «приходит». Значит, лист
+    # каждой половины нужен до рисования. Здесь шаг в шаг повторяется основной
+    # цикл ниже (те же need, то же условие переноса, тот же перенос чипов
+    # «Ожидания»): второй проход рисует ровно то, что посчитано здесь, —
+    # раскладка не имеет права сдвинуться ни на точку.
+    head_y = page_h_pt - margin - 28  # рабочая строка сразу после page_head()
+    chip_rows = math.ceil(len(waiting) / 3)
+    waiting_need = 14 + chip_rows * (16 + 4) if waiting else 0  # как в waiting_section
+    berth_page: dict[int, int] = {}  # причал → лист, на котором напечатан его блок
+    chip_pages: set[int] = set()     # листы, внизу которых напечатан блок «Ожидание»
+    _y, _page = head_y, 0
+    for b in berths:
+        # запас считаем вместе с шапкой суток: ровно как в основном цикле ниже
+        need = head_h + row_head + length_cells(b) * cell_h + 6
+        if _y - need < margin:
+            if waiting:
+                if _y - waiting_need < margin:  # чипы не влезли — уехали на следующий лист
+                    _page += 1
+                    _y = head_y
+                chip_pages.add(_page)
+            _page += 1
+            _y = head_y
+        berth_page[b.id] = _page
+        _y -= need
+    if waiting:  # финальный вызов waiting_section после последнего причала
+        if _y - waiting_need < margin:
+            _page += 1
+        chip_pages.add(_page)
+
+
     buf = io.BytesIO()
     c = pdfcanvas.Canvas(buf, pagesize=(page_w_pt, page_h_pt))
     c.setTitle("План постановки судов")
     c.setAuthor("Basis.Indicators")
-    page_no = 0  # текущий лист: стрелки рисуем только внутри одного листа
+    page_no = 0  # текущий лист (с нуля); на бумаге подписывается «лист N» с единицы
     anchors: dict[int, tuple[int, float, float, float]] = {}  # id -> (лист, право, центр, лево)
     bar_rect: dict[int, tuple[int, float, float, float, float]] = {}  # (лист, x0, x1, низ, верх)
     chip_rect: dict[int, tuple[int, float, float, float, float]] = {}
@@ -208,7 +282,14 @@ def build_plan_pdf(
             copies_by_src.setdefault(p.moved_from_id, []).append(p)
     drawn_arrows: set[int] = set()  # id копии: стрелка рисуется ровно один раз
 
-    def draw_arrow(a, b, color) -> None:
+    steps = _chain_steps(placements)             # номера для подписей «шаг N→M»
+    berth_code = {b.id: b.code for b in berths}  # шифр причала в подпись «→ РП-6 · лист 2»
+
+    def step_label(src_id: int, dst_id: int) -> str:
+        """Единая подпись шага цепочки — один формат у всех стрелок: и внутри листа, и через границу."""
+        return f"шаг {steps.get(src_id, '?')}→{steps.get(dst_id, '?')}"
+
+    def draw_arrow(a, b, color) -> tuple[float, float, bool]:
         """Та же «ёлочка», что на экране: к копии подходим с её ближней стороны."""
         c.setStrokeColor(color)
         c.setFillColor(color)
@@ -228,6 +309,7 @@ def build_plan_pdf(
         head.lineTo(x1 - 5.5 * d, y1 - 3)
         head.close()
         c.drawPath(head, stroke=0, fill=1)
+        return x1, y1, rightward  # куда ткнули наконечник — туда же ставим и подпись
 
     def draw_chip_arrow(cr, br, color) -> None:
         """Стрелка «из буфера»: вверх от верхней грани чипа. Горизонтальная
@@ -259,6 +341,95 @@ def build_plan_pdf(
             head.lineTo(xe - 5.5 * d, by - 3)
             head.close()
             c.drawPath(head, stroke=0, fill=1)
+            c.drawPath(head, stroke=0, fill=1)
+
+    def arrow_label(text: str, x: float, y: float, color: str, align: str = "left") -> None:
+        """Подпись у наконечника стрелки: цвет стрелки + белая подложка.
+
+        Бумага — это сетка, серые выходные и полосы судов: подпись 5.8 pt без
+        подложки в них тонет, а именно «лист 2» и «шаг 2→3» связывают стрелки
+        через границы листов в читаемую цепочку.
+        """
+        c.setFont(f, 5.8)
+        w = pdfmetrics.stringWidth(text, f, 5.8)
+        x0 = x - w if align == "right" else x
+        c.setFillColor(HexColor("#ffffff"))
+        c.rect(x0 - 1.2, y - 1.4, w + 2.4, 7.8, stroke=0, fill=1)
+        c.setFillColor(HexColor(color))
+        c.drawString(x0, y, text)
+
+    def draw_exit_arrow(br, block_bottom: float, color: str, text: str) -> None:
+        """Стрелка «уходит с листа»: от низа полосы к нижнему краю блока причала.
+
+        Блок причала не разрезается между листами, поэтому копия, уехавшая на
+        другой лист, оставляет здесь обрывок с подписью, куда именно («→ РП-6 ·
+        лист 2»). Без этого на бумаге перешвартовка просто исчезала.
+        """
+        x = (br[1] + br[2]) / 2
+        col = HexColor(color)
+        c.setStrokeColor(col)
+        c.setFillColor(col)
+        c.setLineWidth(1.2)
+        c.line(x, br[3], x, block_bottom + 6)
+        head = c.beginPath()
+        head.moveTo(x, block_bottom + 0.5)
+        head.lineTo(x - 3, block_bottom + 6)
+        head.lineTo(x + 3, block_bottom + 6)
+        head.close()
+        c.drawPath(head, stroke=0, fill=1)
+        arrow_label(text, x + 4, block_bottom + 1.5, color)
+
+    def draw_entry_arrow(br, field_top: float, color: str, text: str) -> None:
+        """Стрелка «пришла на лист»: сверху поля, со стороны шапки причала, в полосу.
+
+        Парная половина «уходящей» стрелки: без неё на листе цели стоит полоса,
+        откуда судно «взялось неоткуда», и план читается неверно.
+        """
+        x = (br[1] + br[2]) / 2
+        top = br[4]
+        col = HexColor(color)
+        c.setStrokeColor(col)
+        c.setFillColor(col)
+        c.setLineWidth(1.2)
+        if field_top - (top + 6) > 2:  # полоса в самом верху поля — хватит и наконечника
+            c.line(x, field_top - 0.5, x, top + 6)
+        head = c.beginPath()
+        head.moveTo(x, top + 0.5)
+        head.lineTo(x - 3, top + 6)
+        head.lineTo(x + 3, top + 6)
+        head.close()
+        c.drawPath(head, stroke=0, fill=1)
+        arrow_label(text, x + 4, top + 2, color)
+
+    def draw_bar_chip_arrow(br, cr, color: str, text: str) -> None:
+        """Стрелка «в Ожидание»: от полосы оригинала вниз к чипу копии.
+
+        Направление — как на экране: от оригинала к копии. Раньше рисовался
+        только обратный ход (чип → полоса), и перешвартовка судна в карман
+        «Ожидание» на бумаге не оставалась вовсе.
+        """
+        x0 = (br[1] + br[2]) / 2
+        y0 = br[3]                   # низ полосы оригинала
+        x1 = (cr[1] + cr[2]) / 2     # входим сверху над центром чипа
+        y1 = cr[4]
+        col = HexColor(color)
+        c.setStrokeColor(col)
+        c.setFillColor(col)
+        c.setLineWidth(1.2)
+        if br[1] - 2 <= x1 <= br[2] + 2:
+            c.line(x1, y0, x1, y1 + 6)   # чип под полосой — просто вниз
+        else:
+            ym = (y0 + y1) / 2
+            c.line(x0, y0, x0, ym)
+            c.line(x0, ym, x1, ym)
+            c.line(x1, ym, x1, y1 + 6)
+        head = c.beginPath()
+        head.moveTo(x1, y1 + 0.5)
+        head.lineTo(x1 - 3, y1 + 6)
+        head.lineTo(x1 + 3, y1 + 6)
+        head.close()
+        c.drawPath(head, stroke=0, fill=1)
+        arrow_label(text, x1 + 4, y1 + 2, color)
 
     def header_band(y: float) -> None:
         """Шапка листа: заголовок, окно, период."""
@@ -389,7 +560,52 @@ def build_plan_pdf(
                 a, b = anchors.get(src_id), anchors.get(cp.id)
                 if a and b and a[0] == b[0] == page_no:
                     drawn_arrows.add(cp.id)
-                    draw_arrow(a, b, HexColor(bar_color(cp)))
+                    x1, y1, rightward = draw_arrow(a, b, HexColor(bar_color(cp)))
+                    arrow_label(step_label(src_id, cp.id),
+                                x1 - 3 if rightward else x1 + 3, y1 + 2,
+                                bar_color(cp), align="right" if rightward else "left")
+            # стрелки через границу листа: рисует тот лист, где стоит половина
+            # пары, — иначе перешвартовка молча исчезала с бумаги, когда причалы
+            # пары разъехались по разным листам.
+            bottom_edge = y_top - field_h  # нижний край блока этого причала
+            for q in copies_by_src.get(p.id, []):
+                if q.committed or q.id in drawn_arrows:
+                    continue
+                if q.berth_id == park_id:
+                    # чипы печатаются внизу каждого листа; если на этот лист чипы
+                    # не попали, подписываем, где чип искать
+                    if page_no not in chip_pages:
+                        draw_exit_arrow(
+                            bar_rect[p.id], bottom_edge, bar_color(q),
+                            f"{step_label(p.id, q.id)} → Ожидание · лист "
+                            f"{min(chip_pages, default=page_no) + 1}",
+                        )
+                else:
+                    q_page = berth_page.get(q.berth_id)
+                    if q_page is not None and q_page != page_no:
+                        draw_exit_arrow(
+                            bar_rect[p.id], bottom_edge, bar_color(q),
+                            f"{step_label(p.id, q.id)} → "
+                            f"{berth_code.get(q.berth_id, '?')} · лист {q_page + 1}",
+                        )
+            if p.moved_from_id and not p.committed and p.id not in drawn_arrows:
+                src = by_id.get(p.moved_from_id)
+                if src is not None:
+                    if src.berth_id == park_id:
+                        if page_no not in chip_pages:
+                            draw_entry_arrow(
+                                bar_rect[p.id], y_top, bar_color(p),
+                                f"{step_label(src.id, p.id)} от Ожидание · лист "
+                                f"{min(chip_pages, default=page_no) + 1}",
+                            )
+                    else:
+                        s_page = berth_page.get(src.berth_id)
+                        if s_page is not None and s_page != page_no:
+                            draw_entry_arrow(
+                                bar_rect[p.id], y_top, bar_color(p),
+                                f"{step_label(src.id, p.id)} от "
+                                f"{berth_code.get(src.berth_id, '?')} · лист {s_page + 1}",
+                            )
 
         return y_top - field_h - 6
 
@@ -401,7 +617,8 @@ def build_plan_pdf(
         c.setFillColor(HexColor("#566a85"))
         c.drawString(margin, margin - 2,
                      "Пунктир — постановка продолжается за границей кадра. Стрелка — "
-                     "запланированная перестановка. Лист собран по тому, что видно в окне плана.")
+                     "запланированная перестановка; «лист N» — её продолжение на другом "
+                     "листе. Лист собран по тому, что видно в окне плана.")
 
     def page_head(fresh: bool = False) -> float:
         """Верх листа с шапкой; fresh=True — начать новый лист.
@@ -418,11 +635,11 @@ def build_plan_pdf(
         return top - 14
 
     # «Ожидание» — не причал: отдельный список ждущих судов внизу каждого
-    # листа: листы печатают по одному, и стрелки от чипов должны вести к
-    # копиям перестановок на этом же листе
+    # листа: листы печатают по одному, и стрелки должны вести от чипов к
+    # копиям этого листа и обратно — в обоих направлениях перешвартовки
 
     def waiting_section(y: float) -> float:
-        """Низ листа: чипы ждущих судов + стрелки от чипов к копиям этого листа."""
+        """Низ листа: чипы ждущих судов + стрелки между чипами и копиями этого листа."""
         if not waiting:
             return y
         chip_w = (left_col + field_w - 2 * 4) / 3
@@ -464,6 +681,19 @@ def build_plan_pdf(
             if a and b and a[0] == b[0] == page_no:
                 drawn_arrows.add(q.id)
                 draw_chip_arrow(a, b, HexColor(bar_color(q)))
+                arrow_label(step_label(q.moved_from_id, q.id),
+                            (a[1] + a[2]) / 2 + 4, (a[4] + b[3]) / 2, bar_color(q))
+        # стрелки «в буфер»: полоса оригинала этого листа → чип копии.
+        # Раньше рисовался только обратный ход, и перешвартовка судна в
+        # «Ожидание» на бумаге не оставалась вовсе.
+        for q in waiting:
+            if not q.moved_from_id or q.committed or q.id in drawn_arrows:
+                continue
+            br, cr = bar_rect.get(q.moved_from_id), chip_rect.get(q.id)
+            if br and cr and br[0] == cr[0] == page_no:
+                drawn_arrows.add(q.id)
+                draw_bar_chip_arrow(br, cr, bar_color(q),
+                                    step_label(q.moved_from_id, q.id))
         return y - rows * (chip_h + gap)
 
     y = page_head()

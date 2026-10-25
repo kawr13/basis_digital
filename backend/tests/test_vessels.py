@@ -727,3 +727,183 @@ def test_scheduled_move_takes_effect_on_its_date(client, admin_hdr):
     ).json()["placements"]}
     assert rows2[orig2["id"]]["effective_ends_at"] is None
     assert rows2[future["id"]]["committed"] is False
+    assert rows2[orig2["id"]]["effective_ends_at"] is None
+    assert rows2[future["id"]]["committed"] is False
+
+
+# ------------------------------------------------ PDF: стрелки перешвартовок ----
+
+
+def _own_berth(client, hdr, code: str, length_m: int = 130) -> int:
+    """Свой причал под PDF-тест: чужие постановки не должны попадать в лист."""
+    r = client.post("/api/vessels/berths", json={"code": code, "length_m": length_m}, headers=hdr)
+    assert r.status_code == 201, r.text
+    return r.json()["id"]
+
+
+def _clear_reberthings(client, hdr) -> None:
+    """Убрать перешвартовки, оставшиеся от других тестов.
+
+    Любая пара «чип → полоса» дотягивает свой причал в каждый PDF (см. keep
+    в plan_pdf), иначе пагинация и подписи «лист N» зависели бы от того, что
+    наработали предыдущие тесты.
+    """
+    rows = client.get("/api/vessels/placements",
+                      params={"from": "2020-01-01", "to": "2035-12-31"}, headers=hdr).json()
+    park_ids = {b["id"] for b in rows["berths"] if b["code"] == "ОЖИДАНИЕ"}
+    for p in rows["placements"]:
+        if p["berth_id"] in park_ids or p["moved_from_id"]:
+            assert client.delete(f"/api/vessels/placements/{p['id']}", headers=hdr).status_code == 204
+
+
+def _plan_pdf(client, hdr, berth_ids, period_from: str, period_to: str) -> bytes:
+    """Скачать PDF всего периода кадра; кадр = все сутки периода."""
+    r = client.get("/api/vessels/plan.pdf", params={
+        "from": period_from, "to": period_to, "day_from": 0,
+        "day_to": (date.fromisoformat(period_to) - date.fromisoformat(period_from)).days,
+        "berth_ids": ",".join(str(i) for i in berth_ids)}, headers=hdr)
+    assert r.status_code == 200, r.text
+    return r.content
+
+
+def _pdf_page_texts(content: bytes) -> list[str]:
+    """Страницы PDF как текст: стрелки и подписи проверяются извлечением, не байтами."""
+    import io
+
+    from pypdf import PdfReader
+    return [p.extract_text() or "" for p in PdfReader(io.BytesIO(content)).pages]
+
+
+def _pdf_label_positions(content: bytes) -> dict[str, tuple[int, float, float]]:
+    """Координаты подписей полос в PDF: (лист, x, y) — по ним видно, куда встали полосы."""
+    import io
+
+    from pypdf import PdfReader
+    found: dict[str, tuple[int, float, float]] = {}
+    for n, page in enumerate(PdfReader(io.BytesIO(content)).pages):
+        def cb(text, cm, tm, fd, fs, n=n):
+            t = text.strip()
+            if t.startswith("ЛОЖЕНИЕ"):
+                found[t] = (n, round(tm[4], 1), round(tm[5], 1))
+        page.extract_text(visitor_text=cb)
+    return found
+
+
+def test_plan_pdf_reberthing_across_sheets(client, admin_hdr):
+    """Перешвартовка не должна исчезать, когда причалы разъехались по листам.
+
+    Шесть причалов по 130 м: на первый лист лезут четыре, чип «Ожидания»
+    внизу не влезает и уезжает на лист 2, остальные причалы — на лист 3.
+    Цепочка АРВ-1 (лист 1) → АРВ-6 (лист 3) → чип «Ожидания» → АРВ-3 (лист 1):
+    на листе начала остаётся стрелка в нижний край блока с подписью «лист 3»,
+    на листе цели стрелка входит в полосу со стороны шапки с подписью «лист 1»,
+    а у каждой стрелки — свой номер шага цепочки.
+    """
+    _clear_reberthings(client, admin_hdr)
+    bids = [_own_berth(client, admin_hdr, f"АРВ-{i}") for i in range(1, 7)]
+    made: list[int] = []
+
+    def mk(berth_id, vessel, start, end, **kw):
+        r = client.post("/api/vessels/placements", json={
+            "berth_id": berth_id, "vessel": vessel, "length_m": 60, "offset_m": 0,
+            "starts_at": start, "ends_at": end, **kw}, headers=admin_hdr)
+        assert r.status_code == 201, r.text
+        made.append(r.json()["id"])
+        return r.json()["id"]
+
+    try:
+        park_id = next(b["id"] for b in client.get("/api/vessels/berths", headers=admin_hdr).json()
+                       if b["code"] == "ОЖИДАНИЕ")
+        a = mk(bids[0], "ШАГ ОДИН", "2028-01-05T00:00:00", "2028-01-07T12:00:00")
+        b2 = mk(bids[5], "ШАГ ДВА", "2028-01-09T00:00:00", "2028-01-11T12:00:00", moved_from_id=a)
+        c3 = mk(park_id, "ШАГ ТРИ", "2028-01-12T00:00:00", "2028-01-14T12:00:00",
+                moved_from_id=b2, at_other_terminal=True)
+        mk(bids[2], "ШАГ ЧЕТЫРЕ", "2028-01-16T00:00:00", "2028-01-18T12:00:00", moved_from_id=c3)
+
+        pages = _pdf_page_texts(_plan_pdf(client, admin_hdr, bids, "2028-01-01", "2028-01-31"))
+        assert len(pages) == 3, f"ждём три листа (4 причала + чип + 2), а их {len(pages)}"
+        # лист 1: оригинал уходит на лист 3; копия из чипа приходит с листа 2
+        assert "шаг 1→2 → АРВ-6 · лист 3" in pages[0], pages[0][:400]
+        assert "шаг 3→4 от Ожидание · лист 2" in pages[0]
+        # лист 3: стрелка входит в полосу со стороны шапки + стрелка в чип этого же листа
+        assert "шаг 1→2 от АРВ-1 · лист 1" in pages[2], pages[2][:400]
+        assert "шаг 2→3" in pages[2], "стрелка полоса → чип не рисуется вовсе"
+        # вся цепочка подписана шагами — на резаном по причалам листу иначе не свести
+        for tag in ("шаг 1→2", "шаг 2→3", "шаг 3→4"):
+            assert any(tag in t for t in pages), f"у цепочки потерялась подпись {tag}"
+    finally:
+        for pid in made:
+            client.delete(f"/api/vessels/placements/{pid}", headers=admin_hdr)
+        for bid in bids:
+            client.delete(f"/api/vessels/berths/{bid}", headers=admin_hdr)
+
+
+def test_plan_pdf_bar_to_waiting_chip(client, admin_hdr):
+    """Перешвартовка в «Ожидание» обязана быть видна на бумаге: полоса → чип.
+
+    Раньше рисовалась только обратная стрелка (чип → полоса), и постановка
+    судна в карман на распечатке выглядела исчезновением. Теперь направление
+    как на экране — от оригинала к копии, с подписью шага.
+    """
+    _clear_reberthings(client, admin_hdr)
+    own = _own_berth(client, admin_hdr, "ЧИП-1", 100)
+    made: list[int] = []
+    try:
+        park_id = next(b["id"] for b in client.get("/api/vessels/berths", headers=admin_hdr).json()
+                       if b["code"] == "ОЖИДАНИЕ")
+        src = client.post("/api/vessels/placements", json={
+            "berth_id": own, "vessel": "ИСХОДНИК", "length_m": 60, "offset_m": 0,
+            "starts_at": "2029-02-02T00:00:00", "ends_at": "2029-02-03T12:00:00"},
+            headers=admin_hdr).json()["id"]
+        made.append(src)
+        chip = client.post("/api/vessels/placements", json={
+            "berth_id": park_id, "vessel": "ПОСЕЛИНЕЦ", "length_m": 60, "offset_m": 0,
+            "starts_at": "2029-02-05T00:00:00", "ends_at": "2029-02-06T12:00:00",
+            "moved_from_id": src}, headers=admin_hdr)
+        assert chip.status_code == 201, chip.text
+        made.append(chip.json()["id"])
+
+        pages = _pdf_page_texts(_plan_pdf(client, admin_hdr, [own], "2029-02-01", "2029-02-07"))
+        assert len(pages) == 1
+        assert "ПОСЕЛИНЕЦ" in pages[0], "чип не напечатан"
+        assert "шаг 1→2" in pages[0], "стрелка полоса → чип с подписью шага не появилась"
+    finally:
+        for pid in made:
+            client.delete(f"/api/vessels/placements/{pid}", headers=admin_hdr)
+        client.delete(f"/api/vessels/berths/{own}", headers=admin_hdr)
+
+
+def test_plan_pdf_layout_coordinates_frozen(client, admin_hdr):
+    """Геометрия листа заморожена: стрелки появились, полосы — не сдвинулись.
+
+    Восемь причалов по 140 м: cell_h = 6 pt независимо от чипов «Ожидания»
+    (сетка всё равно не влезает), на лист встаёт по три блока, чип всегда
+    помещается внизу — значит координаты не зависят от того, что осталось
+    в кармане после других тестов. Значения зафиксированы с версии кода
+    до двухпроходной раскладки: после правок они обязаны совпасть.
+    """
+    _clear_reberthings(client, admin_hdr)
+    bids = [_own_berth(client, admin_hdr, f"ЛАЙ-{i}", 140) for i in range(1, 9)]
+    made: list[int] = []
+    try:
+        for bid, vessel, off in ((bids[0], "ЛОЖЕНИЕ А", 0), (bids[3], "ЛОЖЕНИЕ Б", 20),
+                                 (bids[7], "ЛОЖЕНИЕ В", 40)):
+            r = client.post("/api/vessels/placements", json={
+                "berth_id": bid, "vessel": vessel, "length_m": 60, "offset_m": off,
+                "starts_at": "2028-03-02T00:00:00", "ends_at": "2028-03-04T12:00:00"},
+                headers=admin_hdr)
+            assert r.status_code == 201, r.text
+            made.append(r.json()["id"])
+        content = _plan_pdf(client, admin_hdr, bids, "2028-03-01", "2028-03-07")
+        texts = _pdf_page_texts(content)
+        assert len(texts) == 3, f"число листов поехало: {len(texts)} вместо 3"
+        assert _pdf_label_positions(content) == {
+            "ЛОЖЕНИЕ А": (0, 222.1, 493.1),   # первый блок первого листа
+            "ЛОЖЕНИЕ Б": (1, 222.1, 481.1),   # первый блок второго листа, отм. 20 м
+            "ЛОЖЕНИЕ В": (2, 222.1, 337.1),   # второй блок третьего листа, отм. 40 м
+        }
+    finally:
+        for pid in made:
+            client.delete(f"/api/vessels/placements/{pid}", headers=admin_hdr)
+        for bid in bids:
+            client.delete(f"/api/vessels/berths/{bid}", headers=admin_hdr)
