@@ -12,9 +12,9 @@
 """
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, time
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -24,7 +24,7 @@ from ..models import AuditLog, Berth, Role, User, VesselPlacement
 from ..schemas import (
     BerthOut, BerthUpsert, PlacementIn, PlacementOut, PlacementUpdate,
 )
-from ..services import vessels as svc
+from ..services import plan_pdf, vessels as svc
 
 router = APIRouter(prefix="/api/vessels", tags=["vessels"])
 
@@ -152,12 +152,58 @@ def list_placements(
     _allow(db, user, "view", "План постановки судов закрыт")
     d_from, d_to = svc.period_of(date_from, date_to)
     rows = svc.placements_in_period(db, date_from=d_from, date_to=d_to, berth_id=berth_id)
+    # Просмотр периода целиком в прошлом — план «как тогда»: состояние на последний
+    # день периода. Актуальный взгляд (период захватил сегодня или дальше) — на сейчас.
+    as_of = min(datetime.now(), datetime.combine(d_to, time.max))
+    svc.apply_reberthing_state(db, rows, now=as_of)
     return {
         "period": {"from": d_from, "to": d_to},
         "slot_hours": list(svc.SLOT_HOURS),
         "berths": [BerthOut.model_validate(b) for b in svc.berths(db, only_active=True)],
         "placements": [_placement_out(p) for p in rows],
     }
+
+
+@router.get("/plan.pdf")
+def plan_pdf_file(
+    request: Request,
+    date_from: date | None = Query(default=None, alias="from"),
+    date_to: date | None = Query(default=None, alias="to"),
+    day_from: int = Query(default=0, ge=0, description="первые сутки окна просмотра"),
+    day_to: int = Query(default=0, ge=0, description="последние сутки окна просмотра"),
+    berth_ids: str | None = Query(default=None, description="причалы окна просмотра: 1,2,3"),
+    db: Session = Depends(get_db),
+    user: User = Depends(current_user),
+):
+    """PDF видимого куска плана.
+
+    Окно присылает фронтенд — только он знает, что сейчас в кадре сетки. Сервер
+    рисует векторно: кириллица остаётся текстом, линии — линиями.
+    """
+    _allow(db, user, "view", "План постановки судов закрыт")
+    d_from, d_to = svc.period_of(date_from, date_to)
+    ids: list[int] | None = None
+    if berth_ids:
+        try:
+            ids = [int(x) for x in berth_ids.split(",") if x.strip()]
+        except ValueError as e:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                               "berth_ids — числа через запятую") from e
+    try:
+        pdf = plan_pdf.build_plan_pdf(
+            db, date_from=d_from, date_to=d_to,
+            day_from=day_from, day_to=day_to, berth_ids=ids,
+        )
+    except ValueError as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e)) from e
+    name = f"plan_{d_from:%d-%m-%Y}_{d_to:%d-%m-%Y}.pdf"
+    _audit(db, user, "vessels.export_pdf", f"{d_from}…{d_to}, сутки {day_from}–{day_to}", request)
+    db.commit()
+    return Response(
+        content=pdf,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{name}"'},
+    )
 
 
 @router.get("/free-offset")
@@ -214,12 +260,17 @@ def create_placement(
     except svc.BadPlan as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e)) from e
 
+    if payload.moved_from_id is not None and not db.get(VesselPlacement, payload.moved_from_id):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Нет исходной постановки для перешвартовки")
+
     row = VesselPlacement(
         berth_id=payload.berth_id, lane=payload.lane,
         length_m=payload.length_m, offset_m=payload.offset_m,
         vessel=payload.vessel.strip(), volume=(payload.volume or "").strip() or None,
         cargo=(payload.cargo or "").strip() or None, note=(payload.note or "").strip() or None,
         starts_at=svc.normalize(payload.starts_at), ends_at=svc.normalize(payload.ends_at),
+        moved_from_id=payload.moved_from_id, at_other_terminal=payload.at_other_terminal,
+        color=payload.color.lower() if payload.color else None,
         created_by=user.id, updated_by=user.id,
     )
     db.add(row)
@@ -227,6 +278,7 @@ def create_placement(
     _audit(db, user, "vessels.create", svc.place_summary(row), request)
     db.commit()
     db.refresh(row)
+    svc.apply_reberthing_state(db, [row])  # тот же «действительный» вид, что и в списке
     return row
 
 
@@ -270,10 +322,15 @@ def update_placement(
         row.cargo = payload.cargo.strip() or None
     if payload.note is not None:
         row.note = payload.note.strip() or None
+    if payload.at_other_terminal is not None:
+        row.at_other_terminal = payload.at_other_terminal
+    if "color" in payload.model_fields_set:
+        row.color = payload.color.lower() if payload.color else None
     row.updated_by = user.id
     _audit(db, user, "vessels.update", svc.place_summary(row), request)
     db.commit()
     db.refresh(row)
+    svc.apply_reberthing_state(db, [row])
     return row
 
 

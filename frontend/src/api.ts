@@ -88,6 +88,211 @@ export type Summary = {
   delta_pct: number | null;
 };
 
+
+// ------------------------------------------------- статистика (отчёт диспетчера) ---
+
+export type DispatcherMeta = {
+  date_min: string | null;
+  date_max: string | null;
+  default_period_days: number;
+  shifts: { shift: string; count: number }[];
+  updated_at: string | null;
+  sources: { source: string; count: number }[];
+};
+
+export type DispatcherKpi = {
+  throughput_t: number;
+  plan_shift_t: number;
+  plan_pct: number | null;
+  delta_pct: number | null;
+  prev_throughput_t: number;
+  calls: number;
+  vessels_unique: number;
+  avg_tph: number;
+  machine_h: number;
+  downtime_h: number;
+  downtime_pct: number | null;
+  rail_cars: number;
+  trucks: number;
+  crew_present: number;
+  crew_staff: number;
+  crew_present_total: number;
+  crew_rate: number | null;
+  rs_availability: number | null;
+  days: number;
+  shifts: number;
+};
+
+export type DispatcherDayPoint = {
+  bucket_date: string;
+  throughput_t: number;
+  plan_shift_t: number;
+  plan_pct: number | null;
+  calls: number;
+  machine_h: number;
+  downtime_h: number;
+  downtime_pct: number | null;
+  rail_cars: number;
+  trucks: number;
+  present: number;
+  crew: number;
+  contractors: number;
+  day_off: number;
+  sick: number;
+  vacation: number;
+  other_absent: number;
+  staff: number;
+  crew_rate: number | null;
+  shifts: number;
+  rs_ok_start: number;
+  rs_repair_start: number;
+  rs_ok_end: number;
+  rs_repair_end: number;
+  rs_total: number;
+  rs_availability: number | null;
+};
+
+export type DispatcherOverview = {
+  period: { from: string; to: string; days: number; requested_from?: string | null; requested_to?: string | null };
+  shift_filter: string;
+  meta: { date_min: string | null; date_max: string | null; updated_at: string | null; sources: string[] };
+  kpi: DispatcherKpi;
+  dynamics: DispatcherDayPoint[];
+  cargo_mix: {
+    cargo_group: string; tons: number; calls: number; plan_t: number;
+    machine_h: number; downtime_h: number; tph: number; share: number | null;
+  }[];
+  direction: { import_t: number; export_t: number };
+  shift_split: {
+    shift: string; label: string; throughput_t: number; plan_pct: number | null;
+    calls: number; avg_tph: number; downtime_pct: number | null;
+  }[];
+  berths: {
+    berth: string; calls: number; throughput_t: number; vessels: number;
+    machine_h: number; downtime_h: number; downtime_pct: number | null;
+  }[];
+  vessels_top: {
+    vessel: string; calls: number; tons: number; machine_h: number;
+    downtime_h: number; tph: number; cargos: string[];
+  }[];
+  weekday: { weekday: number; label: string; avg_throughput_t: number; days: number }[];
+  rail: {
+    totals: Record<string, number>;
+    by_cargo: {
+      cargo_group: string; processed: number; start_loaded: number; start_empty: number;
+      end_loaded: number; end_empty: number;
+    }[];
+  };
+  trucks: {
+    totals: Record<string, number>;
+    by_cargo: {
+      cargo_group: string; imp_unload: number; exp_unload: number; imp_load: number;
+      exp_load: number; direct_vessel: number; total: number;
+    }[];
+    by_day: {
+      bucket_date: string; imp_unload: number; exp_unload: number; imp_load: number;
+      exp_load: number; direct_vessel: number; total: number;
+    }[];
+  };
+  arrivals: {
+    eta: string | null; vessel: string; berth: string; work_kind: string;
+    cargo_group: string; plan_t: number; plan_raw: string; agent: string; report_date: string;
+  }[];
+  rail_arrivals: {
+    station: string; cars: number; trains: number; cargos: string[]; work_kinds: string[];
+  }[];
+  /** Блоки листа «ВЫВОД» и «ВВОД»: выводка и постановка вагонов. */
+  rail_moves: {
+    totals: {
+      out_cars: number; in_cars: number; in_loaded: number; in_empty: number;
+      trains_out: number; avg_delay_min: number | null; late_trains: number;
+    };
+    by_day: {
+      bucket_date: string; out_cars: number; in_cars: number; in_loaded: number;
+      in_empty: number; late: number; avg_delay_min: number | null;
+    }[];
+    by_wagon: { wagon_type: string; out: number; in: number }[];
+  };
+  /** Платформы, выведенные из аренды: остаток на конец периода и сдвиг. */
+  platforms: {
+    owner: string; total_cars: number; remaining: number; terminal: number;
+    sent: number; arrived_loaded: number; remaining_delta: number;
+  }[];
+};
+
+/** Таблица-детализация: строки витрины, из которых собран график. */
+export type DispatcherRowsResult = {
+  kind: string; key: string | null; title: string;
+  columns: { key: string; label: string; right?: boolean; sum?: boolean }[];
+  rows: Record<string, string | number | null>[];
+  totals: Record<string, number | null>;
+  period: { from: string; to: string; shift: string | null };
+};
+
+export type DispatcherRowKind =
+  | "vessel" | "berth" | "cargo" | "rail_cargo" | "truck_cargo"
+  | "station" | "rail_move" | "platform";
+
+export type DispatcherDay = {
+  date: string;
+  shifts: {
+    shift: string; label: string; dispatcher: string; crew_no: number | null;
+    present: number; crew: number; staff: number; sick: number; vacation: number;
+    contractors: { name: string; count: number }[];
+    rs_ok_start: number; rs_repair_start: number; rs_ok_end: number; rs_repair_end: number;
+  }[];
+  vessels: {
+    shift: string; berth: string; vessel: string; cargo_group: string;
+    plan_shift_t: number; fact_shift_t: number; plan_pct: number | null;
+    plan_total_t: number; remaining_t: number; tph: number; moves: number;
+    machine_h: number; downtime_h: number; note: string;
+  }[];
+  rails: { shift: string; cargo_group: string; processed: number; port_start: number; port_end: number }[];
+  trucks: {
+    shift: string; cargo_group: string; total: number; imp_unload: number;
+    exp_unload: number; imp_load: number; exp_load: number; direct_vessel: number;
+  }[];
+  arrivals: {
+    eta: string | null; vessel: string; berth: string; work_kind: string;
+    cargo_group: string; plan_raw: string; agent: string;
+  }[];
+  rail_out: {
+    shift: string; move_date: string | null; plan_time: string; semi_wagons: number;
+    covered: number; flatcars: number; total: number; accepted_by: string;
+    fact_cars: number; fact_date: string | null; fact_time: string; delay_min: number | null;
+  }[];
+  rail_in: {
+    shift: string; move_date: string | null; plan_time: string; settle_time: string;
+    load_semi: number; load_covered: number; load_flat: number;
+    empty_semi: number; empty_covered: number; empty_flat: number; total: number;
+  }[];
+  platforms: {
+    shift: string; owner: string; total_cars: number; remaining: number;
+    terminal: number; sent: number; arrived_loaded: number;
+  }[];
+};
+
+export type DispatcherImportResult = {
+  imported: Record<string, number>;
+  described: string;
+  source: string;
+  date_min: string;
+  date_max: string;
+  total: Record<string, number>;
+};
+
+export type DispatcherStatus = {
+  configured_path: string;
+  exists: boolean;
+  mtime: string | null;
+  auto_import: boolean;
+  counts: Record<string, number>;
+  /** Границы того, что реально лежит в витрине, и момент последней загрузки. */
+  date_min: string | null;
+  date_max: string | null;
+  updated_at: string | null;
+};
+
 // ---------------------------------------------------------------- reports ---
 
 export type ReportWarehouse = { id: number; code: string; name: string };
@@ -206,7 +411,7 @@ export type WarehouseInput = {
 };
 
 export type SettingSpec = {
-  kind: "str" | "int" | "float" | "bool" | "choice";
+  kind: "str" | "int" | "float" | "bool" | "choice" | "str_list";
   min: number | null;
   max: number | null;
   choices: string[] | null;
@@ -225,14 +430,14 @@ export type SchedulerReport = {
 };
 
 export type SettingsEnvelope = {
-  settings: Record<string, string | number | boolean>;
-  defaults: Record<string, string | number | boolean>;
+  settings: Record<string, string | number | boolean | string[]>;
+  defaults: Record<string, string | number | boolean | string[]>;
   overridden: string[];
   specs: Record<string, SettingSpec>;
   scheduler?: SchedulerReport | null;
 };
 
-export type SettingsPatch = Record<string, string | number | boolean>;
+export type SettingsPatch = Record<string, string | number | boolean | string[]>;
 
 export type OneCCheck = {
   path: string;
@@ -285,6 +490,15 @@ export function setAccessToken(token: string) {
 export function getAccessToken() {
   return accessToken;
 }
+/**
+ * Ротация по refresh-cookie наружу. Нужна при старте страницы: access-токен
+ * живёт только в памяти, поэтому первый /me после перезагрузки заведомо 401
+ * и в консоли каждый раз мелькает «Unauthorized», хотя сессия жива.
+ */
+export async function refreshSession(): Promise<boolean> {
+  return refresh();
+}
+
 export function setOnSessionExpired(cb: () => void) {
   onExpired = cb;
 }
@@ -314,6 +528,29 @@ async function refresh(): Promise<boolean> {
     })().finally(() => (refreshing = null));
   }
   return refreshing;
+}
+
+/**
+ * Тот же путь с авторотацией, но тело ответа — бинарник (PDF), а не JSON.
+ * Размножать обработку 401 не хочется, поэтому она здесь короткая копия.
+ */
+async function requestBlob(path: string, init: RequestInit = {}, retry = true): Promise<Blob> {
+  const res = await raw(path, init);
+  if (res.status === 401 && retry && (await refresh())) return requestBlob(path, init, false);
+  if (res.status === 401) {
+    onExpired?.();
+    throw new ApiError(401, "Сессия истекла, войдите заново");
+  }
+  if (!res.ok) {
+    let detail = res.statusText;
+    try {
+      detail = ((await res.json()) as { detail?: string }).detail ?? detail;
+    } catch {
+      /* тело не JSON */
+    }
+    throw new ApiError(res.status, String(detail));
+  }
+  return res.blob();
 }
 
 async function request<T>(path: string, init: RequestInit = {}, retry = true): Promise<T> {
@@ -393,6 +630,16 @@ export type Placement = {
   note: string | null;
   starts_at: string;
   ends_at: string;
+  /** перешвартовка: id постановки-оригинала, если это копия (к ней тянется стрелка) */
+  moved_from_id?: number | null;
+  /** дата перестановки наступила: копия обычная, без стрелки и пунктира */
+  committed?: boolean;
+  /** действительный конец оригинала: обрезан на старте состоявшейся копии */
+  effective_ends_at?: string | null;
+  /** судно сейчас на другом терминале — красная рамка на плане; без флага — в проливе */
+  at_other_terminal?: boolean;
+  /** цвет полосы вручную (#rrggbb); пусто — автоматом по грузу */
+  color?: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -406,8 +653,11 @@ export type PlacementInput = {
   volume?: string | null;
   cargo?: string | null;
   note?: string | null;
+  color?: string | null;
   starts_at: string;
   ends_at: string;
+  moved_from_id?: number | null;
+  at_other_terminal?: boolean;
 };
 
 /** Ответ /api/vessels/free-offset — где судно такой длины встаёт без пересечений. */
@@ -471,9 +721,50 @@ export const api = {
   adminResetPassword: (id: number) =>
     request<TempPassword>(`/api/admin/reset-password?user_id=${id}`, { method: "POST" }),
   adminUnlock: (id: number) => request<AdminUser>(`/api/admin/users/${id}/unlock`, { method: "POST" }),
-  /** Мягкая деактивация: учётка остаётся в базе, токены отзываются. */
-  adminDeleteUser: (id: number) => request<AdminUser>(`/api/admin/users/${id}`, { method: "DELETE" }),
+  /** Выключить учётку: вход запрещён, живые сессии отзваны, учётка остаётся в списке. */
+  adminSetUserActive: (id: number, active: boolean) =>
+    request<AdminUser>(`/api/admin/users/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ is_active: active }),
+    }),
+  /**
+   * Удалить учётку целиком. Постановки и журнал остаются, но без автора: для
+   * «увольнения» нужен adminSetUserActive, а не это.
+   */
+  adminDeleteUser: (id: number) => request<void>(`/api/admin/users/${id}`, { method: "DELETE" }),
 
+
+  // ------------------------------------- статистика: отчёт диспетчера порта ---
+  dispatcherMeta: () => request<DispatcherMeta>("/api/dispatcher/meta"),
+  dispatcherOverview: (p: { from?: string; to?: string; shift?: string }) => {
+    const q = new URLSearchParams();
+    if (p.from) q.set("from", p.from);
+    if (p.to) q.set("to", p.to);
+    if (p.shift && p.shift !== "all") q.set("shift", p.shift);
+    const tail = q.toString();
+    return request<DispatcherOverview>(`/api/dispatcher/overview${tail ? `?${tail}` : ""}`);
+  },
+  dispatcherDay: (day: string, shift?: string) =>
+    request<DispatcherDay>(
+      `/api/dispatcher/day?date=${day}${shift && shift !== "all" ? `&shift=${shift}` : ""}`,
+    ),
+  dispatcherRows: (p: {
+    from?: string; to?: string; shift?: string; kind: DispatcherRowKind; key?: string;
+  }) => {
+    const q = new URLSearchParams();
+    if (p.from) q.set("from", p.from);
+    if (p.to) q.set("to", p.to);
+    if (p.shift && p.shift !== "all") q.set("shift", p.shift);
+    q.set("kind", p.kind);
+    if (p.key) q.set("key", p.key);
+    return request<DispatcherRowsResult>(`/api/dispatcher/rows?${q.toString()}`);
+  },
+  dispatcherStatus: () => request<DispatcherStatus>("/api/admin/dispatcher/status"),
+  dispatcherImport: (body: { path?: string; content_base64?: string; filename?: string }) =>
+    request<DispatcherImportResult>("/api/admin/dispatcher/import", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
   // -------------------------------------------------- администрирование: склады ---
   adminWarehouses: () => request<AdminWarehouse[]>("/api/admin/warehouses"),
   adminCreateWarehouse: (body: WarehouseInput) =>
@@ -483,8 +774,13 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify(body),
     }),
-  adminDeleteWarehouse: (id: number) =>
-    request<AdminWarehouse>(`/api/admin/warehouses/${id}`, { method: "DELETE" }),
+  /**
+   * Удалить склад. Без статистики удаляется сразу; по складу со строками витрины
+   * бэкенд отвечает 409 и просит purge=true — иначе вместе со складом стираются
+   * отчёты за этот склад.
+   */
+  adminDeleteWarehouse: (id: number, purge = false) =>
+    request<void>(`/api/admin/warehouses/${id}${purge ? "?purge=true" : ""}`, { method: "DELETE" }),
 
   // ------------------------------------- администрирование: настройки и 1С ---
   adminSettings: () => request<SettingsEnvelope>("/api/admin/settings"),
@@ -520,6 +816,20 @@ export const api = {
   patchBerth: (id: number, body: BerthInput) =>
     request<Berth>(`/api/vessels/berths/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
   deleteBerth: (id: number) => request<void>(`/api/vessels/berths/${id}`, { method: "DELETE" }),
+  /**
+   * PDF видимого куска плана. Файл рисует бэкенд (вектор, кириллица текстом),
+   * браузер его только сохраняет — печать браузера для этого не используется.
+   */
+  planPdf: (from: string, to: string, dayFrom: number, dayTo: number, berthIds: number[]) => {
+    const q = new URLSearchParams({
+      from,
+      to,
+      day_from: String(dayFrom),
+      day_to: String(dayTo),
+      ...(berthIds.length ? { berth_ids: berthIds.join(",") } : {}),
+    });
+    return requestBlob(`/api/vessels/plan.pdf?${q}`);
+  },
   vesselPlan: (from?: string, to?: string, berthId?: number) => {
     const q = new URLSearchParams();
     if (from) q.set("from", from);

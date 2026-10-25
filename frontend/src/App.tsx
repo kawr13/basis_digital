@@ -1,7 +1,8 @@
 import { Navigate, Route, Routes } from "react-router-dom";
 import { useAuth } from "./auth";
-import { resolveVesselRights, usePublicSettings } from "./settings";
+import { hiddenSections, resolveVesselRights, usePublicSettings } from "./settings";
 import DashboardPage from "./pages/DashboardPage";
+import StatisticsPage from "./pages/StatisticsPage";
 import LoginPage from "./pages/LoginPage";
 import ReportsPage from "./pages/ReportsPage";
 import VesselsPage from "./pages/VesselsPage";
@@ -15,18 +16,39 @@ function Boot() {
   );
 }
 
-function Protected({ children }: { children: React.ReactNode }) {
-  const { user, booting } = useAuth();
-  if (booting) return <Boot />;
-  if (!user) return <Navigate to="/login" replace />;
-  return <>{children}</>;
-}
-
 /** Админка доступна только роли admin: остальным — возврат на сводку. */
 function AdminOnly({ children }: { children: React.ReactNode }) {
   const { user, booting } = useAuth();
   if (booting) return <Boot />;
   if (!user || user.role !== "admin") return <Navigate to="/" replace />;
+  return <>{children}</>;
+}
+
+/** Раздел, который админ скрыл для всех (ui.hidden_sections): и вкладка,
+ *  и маршрут. Пересылаем на первый видимый раздел, а не «в никуда». */
+const SECTION_PATHS: Record<string, string> = {
+  statistics: "/",
+  warehouses: "/warehouses",
+  reports: "/reports",
+  vessels: "/vessels",
+};
+
+function firstVisibleSection(settings: Parameters<typeof hiddenSections>[0]): string {
+  const hidden = hiddenSections(settings);
+  for (const id of ["statistics", "warehouses", "reports", "vessels"]) {
+    if (!hidden.has(id)) return SECTION_PATHS[id];
+  }
+  return "/";
+}
+
+function SectionGuard({ section, children }: { section: string; children: React.ReactNode }) {
+  const { user, booting } = useAuth();
+  const settings = usePublicSettings();
+  if (booting) return <Boot />;
+  if (!user) return <Navigate to="/login" replace />;
+  if (hiddenSections(settings).has(section)) {
+    return <Navigate to={firstVisibleSection(settings)} replace />;
+  }
   return <>{children}</>;
 }
 
@@ -36,7 +58,8 @@ function VesselsGuard({ children }: { children: React.ReactNode }) {
   const settings = usePublicSettings();
   if (booting) return <Boot />;
   if (!user) return <Navigate to="/login" replace />;
-  if (!resolveVesselRights(user, settings).view) return <Navigate to="/" replace />;
+  if (hiddenSections(settings).has("vessels")) return <Navigate to={firstVisibleSection(settings)} replace />;
+  if (!resolveVesselRights(user, settings).view) return <Navigate to={firstVisibleSection(settings)} replace />;
   return <>{children}</>;
 }
 
@@ -48,17 +71,28 @@ export default function App() {
       <Route
         path="/"
         element={
-          <Protected>
+          <SectionGuard section="statistics">
+            <StatisticsPage />
+          </SectionGuard>
+        }
+      />
+      {/* Остатки и ёмкость складов из витрины 1С — отдельная страница: до
+          согласования контракта с 1С это демо-набор, путать его с реальными
+          цифрами отчёта диспетчера нельзя. */}
+      <Route
+        path="/warehouses"
+        element={
+          <SectionGuard section="warehouses">
             <DashboardPage />
-          </Protected>
+          </SectionGuard>
         }
       />
       <Route
         path="/reports"
         element={
-          <Protected>
+          <SectionGuard section="reports">
             <ReportsPage />
-          </Protected>
+          </SectionGuard>
         }
       />
       <Route

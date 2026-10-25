@@ -5,6 +5,7 @@
  */
 import { useCallback, useEffect, useState } from "react";
 import { api, type SchedulerReport, type SettingsEnvelope, type SettingsPatch } from "../../api";
+import { loadPublicSettings } from "../../settings";
 import { errText } from "./ui";
 
 export type AdminSettings = {
@@ -46,6 +47,9 @@ export function useAdminSettings(): AdminSettings {
       setEnv(next);
       setScheduler(next.scheduler ?? null);
       setError("");
+      // публичный срез кэшируется на сеанс: без перезагрузки шапка и маршруты
+      // в этой вкладке продолжали бы видеть старые значения
+      loadPublicSettings(true).catch(() => undefined);
       return next;
     } catch (e) {
       setError(errText(e, "Настройки не сохранены"));

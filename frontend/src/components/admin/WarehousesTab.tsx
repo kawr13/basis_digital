@@ -1,9 +1,10 @@
 /**
  * Вкладка «Склады»: справочник складов кабинета.
  *
- * Жёсткого удаления нет намеренно (факты витрины висят внешним ключом на
- * складе): «удалить» = деактивировать, склад перестаёт попадать в метрики,
- * но история остаётся.
+ * «Выключить» и «удалить» — разные действия. Закрытый склад выключают: он
+ * перестаёт попадать в метрики, а строки витрины остаются. Удаляют тот, которого
+ * на самом деле нет (создали ошибочно, 1С прислала дубль); склад со статистикой
+ * бэкенд отдаёт только после явного подтверждения.
  */
 import { useCallback, useEffect, useState } from "react";
 import { api, type AdminWarehouse, type WarehouseInput } from "../../api";
@@ -47,6 +48,9 @@ export function WarehousesTab() {
   const [form, setForm] = useState<FormState>(EMPTY);
   const [formError, setFormError] = useState("");
   const [confirmId, setConfirmId] = useState<number | null>(null);
+  // удаление — отдельное подтверждение; для склада со статистикой нужен второй шаг
+  const [deleteId, setDeleteId] = useState<number | null>(null);
+  const [purgeFor, setPurgeFor] = useState<number | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -125,14 +129,41 @@ export function WarehousesTab() {
     setBusy(true);
     setConfirmId(null);
     try {
-      const updated = isActive
-        ? await api.adminPatchWarehouse(w.id, { is_active: true })
-        : await api.adminDeleteWarehouse(w.id);
+      const updated = await api.adminPatchWarehouse(w.id, { is_active: isActive });
       setRows((list) => list.map((x) => (x.id === updated.id ? updated : x)));
-      setNotice(isActive ? `Склад «${updated.code}» снова активен.` : `Склад «${updated.code}» отключён: история сохранена.`);
+      setNotice(isActive
+        ? `Склад «${updated.code}» снова активен.`
+        : `Склад «${updated.code}» отключён: история сохранена.`);
       setError("");
     } catch (e) {
       setError(errText(e, "Не удалось изменить статус склада"));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /**
+   * Удалить склад. Закрытый склад выключают — его статистика остаётся в
+   * отчётах. Удаляют тот, которого на самом деле нет. По складу со строками
+   * витрины бэкенд отвечает 409 с числом строк: после этого просим второе
+   * подтверждение и повторяем запрос с purge=true.
+   */
+  const removeWarehouse = async (w: AdminWarehouse, purge = false) => {
+    setBusy(true);
+    setDeleteId(null);
+    try {
+      await api.adminDeleteWarehouse(w.id, purge);
+      setRows((list) => list.filter((x) => x.id !== w.id));
+      setPurgeFor(null);
+      setNotice(purge
+        ? `Склад «${w.code}» удалён вместе со статистикой — отчёты за него пропали.`
+        : `Склад «${w.code}» удалён из справочника.`);
+      setError("");
+    } catch (e) {
+      const msg = errText(e, "Удаление не выполнено");
+      setError(msg);
+      // бэкенд сказал «есть статистика» — предлагаем осознанный второй шаг
+      if (/статистик/.test(msg)) setPurgeFor(w.id);
     } finally {
       setBusy(false);
     }
@@ -200,6 +231,26 @@ export function WarehousesTab() {
                     ) : (
                       <LinkBtn action="enable-warehouse" onClick={() => setActive(w, true)} disabled={busy}>
                         Включить
+                      </LinkBtn>
+                    )}
+                    {purgeFor === w.id ? (
+                      <ConfirmInline
+                        action="purge-warehouse"
+                        text="удалить со статистикой?"
+                        onYes={() => removeWarehouse(w, true)}
+                        onNo={() => setPurgeFor(null)}
+                      />
+                    ) : deleteId === w.id ? (
+                      <ConfirmInline
+                        action="delete-warehouse"
+                        text="удалить?"
+                        onYes={() => removeWarehouse(w)}
+                        onNo={() => setDeleteId(null)}
+                      />
+                    ) : (
+                      <LinkBtn action="delete-warehouse-ask" tone="crit" onClick={() => setDeleteId(w.id)} disabled={busy}
+                        title="Удалить склад из справочника. Если по нему есть статистика, бэкенд спросит ещё раз">
+                        Удалить
                       </LinkBtn>
                     )}
                   </span>

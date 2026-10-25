@@ -225,7 +225,7 @@ export function DrilldownPanel({
         // десктоп: плавающая колонка справа — лежит поверх виджетов,
         // поэтому усилена тенью, чтобы считалась отдельным слоем.
         // top считается от фактической высоты шапки (--header-h ставит AppShell)
-        "md:inset-x-auto md:right-6 md:top-[calc(var(--header-h,89px)+8px)] md:bottom-6 md:w-[400px] md:max-h-none md:rounded-b-lg md:shadow-[0_30px_70px_-25px_rgba(15,27,45,.55)]",
+        "md:inset-x-auto md:right-6 md:top-[calc(var(--header-h,89px)+8px)] md:bottom-6 md:w-[min(760px,calc(100vw_-_3rem))] md:max-h-none md:rounded-b-lg md:shadow-[0_30px_70px_-25px_rgba(15,27,45,.55)]",
       ].join(" ")}
     >
       <div className="flex items-start justify-between gap-3">

@@ -1,0 +1,33 @@
+# Override: всё внутри Docker, TLS-терминатор — Caddy (сертификаты сам).
+#
+#   docker compose -f docker-compose.yml -f deploy/caddy/docker-compose.caddy.yml up -d
+#
+# Кабинет вообще не публикует порт наружу — Caddy добирается до контейнера
+# web по compose-сети (http://web:80) и сам выпускает/продлевает Let's Encrypt.
+# Нужны: домен, A-запись на IP сервера, открытые 80 и 443.
+#
+# Не забыть в .env:
+#   CORS_ORIGINS=https://cab.example.ru
+#   COOKIE_SECURE=            (пусто = Secure, при HTTPS так и надо)
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"            # HTTP/3
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - web
+
+  web:
+    ports: !override []          # наружу не торчим, только из compose-сети
+
+volumes:
+  caddy_data:
+  caddy_config:

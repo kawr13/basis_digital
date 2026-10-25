@@ -1,0 +1,15 @@
+# Override: кабинет за внешним (хостовым) nginx с доменом и TLS.
+#
+#   docker compose -f docker-compose.yml -f deploy/nginx/docker-compose.host-nginx.yml up -d
+#
+# Порт 8080 публикуется только на 127.0.0.1 — снаружи не виден,
+# весь внешний трафик идёт через хостовый nginx (deploy/nginx/statcab.vhost.conf).
+#
+# Не забыть в .env:
+#   CORS_ORIGINS=https://cab.example.ru
+#   COOKIE_SECURE=            (пусто = Secure, он и нужен при HTTPS)
+
+services:
+  web:
+    ports: !override
+      - "127.0.0.1:8080:80"

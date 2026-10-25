@@ -19,6 +19,10 @@ await page.fill("input[autocomplete=username]", "admin");
 await page.fill("input[autocomplete=current-password]", PASS);
 await page.click("button.btn-primary");
 await page.waitForSelector("section[data-widget]", { timeout: 10000 });
+
+// «Статистика» стала главной страницей, витрина складов 1С — на вкладке «Склады 1С».
+await page.goto(`${BASE}/warehouses`, { waitUntil: "networkidle" });
+await page.waitForSelector("section[data-widget]", { timeout: 10000 });
 await page.waitForTimeout(900); // даём анимации графика закончиться
 
 const cs = (sel, props) =>
@@ -158,6 +162,9 @@ await rm.goto(`${BASE}/login`, { waitUntil: "networkidle" });
 await rm.fill("input[autocomplete=username]", "admin");
 await rm.fill("input[autocomplete=current-password]", PASS);
 await rm.click("button.btn-primary");
+// после логина приложение открывает «Статику», а график 1С — на своей вкладке
+await rm.waitForSelector('a[href="/warehouses"]', { timeout: 10000 });
+await rm.goto(`${BASE}/warehouses`, { waitUntil: "networkidle" });
 await rm.waitForSelector('section[data-widget="dynamics"] path.dc-bar', { timeout: 10000 });
 const rmState = await rm.evaluate(() => {
   const b = document.querySelector('section[data-widget="dynamics"] path.dc-bar');

@@ -8,7 +8,8 @@
  * Данные не из 1С: их заводит диспетчер, поэтому здесь можно создавать и править
  * строки, а посмотреть — любой период.
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import {
   api,
   type Berth,
@@ -18,14 +19,13 @@ import {
 } from "../api";
 import { useAuth } from "../auth";
 import { AppShell } from "../components/AppShell";
-import { VesselPlanPrint, type PrintWindow } from "../components/VesselPlanPrint";
 import { Field, FormError, Modal, Notice, errText } from "../components/admin/ui";
 import { dmy } from "../format";
 import { resolveVesselRights, roleListLabel, usePublicSettings } from "../settings";
 import {
-  addDays, addSlots, barGeometry, barText, cargoColor, daysInRange, isWeekend, isoLocal,
-  lengthGeometry, lengthLabel, M_PER_CELL, parseLocal, periodLabel, rulerMarks, slotLabel,
-  slotsCount, SLOT_HOURS, ymd,
+  addDays, addSlots, barColor, barGeometry, barText, cargoColor, daysInRange, displayed, isWeekend,
+  isoLocal, lengthGeometry, lengthLabel, M_PER_CELL, PALETTE, parseLocal, periodLabel, rulerMarks,
+  slotLabel, slotsCount, SLOT_HOURS, textColorOn, ymd,
 } from "../vessels";
 
 /**
@@ -38,8 +38,24 @@ const SLOT_W_MIN = 22;
 const SLOT_W_MAX = 64;
 /** Левая липкая колонка с причалом. */
 const LEFT_W = 168;
-/** Высота одной ячейки вертикальной шкалы = 10 метров длины причала. */
-const CELL_H = 12;
+/** Высота одной ячейки вертикальной шкалы = 10 метров длины причала; режим крутится кнопкой. */
+const CELL_STEPS = [12, 9, 6];
+const CELL_H_DEFAULT = 12;
+
+/** Код виртуального причала «Ожидание»: карман для судов вне причалов (заводит бэкенд). */
+const PARK_CODE = "ОЖИДАНИЕ";
+
+type Anchor = { left: number; right: number; y: number };
+
+/** Стрелка перешвартовки: прямоугольная «ёлочка», как диспетчеры рисуют в Excel. */
+function arrowPath(a: Anchor, b: Anchor): string {
+  const right = b.left >= a.left;
+  const x1 = right ? a.right : a.left;
+  const x2 = right ? b.left : b.right;
+  if (Math.abs(a.y - b.y) < 2) return `M ${x1} ${a.y} L ${x2} ${b.y}`;
+  const mx = x1 + (x2 - x1) / 2;
+  return `M ${x1} ${a.y} H ${mx} V ${b.y} H ${x2}`;
+}
 
 const PRESETS = [
   { label: "Неделя", days: 7 },
@@ -62,6 +78,8 @@ type Form = {
   startHour: number;
   endDate: string;
   endHour: number;
+  color: string;
+  at_other_terminal: boolean;
 };
 
 const toIso = (d: string, hour: number) => `${d}T${String(hour).padStart(2, "0")}:00:00`;
@@ -81,6 +99,8 @@ function formFrom(p: Placement | null, berths: Berth[]): Form {
       startHour: 0,
       endDate: today,
       endHour: 6,
+      at_other_terminal: false,
+      color: "",
     };
   }
   const s = parseLocal(p.starts_at);
@@ -98,6 +118,8 @@ function formFrom(p: Placement | null, berths: Berth[]): Form {
     startHour: s.getHours(),
     endDate: ymd(e),
     endHour: e.getHours(),
+    at_other_terminal: p.at_other_terminal ?? false,
+    color: p.color ?? "",
   };
 }
 
@@ -120,6 +142,8 @@ export default function VesselsPage() {
   const [form, setForm] = useState<Form | null>(null);
   const [formError, setFormError] = useState("");
   const [saved, setSaved] = useState("");
+  // «⤓ PDF» качает файл с бэкенда, поэтому кнопка обязана показывать, что файл уже летит
+  const [pdfBusy, setPdfBusy] = useState(false);
   const [detail, setDetail] = useState<Placement | null>(null);
   const [freeHint, setFreeHint] = useState("");
   // WYSIWYG: карандаш превращает полосы в ручки — судно двигают мышью
@@ -129,11 +153,29 @@ export default function VesselsPage() {
   // РП-3 одним движением
   const [drag, setDrag] = useState<{
     id: number; startX: number; dx: number; grabY: number; ownTop: number;
-    blocks: { id: number; top: number; height: number }[];
+    blocks: { id: number; left: number; top: number; height: number }[];
     berthId: number; offsetM: number; topInBlock: number;
+  } | null>(null);
+  // перешвартовка по правой кнопке: меню у курсора + призрак с целью
+  const [menu, setMenu] = useState<{ x: number; y: number; p: Placement } | null>(null);
+  const [ghost, setGhost] = useState<{
+    p: Placement; x: number; y: number; cx: number; cy: number;
+    berthId: number; offsetM: number; slot: number;
   } | null>(null);
   // после перетаскивания клик по полосе не должен открывать карточку
   const suppressClick = useRef(false);
+  // плотность шкалы: чем меньше ячейка, тем больше причалов влезает на экран,
+  // а значит и в PDF «что видно» попадают они все — стрелки не обрезаются краем
+  const [cellH, setCellH] = useState(() => {
+    const v = Number(window.localStorage.getItem("vp.cellH"));
+    return CELL_STEPS.includes(v) ? v : CELL_H_DEFAULT;
+  });
+  const cycleCellH = () =>
+    setCellH((h) => {
+      const next = CELL_STEPS[(CELL_STEPS.indexOf(h) + 1) % CELL_STEPS.length] ?? CELL_H_DEFAULT;
+      window.localStorage.setItem("vp.cellH", String(next));
+      return next;
+    });
 
   const load = useCallback(async () => {
     setBusy(true);
@@ -151,14 +193,32 @@ export default function VesselsPage() {
     void load();
   }, [load]);
 
+  // График сдвигается каждый день: перестановка «состоится» на границе слота,
+  // а страница у диспетчера открыта сутками. Обновляем план сами: раз в минуту,
+  // пока вкладка видна, и сразу при возвращении на вкладку. Во время перетаскивания,
+  // призрака или сохранения не лезем — чтобы не вырвать полосу из-под курсора.
+  const interactive = useRef(false);
+  useEffect(() => {
+    interactive.current = !!drag || !!ghost || busy;
+  }, [drag, ghost, busy]);
+  useEffect(() => {
+    const refresh = () => {
+      if (document.visibilityState === "visible" && !interactive.current) void load();
+    };
+    const timer = window.setInterval(refresh, 60_000);
+    document.addEventListener("visibilitychange", refresh);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", refresh);
+    };
+  }, [load]);
+
   const days = useMemo(() => daysInRange(from, to), [from, to]);
   const totalSlots = days.length * SLOT_HOURS.length;
 
   // поле плана обязано доставать до правого края: ширину слота считаем от
   // реальной ширины контейнера, а не зашиваем
   const gridRef = useRef<HTMLDivElement>(null);
-  // какой кадр уйдёт в PDF: считается в момент нажатия «⤓ PDF»
-  const [printWin, setPrintWin] = useState<PrintWindow | null>(null);
   const [availW, setAvailW] = useState(0);
   useEffect(() => {
     const el = gridRef.current;
@@ -181,6 +241,8 @@ export default function VesselsPage() {
     return Math.max(SLOT_W_MIN, Math.min(SLOT_W_MAX, fit));
   }, [availW, totalSlots]);
   const berths = plan?.berths.filter((b) => b.is_active) ?? [];
+  // карман «Ожидание»: виртуальный причал от бэкенда, в сортировке последний
+  const parkId = berths.find((b) => b.code === PARK_CODE)?.id;
 
   /** Блоки сетки: по одному на причал. Внутри — шкала длины, 10 м на ячейку. */
   const blocks = useMemo(
@@ -192,6 +254,92 @@ export default function VesselsPage() {
       })),
     [berths, plan],
   );
+
+  /* ---------------------------- стрелки оверлей ---------------------------- */
+
+  /** Верх шкалы каждого причала (в координатах холста): от них считают якоря стрелок. */
+  const scaleTops = useRef<Record<number, { top: number; height: number }>>({});
+  // карман живёт вне шкалы, его чипы меряем отдельным снапшотом
+  const parkRects = useRef<Record<number, { x: number; y: number; w: number; h: number }>>({});
+  const [layoutTick, setLayoutTick] = useState(0);
+  // SVG — replaced-элемент: inset-0 его не растягивает, поэтому размер холста
+  // измерен явно, иначе стрелки обрезались бы штатными 300×150
+  const [canvasSize, setCanvasSize] = useState({ w: 0, h: 0 });
+  useLayoutEffect(() => {
+    const print = gridRef.current?.querySelector<HTMLElement>("[data-vp-print]");
+    if (!print) return;
+    const pr = print.getBoundingClientRect();
+    const map: Record<number, { top: number; height: number }> = {};
+    for (const el of print.querySelectorAll<HTMLElement>("[data-berth-scale]")) {
+      const r = el.getBoundingClientRect();
+      map[Number(el.dataset.berthScale)] = { top: r.top - pr.top, height: r.height };
+    }
+    scaleTops.current = map;
+    // карман: якоря стрелок — реальные прямоугольники чипов «Ожидания»
+    const rects: Record<number, { x: number; y: number; w: number; h: number }> = {};
+    for (const el of print.querySelectorAll<HTMLElement>("[data-vp-bar]")) {
+      if (el.closest("[data-berth-block]")?.getAttribute("data-berth-block") !== PARK_CODE) continue;
+      const r = el.getBoundingClientRect();
+      rects[Number(el.dataset.vpBar)] = { x: r.left - pr.left, y: r.top - pr.top, w: r.width, h: r.height };
+    }
+    parkRects.current = rects;
+    setCanvasSize({ w: pr.width, h: pr.height });
+    setLayoutTick((t) => t + 1);
+  }, [plan, slotW, availW, cellH]);
+
+  /** Якорь стрелки: те же barGeometry/lengthGeometry, что рисуют саму полосу. */
+  const anchorOf = (p: Placement) => {
+    // карман: чипы лежат не на шкале — якорем служит фактический прямоугольник чипа
+    if (parkId != null && p.berth_id === parkId) {
+      const r = parkRects.current[p.id];
+      if (r) return { left: r.x, right: r.x + r.w, y: r.y + r.h / 2 };
+    }
+    const d = displayed(p);
+    if (!d) return null;
+    const geo = barGeometry(d, from, totalSlots);
+    const st = scaleTops.current[p.berth_id];
+    if (!geo || !st) return null;
+    const v = lengthGeometry(p, cellH);
+    return {
+      left: LEFT_W + geo.left * slotW,
+      right: LEFT_W + (geo.left + geo.width) * slotW,
+      y: st.top + v.top + Math.min(v.height, st.height) / 2,
+    };
+  };
+
+  /** Полоса под drag'ом: стрелка едет за целью, а не за старым местом. */
+  const previewOf = (p: Placement): Placement => {
+    if (!drag || drag.id !== p.id) return p;
+    const slots = Math.round(drag.dx / slotW);
+    return {
+      ...p,
+      berth_id: drag.berthId,
+      offset_m: drag.offsetM,
+      starts_at: isoLocal(addSlots(parseLocal(p.starts_at), slots)),
+      ends_at: isoLocal(addSlots(parseLocal(p.ends_at), slots)),
+    };
+  };
+
+  const arrows = useMemo(() => {
+    const rows = plan?.placements ?? [];
+    const byId = new Map(rows.map((p) => [p.id, p]));
+    const out: { id: number; d: string; color: string; draft: boolean }[] = [];
+    for (const p of rows) {
+      if (!p.moved_from_id || p.committed) continue; // дата наступила — судно уже передвинуто
+      const src = byId.get(p.moved_from_id);
+      if (!src) continue;  // оригинал удалили — стрелка гаснет вместе с ним
+      const a = anchorOf(src);
+      const b = anchorOf(previewOf(p));
+      if (!a || !b) continue;
+      out.push({ id: p.id, d: arrowPath(a, b), color: barColor(p), draft: false });
+    }
+    if (ghost) {
+      const a = anchorOf(ghost.p);
+      if (a) out.push({ id: -1, d: `M ${a.right} ${a.y} L ${ghost.cx} ${ghost.cy}`, color: barColor(ghost.p), draft: true });
+    }
+    return out;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [plan, slotW, layoutTick, drag, ghost, from, totalSlots, cellH]);
 
   const legend = useMemo(() => {
     const seen = new Map<string, string>();
@@ -232,6 +380,8 @@ export default function VesselsPage() {
       note: form.note.trim() || null,
       starts_at: toIso(form.startDate, form.startHour),
       ends_at: toIso(form.endDate, form.endHour),
+      at_other_terminal: form.at_other_terminal,
+      color: form.color || null,
     };
     try {
       if (form.id) await api.updatePlacement(form.id, body);
@@ -294,6 +444,7 @@ export default function VesselsPage() {
   };
 
   const startDrag = (e: React.PointerEvent, p: Placement) => {
+    if (e.button !== 0) return;  // правая кнопка — контекстное меню, не drag
     const bar = e.currentTarget as HTMLElement;
     bar.setPointerCapture?.(e.pointerId);
     const barTop = bar.getBoundingClientRect().top;
@@ -302,7 +453,7 @@ export default function VesselsPage() {
     const blocks = [...document.querySelectorAll<HTMLElement>("[data-berth-scale]")]
       .map((el) => {
         const r = el.getBoundingClientRect();
-        return { id: Number(el.dataset.berthScale), top: r.top, height: r.height };
+        return { id: Number(el.dataset.berthScale), left: r.left, top: r.top, height: r.height };
       })
       .filter((b) => Number.isFinite(b.id));
     setDrag({
@@ -314,7 +465,7 @@ export default function VesselsPage() {
       blocks,
       berthId: p.berth_id,
       offsetM: p.offset_m ?? 0,
-      topInBlock: lengthGeometry(p, CELL_H).top,
+      topInBlock: lengthGeometry(p, cellH).top,
     });
   };
 
@@ -328,7 +479,7 @@ export default function VesselsPage() {
     const berth = berths.find((b) => b.id === block.id);
     // судно без длины занимает причал целиком — двигать его по метрам нельзя
     const room = berth?.length_m && p.length_m ? Math.max(berth.length_m - p.length_m, 0) : 0;
-    const raw = ((e.clientY - block.top - drag.grabY) / CELL_H) * M_PER_CELL;
+    const raw = ((e.clientY - block.top - drag.grabY) / cellH) * M_PER_CELL;
     const offsetM = Math.min(Math.max(Math.round(raw / 5) * 5, 0), room);
     setDrag({ ...drag, dx: e.clientX - drag.startX, berthId: block.id, offsetM });
   };
@@ -343,6 +494,15 @@ export default function VesselsPage() {
     if (same) return;
     suppressClick.current = true;
     window.setTimeout(() => (suppressClick.current = false), 0);
+    // перетаскивание из «Ожидания» к причалу — копия со стрелкой, оригинал
+    // ждёт в кармане, пока судно физически не придёт: как в Excel у диспетчера.
+    // Дату копия берёт не «свою» (в кармане она формальность), а слот под курсором
+    if (parkId && p.berth_id === parkId && berthId !== parkId) {
+      const scaleLeft = drag.blocks[0]?.left ?? 0;
+      const absoluteSlot = Math.max(0, Math.floor((drag.startX + dx - scaleLeft) / slotW));
+      await reberthingCopy(p, { slots: 0, berthId, offsetM, absoluteSlot });
+      return;
+    }
     await movePlacement(p, { slots, berthId, offsetM });
   };
 
@@ -393,6 +553,136 @@ export default function VesselsPage() {
     }
   };
 
+  /* ---------------------------- перешвартовка ---------------------------- */
+
+  /** Абсолютный индекс слота (от начала периода), с которого начинается постановка. */
+  const slotIndexOf = (p: Placement): number => {
+    const s = parseLocal(p.starts_at);
+    const i = days.indexOf(ymd(s));
+    if (i < 0) return 0;
+    return i * SLOT_HOURS.length + Math.max(0, SLOT_HOURS.indexOf(s.getHours()));
+  };
+
+  /** Абсолютный слот → Date: границы копии считают именно так. */
+  const slotToDate = (i: number): Date => {
+    const day = days[Math.min(Math.max(Math.floor(i / SLOT_HOURS.length), 0), days.length - 1)] ?? from;
+    return new Date(`${day}T${String(SLOT_HOURS[i % SLOT_HOURS.length] ?? 0).padStart(2, "0")}:00:00`);
+  };
+
+  /** Копия постановки со стрелкой: оригинал остаётся на месте, копия — пунктиром. */
+  const reberthingCopy = async (
+    p: Placement,
+    dest: { slots: number; berthId: number; offsetM: number; absoluteSlot?: number },
+  ) => {
+    const berth = berths.find((b) => b.id === dest.berthId);
+    if (!berth) return;
+    let start: Date;
+    let end: Date;
+    if (dest.absoluteSlot !== undefined) {
+      start = slotToDate(dest.absoluteSlot);
+      end = slotToDate(Math.min(dest.absoluteSlot + slotsCount(p) - 1, totalSlots - 1));
+    } else {
+      start = addSlots(parseLocal(p.starts_at), dest.slots);
+      end = addSlots(parseLocal(p.ends_at), dest.slots);
+    }
+    if (start < new Date(`${from}T00:00:00`) || end > new Date(`${to}T23:59:59`)) {
+      setError("Нельзя вынести перешвартовку за границы выбранного периода");
+      return;
+    }
+    const offset =
+      berth.length_m && p.length_m
+        ? Math.min(Math.max(dest.offsetM, 0), Math.max(berth.length_m - p.length_m, 0))
+        : Math.max(dest.offsetM, 0);
+    try {
+      await api.createPlacement({
+        berth_id: dest.berthId,
+        lane: 1,
+        length_m: p.length_m,
+        offset_m: offset,
+        vessel: p.vessel,
+        volume: p.volume,
+        cargo: p.cargo,
+        note: p.note,
+        starts_at: isoLocal(start),
+        ends_at: isoLocal(end),
+        moved_from_id: p.id,
+      });
+      setError("");
+      setSaved(`«${p.vessel}» → ${berth.code}: копия со стрелкой, оригинал на месте`);
+      window.setTimeout(() => setSaved(""), 6000);
+      await load();
+    } catch (e) {
+      await load();
+      setError(errText(e, "Не удалось перешвартовать"));
+    }
+  };
+
+  /** Правая кнопка → «Временное перемещение»: призрак за курсором, по клику — копия в точку. */
+  const startReberthing = (p: Placement, at: { clientX: number; clientY: number }) => {
+    const scales = [...document.querySelectorAll<HTMLElement>("[data-berth-scale]")].map((el) => {
+      const r = el.getBoundingClientRect();
+      return { id: Number(el.dataset.berthScale), left: r.left, top: r.top, height: r.height };
+    });
+    const print = document.querySelector<HTMLElement>("[data-vp-print]");
+    if (!scales.length || !print) return;
+    const cur = {
+      p, x: at.clientX, y: at.clientY, cx: 0, cy: 0,
+      berthId: p.berth_id, offsetM: p.offset_m ?? 0, slot: slotIndexOf(p),
+    };
+    const paint = (e: { clientX: number; clientY: number }) => {
+      const pr = print.getBoundingClientRect();
+      cur.x = e.clientX;
+      cur.y = e.clientY;
+      cur.cx = e.clientX - pr.left;
+      cur.cy = e.clientY - pr.top;
+      setGhost({ ...cur });
+    };
+    paint(at);
+    const move = (e: PointerEvent) => {
+      const block = pickBlock(scales, e.clientY);
+      if (block) {
+        const berth = berths.find((b) => b.id === block.id);
+        const room = berth?.length_m && p.length_m ? Math.max(berth.length_m - p.length_m, 0) : 0;
+        cur.berthId = block.id;
+        const raw = ((e.clientY - block.top - 8) / cellH) * M_PER_CELL;
+        cur.offsetM = Math.min(Math.max(Math.round(raw / 5) * 5, 0), room);
+      }
+      const s = Math.floor((e.clientX - scales[0].left) / slotW);
+      cur.slot = Math.min(Math.max(s, 0), Math.max(0, totalSlots - slotsCount(p)));
+      paint(e);
+    };
+    const detach = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      window.removeEventListener("keydown", esc);
+    };
+    const up = () => {
+      detach();
+      const target = { ...cur };
+      setGhost(null);
+      void reberthingCopy(p, { slots: 0, berthId: target.berthId, offsetM: target.offsetM, absoluteSlot: target.slot });
+    };
+    const esc = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      detach();
+      setGhost(null);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+    window.addEventListener("keydown", esc);
+  };
+
+  /** Красная рамка: судно сейчас на другом терминале; без рамки — в проливе. */
+  const toggleTerminal = async (p: Placement) => {
+    try {
+      await api.updatePlacement(p.id, { at_other_terminal: !p.at_other_terminal });
+      setDetail((d) => (d && d.id === p.id ? { ...d, at_other_terminal: !p.at_other_terminal } : d));
+      await load();
+    } catch (e) {
+      setError(errText(e, "Не удалось обновить отметку"));
+    }
+  };
+
   const remove = async (p: Placement) => {
     try {
       await api.deletePlacement(p.id);
@@ -408,24 +698,20 @@ export default function VesselsPage() {
   const formBerth = berths.find((b) => b.id === form?.berth_id);
   const gridWidth = LEFT_W + totalSlots * slotW;
 
-  /* ------------------------------- PDF / печать ------------------------------ */
+  /* ---------------------------------- PDF ---------------------------------- */
 
   /**
-   * PDF — это печать браузера («Сохранить как PDF»). Другого способа дать
-   * векторный текст с кириллицёй и поиском по PDF без тяжёлых зависимостей нет:
-   * рисовать сетку картинкой (html2canvas) нельзя — панели на backdrop-filter
-   * он не умеет, а план бы и поехал по цветам, и стал бы нечитаемым.
+   * «⤓ PDF» забирает у бэкенда готовый файл и отдаёт его браузеру на сохранение.
+   * Печать браузера для этого не используется: диспетчеру нужен файл с конкретным
+   * куском плана, а не страница кабинета в диалоге печати.
    *
-   * В файл уходит ровно то, что выбрано сейчас: период, причалы и масштаб.
-   * Сетку перед диалогом печатаем без прокрутки и сжимаем до ширины страницы,
-   * чтобы правый край не отрезался.
+   * Какую часть плана рисовать, решаем здесь: только фронтенд знает, что сейчас
+   * в кадре сетки. Берём реальное прокрученное положение — сутки целыми (половину
+   * суток в лист класть нельзя) и причалы, хоть частично видимые.
    */
-  const exportPdf = () => {
+  const exportPdf = async () => {
     const el = gridRef.current;
-    if (!el) return;
-    // В PDF уходит кадр, а не весь период: пользователь смотрит на конкретные
-    // сутки и причалы и хочет получить их крупно, а не сжатый до нечитаемого
-    // кегля месяц. Границы берём из реального прокрученного положения.
+    if (!el || pdfBusy) return;
     const dayPx = slotW * SLOT_HOURS.length;
     const d0 = Math.max(0, Math.floor((el.scrollLeft - LEFT_W) / dayPx));
     const d1 = Math.min(days.length - 1, Math.ceil((el.scrollLeft + el.clientWidth - LEFT_W) / dayPx) - 1);
@@ -437,19 +723,31 @@ export default function VesselsPage() {
       })
       .map((node) => Number(node.dataset.berthId))
       .filter(Number.isFinite);
-    const win: PrintWindow = {
-      d0,
-      d1: Math.max(d0, d1),
-      berthIds: visible.length ? visible : blocks.map((b) => b.berth.id),
-    };
-    setPrintWin(win);
-    // Масштаб не считаем: лист построен в процентах и сам прижимается к ширине
-    // страницы. Из JS размер бумаги в диалоге печати не узнать (A4 портрет,
-    // A4 альбом, A3 — что выберут), поэтому пиксельный лист расползался на
-    // несколько страниц по горизонтали.
-    //
-    // печать синхронная: React должен успеть нарисовать лист до открытия диалога
-    window.setTimeout(() => window.print(), 60);
+    const berthIds = visible.length ? visible : blocks.map((b) => b.berth.id);
+    const dEnd = Math.max(d0, d1);
+
+    setPdfBusy(true);
+    try {
+      const blob = await api.planPdf(from, to, d0, dEnd, berthIds);
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      // имя файла — по окну, а не по периоду: файл описывает кадр, иначе два
+      // разных листа одного месяца назывались бы одинаково
+      link.download = `план_постановки_${days[d0] ?? from}_${days[dEnd] ?? to}.pdf`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      // объект живёт, пока браузер не дописал файл на диск
+      window.setTimeout(() => URL.revokeObjectURL(url), 10000);
+      setError("");
+      setSaved(`PDF готов: ${dEnd - d0 + 1} сут · ${berthIds.length} причалов`);
+      window.setTimeout(() => setSaved(""), 6000);
+    } catch (e) {
+      setError(errText(e, "PDF не получился"));
+    } finally {
+      setPdfBusy(false);
+    }
   };
 
   return (
@@ -511,10 +809,19 @@ export default function VesselsPage() {
           <button
             className="btn btn-mini btn-ghost"
             onClick={exportPdf}
-            title="PDF: в файл уходит только то, что видно в окне плана. В диалоге печати выберите альбомную ориентацию"
+            disabled={pdfBusy}
+            title="Скачать PDF того, что видно в окне плана: ровно эти сутки и эти причалы, крупно. Прокрутите план и нажмите снова, чтобы забрать следующий кусок"
             data-admin-action="export-pdf"
           >
-            ⤓ PDF
+            {pdfBusy ? "PDF…" : "⤓ PDF"}
+          </button>
+          <button
+            className="btn btn-mini btn-ghost"
+            onClick={cycleCellH}
+            title="Высота ячейки шкалы (10 м): меньше ячейка — больше причалов влезает на экран; значение сохраняется"
+            data-cell-toggle
+          >
+            Ячейка {cellH} px
           </button>
           <button className="btn btn-mini btn-ghost" onClick={load} disabled={busy}>
             {busy ? "Загрузка…" : "Обновить"}
@@ -546,7 +853,9 @@ export default function VesselsPage() {
           <p className="mt-2 text-[11px] text-ink-300" data-wysiwyg-hint>
             Режим перетаскивания: тяните полосу мышью — горизонталь это слоты (шаг 6 часов),
             вертикаль — место у причала (шаг 5 м). Отпустили — сохранилось. Стрелки двигают
-            полосу под фокусом.
+            полосу под фокусом. Правая кнопка по судну — «Временное перемещение»: полупрозрачная
+            копия прицепится к курсору, встанет в нужную ячейку, и от оригинала к ней сама
+            протянётся стрелка перешвартовки.
           </p>
         )}
 
@@ -605,7 +914,7 @@ export default function VesselsPage() {
             {blocks.map(({ berth, cells, items }) => (
               <div
                 key={berth.id}
-                className={`border-b border-ink-700 ${drag && drag.berthId === berth.id && drag.berthId !== items[0]?.berth_id ? "ring-2 ring-inset ring-brand-sky" : ""}`}
+                className={`border-b border-ink-700 ${berth.code === PARK_CODE ? "bg-ink-800/20" : ""} ${drag && drag.berthId === berth.id && drag.berthId !== items[0]?.berth_id ? "ring-2 ring-inset ring-brand-sky" : ""}`}
                 data-berth-block={berth.code}
                 data-berth-id={berth.id}
                 data-drop-target={drag && drag.berthId === berth.id ? "1" : "0"}
@@ -615,20 +924,94 @@ export default function VesselsPage() {
                     className="sticky left-0 z-10 bg-white/95 border-r border-ink-700 px-2 py-0.5 text-xs"
                     style={{ width: LEFT_W }}
                   >
-                    <span className="font-medium">{berth.code}</span>
-                    {berth.depth ? (
+                    <span className="font-medium">{berth.code === PARK_CODE ? "Ожидание" : berth.code}</span>
+                    {berth.code === PARK_CODE ? (
+                      <span className="text-[10px] text-ink-400"> · суда вне причалов</span>
+                    ) : berth.depth ? (
                       <span className="text-[10px] text-ink-400">
                         {" "}· осадка {String(berth.depth).replace(".", ",")} м
                       </span>
                     ) : null}
                   </div>
                   <div className="text-[10px] text-ink-400 px-2 py-0.5" style={{ width: totalSlots * slotW }}>
-                    {berth.length_m
-                      ? `${berth.length_m} м длины · ${cells} ячеек по ${10} м`
-                      : "метраж причала не задан · показываем 100 м"}
+                    {berth.code === PARK_CODE
+                      ? "ждут черёды, груза · дата не важна · тяни чип к причалу — копия встанет на дату под курсором"
+                      : berth.length_m
+                        ? `${berth.length_m} м длины · ${cells} ячеек по ${10} м`
+                        : "метраж причала не задан · показываем 100 м"}
                   </div>
                 </div>
 
+                {berth.code === PARK_CODE ? (
+                  /* карман: шкалы времени нет — дата в «Ожидании» не важна.
+                     Суда складываются чипами (можно «друг на друга» рядами),
+                     а стрелка перешвартовки стартует прямо от чипа */
+                  <div className="flex items-stretch">
+                    <div
+                      className="sticky left-0 z-10 bg-white/95 border-r border-ink-700 text-[9px] uppercase tracking-wider text-ink-400 px-2 py-1.5"
+                      style={{ width: LEFT_W }}
+                    >
+                      склад · без привязки к дате
+                    </div>
+                    <div className="relative" style={{ width: totalSlots * slotW, minHeight: 34 }} data-berth-scale={berth.id}>
+                      <div className="flex flex-wrap gap-1.5 p-1" style={{ width: Math.max(availW - LEFT_W - 10, 320) }}>
+                        {items.map((p) => {
+                          const color = barColor(p);
+                          const dragging = drag?.id === p.id;
+                          const canDrag = wysiwyg && canEdit && !busy;
+                          return (
+                            <button
+                              key={p.id}
+                              className={`rounded-md px-2 py-1 text-left text-[11px] text-white shadow-sm hover:brightness-110 focus:outline-none focus:ring-2 focus:ring-brand-sky ${canDrag ? "cursor-move touch-none" : ""} ${dragging ? "z-40 ring-2 ring-brand-sky" : ""}`}
+                              style={{
+                                width: 148,
+                                background: `linear-gradient(180deg, ${color}f0, ${color}cc)`,
+                                color: textColorOn(color),
+                                ...(p.moved_from_id && !p.committed
+                                  ? { outline: "2px dashed rgba(255,255,255,.95)", outlineOffset: -2, opacity: 0.75 }
+                                  : {}),
+                                // судно на другом терминале — красная рамка
+                                ...(p.at_other_terminal ? { boxShadow: "inset 0 0 0 2px #b3312a" } : {}),
+                              }}
+                              title={`${barText(p)} · ждёт${p.cargo ? ` · ${p.cargo}` : ""}${p.moved_from_id && !p.committed ? "\nперешвартован: копия, стрелка ведёт от оригинала" : ""}`}
+                              onClick={() => {
+                                if (suppressClick.current) return;
+                                setDetail(p);
+                              }}
+                              onContextMenu={
+                                canDrag
+                                  ? (e) => {
+                                      e.preventDefault();
+                                      setMenu({ x: e.clientX, y: e.clientY, p });
+                                    }
+                                  : undefined
+                              }
+                              onPointerDown={canDrag ? (e) => startDrag(e, p) : undefined}
+                              onPointerMove={canDrag ? (e) => moveDrag(e, p) : undefined}
+                              onPointerUp={canDrag ? () => endDrag(p) : undefined}
+                              onPointerCancel={() => setDrag(null)}
+                              data-vp-bar={p.id}
+                              data-berth={berth.code}
+                              data-cargo={(p.cargo || "").toUpperCase()}
+                              data-dragging={dragging ? "1" : "0"}
+                              data-moved-from={p.moved_from_id ?? ""}
+                            >
+                              <span className="block truncate">{p.vessel}</span>
+                              <span className="block truncate text-[10px] opacity-85">
+                                {[p.volume, p.cargo].filter(Boolean).join(" · ") || "ждёт"}
+                              </span>
+                            </button>
+                          );
+                        })}
+                        {items.length === 0 ? (
+                          <span className="px-1 py-2 text-[10px] text-ink-400">
+                            пусто: перетащи судно сюда, чтобы снять его с линии
+                          </span>
+                        ) : null}
+                      </div>
+                    </div>
+                  </div>
+                ) : (
                 <div className="flex">
                   {/* линейка длины: подпись каждой ячейки в метрах */}
                   <div className="sticky left-0 z-10 bg-white/95 border-r border-ink-700" style={{ width: LEFT_W }}>
@@ -636,15 +1019,15 @@ export default function VesselsPage() {
                       <div
                         key={m}
                         className="num text-right pr-2 text-[9px] text-ink-400 border-t border-ink-700/50"
-                        style={{ height: CELL_H, lineHeight: `${CELL_H}px` }}
+                        style={{ height: cellH, lineHeight: `${cellH}px` }}
                         data-ruler={m}
                       >
-                        {m % (CELL_H < 14 ? 20 : 10) === 0 ? m : ""}
+                        {m % (cellH < 14 ? 20 : 10) === 0 ? m : ""}
                       </div>
                     ))}
                   </div>
 
-                  <div className="relative" style={{ width: totalSlots * slotW, height: cells * CELL_H }} data-berth-scale={berth.id}>
+                  <div className="relative" style={{ width: totalSlots * slotW, height: cells * cellH }} data-berth-scale={berth.id}>
                     {/* фоновые колонки: выходные подсвечены */}
                     {days.map((d) => (
                       <div
@@ -658,17 +1041,18 @@ export default function VesselsPage() {
                       <div
                         key={i}
                         className="absolute left-0 right-0 border-t border-ink-700/40"
-                        style={{ top: (i + 1) * CELL_H }}
+                        style={{ top: (i + 1) * cellH }}
                       />
                     ))}
 
                     {items.map((p) => {
-                      const geo = barGeometry(p, from, totalSlots);
+                      const d = displayed(p);
+                      const geo = d ? barGeometry(d, from, totalSlots) : null;
                       if (!geo) return null;
-                      const color = cargoColor(p.cargo);
-                      const v = lengthGeometry(p, CELL_H);
+                      const color = barColor(p);
+                      const v = lengthGeometry(p, cellH);
                       // длину не задали — полоса идёт до конца причала; за блок не выходим
-                      const height = Math.max(10, Math.min(v.height, cells * CELL_H - v.top) - 2);
+                      const height = Math.max(10, Math.min(v.height, cells * cellH - v.top) - 2);
                       const dragging = drag?.id === p.id;
                       const canDrag = wysiwyg && canEdit && !busy;
                       // пока тащим, полоса едет за курсором с тем же шагом, с каким
@@ -679,7 +1063,7 @@ export default function VesselsPage() {
                       const shiftY = dragging
                         ? (drag.blocks.find((b) => b.id === drag.berthId)?.top ?? drag.ownTop) -
                           drag.ownTop +
-                          (drag.offsetM / M_PER_CELL) * CELL_H -
+                          (drag.offsetM / M_PER_CELL) * cellH -
                           drag.topInBlock
                         : 0;
                       return (
@@ -693,13 +1077,29 @@ export default function VesselsPage() {
                             height,
                             transform: shiftX || shiftY ? `translate(${shiftX}px, ${shiftY}px)` : undefined,
                             background: `linear-gradient(180deg, ${color}f0, ${color}cc)`,
+                            color: textColorOn(color),
                             borderLeft: geo.clippedStart ? "3px dotted rgba(255,255,255,.85)" : "3px solid rgba(0,0,0,.18)",
+                            // копия после перешвартовки: пунктирная рамка и полупрозрачность
+                            ...(p.moved_from_id && !p.committed
+                              ? { outline: "2px dashed rgba(255,255,255,.95)", outlineOffset: -2, opacity: 0.75 }
+                              : {}),
+                            // судно на другом терминале — красная рамка (box-shadow, чтобы
+                            // не спорить с пунктиром перешвартовки)
+                            ...(p.at_other_terminal ? { boxShadow: "inset 0 0 0 2px #b3312a" } : {}),
                           }}
-                          title={`${barText(p)} · ${lengthLabel(p)}${p.cargo ? ` · ${p.cargo}` : ""}\n${parseLocal(p.starts_at).toLocaleString("ru-RU")} — ${parseLocal(p.ends_at).toLocaleString("ru-RU")}`}
+                          title={`${barText(p)} · ${lengthLabel(p)}${p.cargo ? ` · ${p.cargo}` : ""}\n${parseLocal(p.starts_at).toLocaleString("ru-RU")} — ${parseLocal(p.ends_at).toLocaleString("ru-RU")}${p.moved_from_id && !p.committed ? "\nперешвартован: копия, стрелка ведёт от оригинала" : ""}`}
                           onClick={() => {
                             if (suppressClick.current) return;
                             setDetail(p);
                           }}
+                          onContextMenu={
+                            canDrag
+                              ? (e) => {
+                                  e.preventDefault();
+                                  setMenu({ x: e.clientX, y: e.clientY, p });
+                                }
+                              : undefined
+                          }
                           onPointerDown={canDrag ? (e) => startDrag(e, p) : undefined}
                           onPointerMove={canDrag ? (e) => moveDrag(e, p) : undefined}
                           onPointerUp={canDrag ? () => endDrag(p) : undefined}
@@ -711,6 +1111,7 @@ export default function VesselsPage() {
                           data-length-m={p.length_m ?? ""}
                           data-offset-m={p.offset_m ?? 0}
                           data-dragging={dragging ? "1" : "0"}
+                          data-moved-from={p.moved_from_id ?? ""}
                         >
                           <span className="block truncate">{p.vessel}</span>
                           {height >= 24 ? (
@@ -724,23 +1125,111 @@ export default function VesselsPage() {
                     })}
                   </div>
                 </div>
+                )}
               </div>
             ))}
+
+            {/* Стрелки перешвартовок: один SVG поверх холста в координатах полос.
+                Якоря считаются теми же barGeometry/lengthGeometry, что и сами
+                полосы, поэтому стрелки не разъезжаются ни при каком скролле —
+                оверлей скроллится внутри того же контейнера. pointer-events-none,
+                чтобы не съедать drag. */}
+            <svg className="absolute left-0 top-0 z-[15] pointer-events-none"
+                 width={canvasSize.w} height={canvasSize.h} data-vp-arrows aria-hidden="true">
+              <defs>
+                {/* наконечники — того же цвета, что и полоса судна: стрелка
+                    читается как продолжение конкретной постановки */}
+                {[...new Set(arrows.map((a) => a.color))].map((c) => (
+                  <marker key={c} id={`vp-arrow-${c.slice(1)}`} markerWidth="9" markerHeight="9" refX="7" refY="3.5"
+                          orient="auto" markerUnits="userSpaceOnUse" viewBox="0 0 7 7">
+                    <path d="M0 0 L7 3.5 L0 7 Z" fill={c} />
+                  </marker>
+                ))}
+              </defs>
+              {arrows.map((ar) => (
+                <path
+                  key={ar.id}
+                  d={ar.d}
+                  fill="none"
+                  stroke={ar.color}
+                  strokeWidth={3}
+                  strokeLinejoin="round"
+                  markerEnd={`url(#vp-arrow-${ar.color.slice(1)})`}
+                  strokeDasharray={ar.draft ? "6 5" : undefined}
+                  opacity={ar.draft ? 0.65 : 0.9}
+                />
+              ))}
+            </svg>
           </div>
         </div>
 
-        <p className="mt-3 text-[11px] text-ink-400 no-print">
-          Пунктирный край — постановка началась раньше выбранного периода. Клик по полосе — подробности,
-          правка и удаление.
-        </p>
+      {/* «Судно у мышки» и контекстное меню — порталом в body: у .panel стоит
+          backdrop-filter, он создаёт containing block, и fixed-потомок лепился
+          бы к панели, а не к окну — призрак уезжал от курсора */}
+      {ghost ? createPortal(
+        <div
+          className="fixed z-50 pointer-events-none select-none rounded-md px-2 py-1 text-[11px] text-white shadow-lg"
+          style={{
+            left: ghost.x + 12,
+            top: ghost.y + 12,
+            background: barColor(ghost.p),
+            opacity: 0.75,
+            border: "2px dashed rgba(255,255,255,.95)",
+          }}
+          data-vp-ghost={ghost.p.id}
+        >
+          {ghost.p.vessel} · {berths.find((b) => b.id === ghost.berthId)?.code ?? "?"}
+        </div>,
+        document.body,
+      ) : null}
 
-        {/* Печатный лист: на экране его нет, он появляется только в печати и в PDF.
-            Состав — ровно тот кадр, который сейчас в окне сетки. */}
-        <div className="vp-print-only">
-          {printWin && (
-            <VesselPlanPrint days={days} from={from} blocks={blocks} win={printWin} cellH={CELL_H} />
-          )}
-        </div>
+      {/* Контекстное меню по правой кнопке — то, о чём просил диспетчер:
+          «по судну правой кнопкой … временное перемещение» */}
+      {menu ? createPortal(
+        <div className="fixed inset-0 z-50" onClick={() => setMenu(null)}
+             onContextMenu={(e) => { e.preventDefault(); setMenu(null); }} data-vp-menu-backdrop>
+          <div
+            className="absolute min-w-56 rounded-md border border-ink-700 bg-white py-1 text-sm shadow-xl"
+            style={{ left: menu.x, top: menu.y }}
+            onClick={(e) => e.stopPropagation()}
+            data-vp-menu
+          >
+            <div className="px-3 py-1 text-[11px] uppercase tracking-wide text-ink-400">{menu.p.vessel}</div>
+            <button
+              className="block w-full px-3 py-1.5 text-left hover:bg-ink-800/5"
+              data-reberthing
+              onClick={() => {
+                const m = menu;
+                setMenu(null);
+                startReberthing(m.p, { clientX: m.x, clientY: m.y });
+              }}
+            >
+              ⇄ Временное перемещение
+              <span className="block text-[10px] text-ink-400">полупрозрачная копия + стрелка от оригинала</span>
+            </button>
+            <button
+              className="block w-full px-3 py-1.5 text-left hover:bg-ink-800/5"
+              data-toggle-terminal
+              onClick={() => {
+                const m = menu;
+                setMenu(null);
+                void toggleTerminal(m.p);
+              }}
+            >
+              {menu.p.at_other_terminal ? "⚪ Снять красную рамку" : "🔴 На другом терминале"}
+              <span className="block text-[10px] text-ink-400">рамка: судно сейчас на чужом терминале, без неё — в проливе</span>
+            </button>
+          </div>
+        </div>,
+        document.body,
+      ) : null}
+
+        <p className="mt-3 text-[11px] text-ink-400 no-print">
+          Пунктирный край — постановка началась раньше выбранного периода. Пунктирная рамка и полупрозрачность —
+          запланированная перестановка: стрелка ведёт от оригинала, а когда её дата наступает, судно
+          автоматически передвигается по стрелке (копия становится обычной постановкой). Красная рамка — судно
+          сейчас на другом терминале (без рамки — в проливе). Клик по полосе — подробности, правка и удаление.
+        </p>
       </div>
 
       {detail && (
@@ -778,6 +1267,27 @@ export default function VesselsPage() {
               <dt className="panel-title">Слотов в плане</dt>
               <dd className="num">{slotsCount(detail)}</dd>
             </div>
+            {detail.moved_from_id ? (
+              <div className="col-span-2">
+                <dt className="panel-title">Перешвартовка</dt>
+                <dd data-detail-moved>
+                  копия постановки «{plan?.placements.find((pp) => pp.id === detail.moved_from_id)?.vessel ?? "удалённой"}» —{" "}
+                  {detail.committed
+                    ? "перестановка состоялась: дата наступила, судно стоит там, куда вела стрелка"
+                    : "стрелка на плане ведёт от оригинала"}
+                </dd>
+              </div>
+            ) : null}
+            <div className="col-span-2">
+              <dt className="panel-title">Где судно сейчас</dt>
+              <dd data-detail-terminal>
+                {detail.at_other_terminal ? (
+                  <span className="text-crit">на другом терминале — красная рамка на плане</span>
+                ) : (
+                  "в проливе (идёт к нам)"
+                )}
+              </dd>
+            </div>
           </dl>
           {detail.note && (
             <p className="mt-3 text-sm text-ink-300" data-detail-note>{detail.note}</p>
@@ -786,6 +1296,12 @@ export default function VesselsPage() {
             {canEdit && (
               <button className="btn-primary text-sm" onClick={() => openEdit(detail)} data-admin-action="edit-placement">
                 Править
+              </button>
+            )}
+            {canEdit && (
+              <button className="btn-ghost text-sm" onClick={() => void toggleTerminal(detail)}
+                      data-admin-action="toggle-terminal">
+                {detail.at_other_terminal ? "⚪ Снять отметку терминала" : "🔴 На другом терминале"}
               </button>
             )}
             {canDelete && (
@@ -884,8 +1400,54 @@ export default function VesselsPage() {
                 ))}
               </datalist>
             </Field>
+            <Field label="Цвет полосы" hint="по умолчанию — по грузу">
+              <div className="flex flex-wrap items-center gap-1.5" data-field="color">
+                <button
+                  type="button"
+                  onClick={() => setForm({ ...form, color: "" })}
+                  className={`h-7 rounded border px-2 text-[11px] ${form.color ? "border-ink-700 text-ink-300 hover:bg-ink-800/10" : "border-brand-sky bg-ink-800/30 text-ink-100"}`}
+                >
+                  авто
+                </button>
+                {PALETTE.map((c) => (
+                  <button
+                    key={c}
+                    type="button"
+                    onClick={() => setForm({ ...form, color: c })}
+                    className={`h-7 w-7 rounded border ${form.color === c ? "border-brand-sky ring-2 ring-brand-sky/60" : "border-ink-700"}`}
+                    style={{ background: c }}
+                    title={c}
+                  />
+                ))}
+                <label className="relative h-7 w-7 overflow-hidden rounded border border-ink-700" title="свой цвет">
+                  <input
+                    type="color"
+                    value={/^#[0-9a-fA-F]{6}$/.test(form.color) ? form.color : "#2f9bff"}
+                    onChange={(e) => setForm({ ...form, color: e.target.value })}
+                    className="absolute -inset-3 h-14 w-14 cursor-pointer"
+                    data-field="color-custom"
+                  />
+                </label>
+                {form.color && (
+                  <span className="flex items-center gap-1.5 text-[11px] text-ink-300">
+                    <span className="h-4 w-4 rounded" style={{ background: form.color }} />
+                    {form.color}
+                  </span>
+                )}
+              </div>
+            </Field>
             <Field label="Примечание">
               <input className="field" value={form.note} onChange={(e) => setForm({ ...form, note: e.target.value })} data-field="note" placeholder="(КМП-ЮМФ)" />
+            </Field>
+            <Field label="Где судно сейчас" hint="красная рамка на плане">
+              <label className="flex items-center gap-2 text-sm" data-field="at-other-terminal">
+                <input
+                  type="checkbox"
+                  checked={form.at_other_terminal}
+                  onChange={(e) => setForm({ ...form, at_other_terminal: e.target.checked })}
+                />
+                на другом терминале · без галки — в проливе
+              </label>
             </Field>
 
             <Field label="Начало" hint="слот 00 / 06 / 12 / 18">

@@ -45,6 +45,9 @@ _ADDED_COLUMNS = [
     ("users", "vessel_right", "VARCHAR(16)"),
     ("vessel_placements", "length_m", "INTEGER"),
     ("vessel_placements", "offset_m", "INTEGER NOT NULL DEFAULT 0"),
+    ("vessel_placements", "at_other_terminal", "BOOLEAN NOT NULL DEFAULT FALSE"),
+    ("vessel_placements", "color", "VARCHAR(7)"),
+    ("vessel_placements", "moved_from_id", "INTEGER"),
 ]
 
 

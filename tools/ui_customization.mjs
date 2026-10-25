@@ -43,6 +43,10 @@ await page.fill("input[autocomplete=current-password]", process.env.PASS || "Top
 await page.click("button.btn-primary");
 await page.waitForSelector("section[data-widget]", { timeout: 10000 });
 
+// «Статистика» стала главной страницей, витрина складов 1С — на вкладке «Склады 1С».
+await page.goto(`${BASE}/warehouses`, { waitUntil: "networkidle" });
+await page.waitForSelector("section[data-widget]", { timeout: 10000 });
+
 const before = await order();
 console.log("порядок до:", before.join(", "));
 

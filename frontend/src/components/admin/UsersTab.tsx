@@ -1,7 +1,10 @@
 /**
  * Вкладка «Пользователи»: список учётных записей, создание/редактирование,
- * сброс пароля, блокировка/разблокировка и мягкое отключение.
+ * сброс пароля, блокировка/разблокировка, выключение и удаление.
  *
+ * «Отключить» и «удалить» — разные кнопки: уволенного человека выключают
+ * (подпись автора остаётся в журнале и постановках), удаляют оплошность —
+ * лишнюю учётку или опечатку в логине.
  * Правила пароля и занятость логина проверяет бэкенд (409 / 400 / 422) — их
  * текст показываем прямо в форме; клиентская проверка только бережёт лишний
  * круг запроса.
@@ -107,6 +110,8 @@ export function UsersTab() {
   const [temp, setTemp] = useState<TempPassword | null>(null);
   const [copied, setCopied] = useState(false);
   const [confirmId, setConfirmId] = useState<number | null>(null);
+  // удаление — отдельное подтверждение: оно необратимо и не путается с «отключить»
+  const [deleteId, setDeleteId] = useState<number | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -276,18 +281,35 @@ export function UsersTab() {
     setBusy(true);
     setConfirmId(null);
     try {
-      if (isActive) {
-        patchUser(await api.adminPatchUser(u.id, { is_active: true }));
-        markLocal(u.id, "active");
-        setNotice(`Учётка «${u.login}» включена.`);
-      } else {
-        patchUser(await api.adminDeleteUser(u.id));
-        markLocal(u.id, "inactive");
-        setNotice(`Учётка «${u.login}» отключена: вход запрещён, живые сессии отозваны.`);
-      }
+      patchUser(await api.adminSetUserActive(u.id, isActive));
+      markLocal(u.id, isActive ? "active" : "inactive");
+      setNotice(isActive
+        ? `Учётка «${u.login}» включена.`
+        : `Учётка «${u.login}» отключена: вход запрещён, живые сессии отзваны.`);
       setError("");
     } catch (e) {
       setError(errText(e, isActive ? "Включение не выполнено" : "Отключение не выполнено"));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /**
+   * Удаление учётки. Для увольнения — «Отключить»: оно сохраняет автора в
+   * журнале и в постановках. Удаляют оплошность (лишняя учётка, опечатка в
+   * логине), иначе «отключён» висит в списке навсегда. Строки плана и журнала
+   * останутся, но без подписи автора — об этом говорит плашка.
+   */
+  const removeUser = async (u: AdminUser) => {
+    setBusy(true);
+    setDeleteId(null);
+    try {
+      await api.adminDeleteUser(u.id);
+      setUsers((list) => list.filter((x) => x.id !== u.id));
+      setNotice(`Учётка «${u.login}» удалена. Её постановки и записи журнала остались, но без автора.`);
+      setError("");
+    } catch (e) {
+      setError(errText(e, "Удаление не выполнено"));
     } finally {
       setBusy(false);
     }
@@ -394,8 +416,22 @@ export function UsersTab() {
                           onNo={() => setConfirmId(null)}
                         />
                       ) : (
-                        <LinkBtn action="deactivate-ask" tone="crit" onClick={() => setConfirmId(u.id)} disabled={busy}>
+                        <LinkBtn action="deactivate-ask" tone="crit" onClick={() => setConfirmId(u.id)} disabled={busy}
+                          title="Учётка останется в списке со статусом «отключён», подпись автора сохранится">
                           Отключить
+                        </LinkBtn>
+                      )}
+                      {deleteId === u.id ? (
+                        <ConfirmInline
+                          action="delete-user"
+                          text="удалить навсегда?"
+                          onYes={() => removeUser(u)}
+                          onNo={() => setDeleteId(null)}
+                        />
+                      ) : (
+                        <LinkBtn action="delete-user-ask" tone="crit" onClick={() => setDeleteId(u.id)} disabled={busy}
+                          title="Удалить учётку целиком: журнал и постановки останутся, но без автора. Для увольнения хватит «Отключить»">
+                          Удалить
                         </LinkBtn>
                       )}
                     </span>

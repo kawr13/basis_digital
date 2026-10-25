@@ -77,7 +77,7 @@ export function Modal({
             размывает затемнённую подложку и страницу за ней */}
         <div
           className={`panel dd-panel relative flex w-full max-h-[calc(100vh-2rem)] flex-col ${
-            wide ? "max-w-3xl" : "max-w-xl"
+            wide ? "max-w-5xl" : "max-w-2xl"
           } p-0`}
           role="dialog"
           aria-modal="true"

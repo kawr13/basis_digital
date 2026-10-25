@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -23,6 +24,22 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     access_token_ttl_minutes: int = 30
     refresh_token_ttl_days: int = 1
+
+    # Флаг Secure у refresh-cookie. Пусто (auto) — включён, когда ENVIRONMENT=prod.
+    # Внутренний сервер без HTTPS: поставь COOKIE_SECURE=false, иначе браузер
+    # перестанет присылать cookie и сессия умрёт через access_token_ttl_minutes.
+    cookie_secure: bool | None = None
+
+    @field_validator("cookie_secure", mode="before")
+    @classmethod
+    def _blank_cookie_secure_is_auto(cls, v):
+        # COOKIE_SECURE= (пусто) — то же самое, что не задан: авто-режим.
+        return None if v is None or (isinstance(v, str) and not v.strip()) else v
+
+    @property
+    def cookie_secure_effective(self) -> bool:
+        """Явный COOKIE_SECURE важнее правила «prod ⇒ Secure»."""
+        return self.environment == "prod" if self.cookie_secure is None else self.cookie_secure
 
     # Защита от подбора пароля
     max_failed_logins: int = 5
@@ -46,6 +63,10 @@ class Settings(BaseSettings):
     # Синхронизация из 1С по расписанию
     sync_enabled: bool = True
     sync_interval_minutes: int = 15
+
+    # Отчёт диспетчера (страница «Статистика»): путь к файлу на сервере и автоимпорт
+    dispatcher_xlsm_path: str = ""
+    dispatcher_auto_import: bool = True
 
     # Пароль администратора при первом запуске (если не задан — сгенерируем и печатанём в лог)
     admin_login: str = "admin"

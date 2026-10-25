@@ -187,6 +187,252 @@ class FactProcessingDynamics(Base):
     avg_dwell_hours: Mapped[float] = mapped_column(Float, default=0)
 
 
+# ---------------------------------------------------------------------------
+# «Отчёт диспетчера» — суточная смена порта.
+#
+# Витрина строится по документу «Отчёт диспетчера.xlsm» (он же придёт из 1С по
+# HTTP, когда его заведут): одна строка FactDispatcherShift = одна смена
+# (сутки × смена 08-20 / 20-08), остальное — строки-детали этой смены. Ключ
+# любой таблицы — (report_date, shift, …), поэтому повторный импорт того же
+# файла не плодит дубликаты, а обновляет цифры.
+# ---------------------------------------------------------------------------
+
+
+class FactDispatcherShift(Base):
+    """Шапка смены: персонал, бригада, подрядчики, ричстакеры, диспетчер."""
+    __tablename__ = "fact_dispatcher_shift"
+    __table_args__ = (
+        UniqueConstraint("report_date", "shift", name="uq_ds_shift"),
+        Index("ix_ds_date", "report_date"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    report_date: Mapped[date] = mapped_column(Date, index=True)
+    shift: Mapped[str] = mapped_column(String(8))          # 08-20 | 20-08
+    sheet: Mapped[str] = mapped_column(String(64), default="")
+    dispatcher: Mapped[str] = mapped_column(String(128), default="")
+
+    crew_no: Mapped[int | None] = mapped_column(Integer, nullable=True)   # № бригады
+    crew_present: Mapped[float] = mapped_column(Float, default=0)         # вышло основной бригадой
+    crew_day_off: Mapped[float] = mapped_column(Float, default=0)         # вышло в выходной день
+    crew_staff: Mapped[float] = mapped_column(Float, default=0)           # штат бригады
+    # Подрядчики: [{"name": "ПортСервис", "count": 10}, …] — их в отчёте несколько
+    # строк, а отдельная таблица ради двух чисел не нужна.
+    contractors_json: Mapped[str] = mapped_column(Text, default="[]")
+
+    present_total: Mapped[float] = mapped_column(Float, default=0)        # всего вышло, с подрядчиками
+    staff_total: Mapped[float] = mapped_column(Float, default=0)          # штат
+    sick: Mapped[float] = mapped_column(Float, default=0)
+    injury: Mapped[float] = mapped_column(Float, default=0)               # с/с
+    vacation: Mapped[float] = mapped_column(Float, default=0)
+    other_absent: Mapped[float] = mapped_column(Float, default=0)         # донор / н-в
+    truant: Mapped[float] = mapped_column(Float, default=0)
+    day_off: Mapped[float] = mapped_column(Float, default=0)
+    mob: Mapped[float] = mapped_column(Float, default=0)
+    training: Mapped[float] = mapped_column(Float, default=0)
+
+    # Ричстакеры: исправно / ремонт на начало и конец смены
+    rs_ok_start: Mapped[float] = mapped_column(Float, default=0)
+    rs_repair_start: Mapped[float] = mapped_column(Float, default=0)
+    rs_ok_end: Mapped[float] = mapped_column(Float, default=0)
+    rs_repair_end: Mapped[float] = mapped_column(Float, default=0)
+    rs_total: Mapped[float] = mapped_column(Float, default=0)
+
+    source: Mapped[str] = mapped_column(String(32), default="xlsm")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+class FactVesselOperation(Base):
+    """Строка обработки судна за смену: план/факт, производительность, потери."""
+    __tablename__ = "fact_vessel_operation"
+    # Уникального ключа у строки нет: в одном листе одно и то же судно может
+    # стоять на двух причалах. Строка витрины = строка листа, повторный импорт
+    # сначала удаляет строки смены, потом кладёт их заново (см. apply_snapshot).
+    __table_args__ = (
+        Index("ix_vo_date", "report_date", "shift"),
+        Index("ix_vo_vessel", "vessel"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    report_date: Mapped[date] = mapped_column(Date, index=True)
+    shift: Mapped[str] = mapped_column(String(8))
+    berth: Mapped[str] = mapped_column(String(32), default="")   # РП - 1/2
+    vessel: Mapped[str] = mapped_column(String(128))
+    cargo_group: Mapped[str] = mapped_column(String(64), default="")
+
+    plan_unload_t: Mapped[float] = mapped_column(Float, default=0)
+    plan_load_t: Mapped[float] = mapped_column(Float, default=0)
+    plan_total_t: Mapped[float] = mapped_column(Float, default=0)
+    plan_shift_t: Mapped[float] = mapped_column(Float, default=0)   # план на смену
+    fact_shift_t: Mapped[float] = mapped_column(Float, default=0)   # факт за смену, т
+    on_board_t: Mapped[float] = mapped_column(Float, default=0)     # на борту / выгружено накопительно
+    remaining_t: Mapped[float] = mapped_column(Float, default=0)    # остаток на борту
+
+    productivity_tph: Mapped[float] = mapped_column(Float, default=0)
+    moves: Mapped[int] = mapped_column(Integer, default=0)          # кол-во кранов/ходов
+    # В отчёте W = сменное время (11 ч), X = потери, Y = W - X = машинное время.
+    # Производительность в отчёте считается как факт / Y, поэтому держим здесь:
+    # без Y нельзя ni посчитать средний темп, ni проверить чужие цифры.
+    shift_hours: Mapped[float] = mapped_column(Float, default=0)
+    downtime_hours: Mapped[float] = mapped_column(Float, default=0)
+    machine_hours: Mapped[float] = mapped_column(Float, default=0)
+
+    plan_finish_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    berthed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    note: Mapped[str] = mapped_column(Text, default="")
+    source: Mapped[str] = mapped_column(String(32), default="xlsm")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+class FactRailOperation(Base):
+    """Обработка вагонов за смену, строка = груз."""
+    __tablename__ = "fact_rail_operation"
+    __table_args__ = (Index("ix_ro_date", "report_date", "shift"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    report_date: Mapped[date] = mapped_column(Date, index=True)
+    shift: Mapped[str] = mapped_column(String(8))
+    cargo_group: Mapped[str] = mapped_column(String(64))
+    station_start: Mapped[float] = mapped_column(Float, default=0)   # на станции на начало смены
+    port_start_loaded: Mapped[float] = mapped_column(Float, default=0)
+    port_start_empty: Mapped[float] = mapped_column(Float, default=0)
+    processed: Mapped[float] = mapped_column(Float, default=0)       # обработано вагонов
+    port_end_loaded: Mapped[float] = mapped_column(Float, default=0)
+    port_end_empty: Mapped[float] = mapped_column(Float, default=0)
+    source: Mapped[str] = mapped_column(String(32), default="xlsm")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+class FactTruckOperation(Base):
+    """Обработка автомашин за смену, строка = груз; пять направлений работ."""
+    __tablename__ = "fact_truck_operation"
+    __table_args__ = (Index("ix_to_date", "report_date", "shift"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    report_date: Mapped[date] = mapped_column(Date, index=True)
+    shift: Mapped[str] = mapped_column(String(8))
+    cargo_group: Mapped[str] = mapped_column(String(64))
+    imp_unload: Mapped[float] = mapped_column(Float, default=0)     # принял / выгрузка, импорт
+    exp_unload: Mapped[float] = mapped_column(Float, default=0)     # растарка / выгрузка, экспорт
+    imp_load: Mapped[float] = mapped_column(Float, default=0)       # затарка / погрузка, импорт
+    exp_load: Mapped[float] = mapped_column(Float, default=0)       # затарка / погрузка, экспорт
+    direct_vessel: Mapped[float] = mapped_column(Float, default=0)  # с т/х в а/м, прямой вариант
+    total: Mapped[float] = mapped_column(Float, default=0)
+    source: Mapped[str] = mapped_column(String(32), default="xlsm")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+class FactVesselArrival(Base):
+    """«Суда на подходе»: план захода, который диспетчер держит в отчёте."""
+    __tablename__ = "fact_vessel_arrival"
+    __table_args__ = (
+        Index("ix_va_date", "report_date", "shift"),
+        Index("ix_va_eta", "eta"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    report_date: Mapped[date] = mapped_column(Date, index=True)
+    shift: Mapped[str] = mapped_column(String(8))
+    eta: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    vessel: Mapped[str] = mapped_column(String(128))
+    berth: Mapped[str] = mapped_column(String(32), default="")
+    work_kind: Mapped[str] = mapped_column(String(32), default="")
+    cargo_group: Mapped[str] = mapped_column(String(64), default="")
+    plan_t: Mapped[float] = mapped_column(Float, default=0)
+    plan_raw: Mapped[str] = mapped_column(String(64), default="")   # «129+130», «87+0/3539 тн»
+    agent: Mapped[str] = mapped_column(String(64), default="")
+    source: Mapped[str] = mapped_column(String(32), default="xlsm")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class FactRailArrival(Base):
+    """«Ж/Д на подходе»: плановые поезда с грузом на станцию порта."""
+    __tablename__ = "fact_rail_arrival"
+    __table_args__ = (Index("ix_ra_date", "report_date", "shift"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    report_date: Mapped[date] = mapped_column(Date, index=True)
+    shift: Mapped[str] = mapped_column(String(8))
+    station: Mapped[str] = mapped_column(String(64), default="")
+    cargo_group: Mapped[str] = mapped_column(String(64), default="")
+    cars: Mapped[float] = mapped_column(Float, default=0)
+    work_kind: Mapped[str] = mapped_column(String(16), default="")
+    wagon_type: Mapped[str] = mapped_column(String(32), default="")
+    train_index: Mapped[str] = mapped_column(String(64), default="")
+    note: Mapped[str] = mapped_column(String(128), default="")
+    source: Mapped[str] = mapped_column(String(32), default="xlsm")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class FactRailDeparture(Base):
+    """«ВЫВОД» листа: выводка вагонов из порта — план, факт и кто принял."""
+    __tablename__ = "fact_rail_departure"
+    __table_args__ = (Index("ix_rd_date", "report_date", "shift"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    report_date: Mapped[date] = mapped_column(Date, index=True)
+    shift: Mapped[str] = mapped_column(String(8))
+    row_no: Mapped[int] = mapped_column(Integer, default=0)      # строка листа, для порядка
+    move_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    plan_time: Mapped[str] = mapped_column(String(8), default="")   # «23:30» — план
+    semi_wagons: Mapped[float] = mapped_column(Float, default=0)     # C — полувагоны
+    covered: Mapped[float] = mapped_column(Float, default=0)         # D — крытые
+    flatcars: Mapped[float] = mapped_column(Float, default=0)        # G — к/платформа
+    total: Mapped[float] = mapped_column(Float, default=0)           # H — итого
+    accepted_by: Mapped[str] = mapped_column(String(64), default="")  # I — кто принял
+    fact_cars: Mapped[float] = mapped_column(Float, default=0)       # J — выведено по факту
+    fact_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    fact_time: Mapped[str] = mapped_column(String(8), default="")    # L — время по факту
+    source: Mapped[str] = mapped_column(String(32), default="xlsm")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class FactRailDelivery(Base):
+    """«ВВОД» листа: постановка вагонов в порт, гружёные/порожние по типам."""
+    __tablename__ = "fact_rail_delivery"
+    __table_args__ = (Index("ix_rl_date", "report_date", "shift"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    report_date: Mapped[date] = mapped_column(Date, index=True)
+    shift: Mapped[str] = mapped_column(String(8))
+    row_no: Mapped[int] = mapped_column(Integer, default=0)
+    move_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    plan_time: Mapped[str] = mapped_column(String(8), default="")     # B — время план/факт
+    settle_time: Mapped[str] = mapped_column(String(8), default="")   # C — время расстановки
+    load_semi: Mapped[float] = mapped_column(Float, default=0)        # D — гружёные полувагоны
+    load_covered: Mapped[float] = mapped_column(Float, default=0)     # G — крытые
+    load_flat: Mapped[float] = mapped_column(Float, default=0)        # H — платформы
+    empty_semi: Mapped[float] = mapped_column(Float, default=0)       # I — порожние полувагоны
+    empty_covered: Mapped[float] = mapped_column(Float, default=0)    # J — крытые
+    empty_flat: Mapped[float] = mapped_column(Float, default=0)       # K — платформы
+    total: Mapped[float] = mapped_column(Float, default=0)            # L — итого
+    source: Mapped[str] = mapped_column(String(32), default="xlsm")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class FactPlatformBalance(Base):
+    """«ПЛАТФОРМЫ, выведенные из аренды»: остаток платформ по владельцам (СМАРТ, ИТК)."""
+    __tablename__ = "fact_platform_balance"
+    __table_args__ = (Index("ix_pb_date", "report_date", "shift"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    report_date: Mapped[date] = mapped_column(Date, index=True)
+    shift: Mapped[str] = mapped_column(String(8))
+    owner: Mapped[str] = mapped_column(String(64))
+    total_cars: Mapped[float] = mapped_column(Float, default=0)       # всего
+    remaining: Mapped[float] = mapped_column(Float, default=0)        # остаток
+    terminal: Mapped[float] = mapped_column(Float, default=0)         # на терминале
+    sent: Mapped[float] = mapped_column(Float, default=0)             # отправлено
+    arrived_loaded: Mapped[float] = mapped_column(Float, default=0)   # прибыло гружёными
+    source: Mapped[str] = mapped_column(String(32), default="xlsm")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
 class SyncRun(Base):
     """Журнал загрузок из 1С — чтобы на дашборде честно писать «данные на ...»."""
 
@@ -290,9 +536,21 @@ class VesselPlacement(Base):
     volume: Mapped[str | None] = mapped_column(String(64), nullable=True)   # «5 500», «(100+40) + 4 000»
     cargo: Mapped[str | None] = mapped_column(String(64), nullable=True)    # БШ, БАНАНЫ-ПАЛЛЕТ, МЛК (БКК)
     note: Mapped[str | None] = mapped_column(Text, nullable=True)           # сборник, (КМП-ЮМФ)…
+    # цвет полосы вручную (#rrggbb); пусто — красим по грузу (cargoColor)
+    color: Mapped[str | None] = mapped_column(String(7), nullable=True)
 
     starts_at: Mapped[datetime] = mapped_column(DateTime)    # начало первого слота
     ends_at: Mapped[datetime] = mapped_column(DateTime)      # начало последнего слота
+
+    # Перешвартовка: строка — копия постановки `moved_from_id`. Фронт рисует
+    # стрелку «оригинал → копия»; удалили оригинал — стрелка гаснет (SET NULL).
+    moved_from_id: Mapped[int | None] = mapped_column(
+        ForeignKey("vessel_placements.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+
+    # Судно сейчас физически на другом терминале — на плане такая полоса
+    # в красной рамке. Без рамки — судно в проливе (идёт к нам).
+    at_other_terminal: Mapped[bool] = mapped_column(Boolean, default=False)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)

@@ -25,6 +25,8 @@ services:
       ACCESS_TOKEN_TTL_MINUTES: ${ACCESS_TOKEN_TTL_MINUTES:-30}
       REFRESH_TOKEN_TTL_DAYS: ${REFRESH_TOKEN_TTL_DAYS:-1}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8080}
+      # пусто = авто (Secure, когда ENVIRONMENT=prod); false — для внутреннего HTTP-сервера
+      COOKIE_SECURE: ${COOKIE_SECURE:-}
       ONE_C_SOURCE: ${ONE_C_SOURCE:-mock}
       ONE_C_BASE_URL: ${ONE_C_BASE_URL:-}
       ONE_C_LOGIN: ${ONE_C_LOGIN:-}

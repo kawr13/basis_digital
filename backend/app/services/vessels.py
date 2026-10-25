@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta
 
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from .app_settings import role_set
@@ -67,6 +67,12 @@ DEFAULT_BERTHS = [
     ("РП-5", 10.1, 100),
     ("РП-6", 10.1, 100),
 ]
+
+# «Ожидание»: не причал, а карман для судов вне причалов — ждут черёды,
+# перешвартовки, груза. Судов здесь может стоять сколько угодно одновременно:
+# физически у стенки их нет, поэтому метраж и конфликты к ним не применяются.
+PARK_CODE = "ОЖИДАНИЕ"
+PARK_SORT_ORDER = 900
 
 
 def normalize(dt: datetime) -> datetime:
@@ -203,32 +209,35 @@ def validate(
     elif offset_m:
         raise BadPlan("Укажите длину судна, чтобы ставить его не с начала причала")
 
-    # вписывается ли судно в причал по метражу
-    if berth.length_m:
-        if length_m and length_m > berth.length_m:
-            raise BadPlan(
-                f"Судно {length_m} м не встанет у причала {berth.code}: длина причала {berth.length_m} м"
-            )
-        need = length_m or berth.length_m
-        if offset_m + need > berth.length_m:
-            raise BadPlan(
-                f"Судно не влезает в причал {berth.code}: отметка {offset_m} м + {need} м "
-                f"больше длины причала {berth.length_m} м"
-            )
+    # «Ожидание» — карман вне причалов: сколько угодно судов в одно время,
+    # без метража и конфликтов. Физически у стенки их нет.
+    if berth.code != PARK_CODE:
+        # вписывается ли судно в причал по метражу
+        if berth.length_m:
+            if length_m and length_m > berth.length_m:
+                raise BadPlan(
+                    f"Судно {length_m} м не встанет у причала {berth.code}: длина причала {berth.length_m} м"
+                )
+            need = length_m or berth.length_m
+            if offset_m + need > berth.length_m:
+                raise BadPlan(
+                    f"Судно не влезает в причал {berth.code}: отметка {offset_m} м + {need} м "
+                    f"больше длины причала {berth.length_m} м"
+                )
 
-    clash = find_conflict(
-        db, berth_id=berth_id, starts_at=starts_at, ends_at=ends_at,
-        offset_m=offset_m, length_m=length_m, exclude_id=exclude_id,
-    )
-    if clash:
-        clash_start, clash_end = span_of(clash)
-        mine_end = float("inf") if length_m is None else offset_m + length_m
-        raise Conflict(
-            f"Причал {berth.code}: уже стоит «{clash.vessel}» "
-            f"({clash.starts_at:%d.%m %H:%M} — {clash.ends_at:%d.%m %H:%M}, "
-            f"{_m(clash_start)}–{_m(clash_end)} м), пересечение по длине "
-            f"{_m(max(offset_m, clash_start))}–{_m(min(mine_end, clash_end))} м"
+        clash = find_conflict(
+            db, berth_id=berth_id, starts_at=starts_at, ends_at=ends_at,
+            offset_m=offset_m, length_m=length_m, exclude_id=exclude_id,
         )
+        if clash:
+            clash_start, clash_end = span_of(clash)
+            mine_end = float("inf") if length_m is None else offset_m + length_m
+            raise Conflict(
+                f"Причал {berth.code}: уже стоит «{clash.vessel}» "
+                f"({clash.starts_at:%d.%m %H:%M} — {clash.ends_at:%d.%m %H:%M}, "
+                f"{_m(clash_start)}–{_m(clash_end)} м), пересечение по длине "
+                f"{_m(max(offset_m, clash_start))}–{_m(min(mine_end, clash_end))} м"
+            )
     return berth
 
 
@@ -240,12 +249,18 @@ def _m(value: float) -> str:
 def placements_in_period(
     db: Session, *, date_from: date, date_to: date, berth_id: int | None = None
 ) -> list[VesselPlacement]:
-    """Постановки, которые хоть одним слотом попадают в период."""
+    """Постановки, которые хоть одним слотом попадают в период.
+
+    «Ожидание» — карман без привязки к дате: слоты у его строк формальность,
+    поэтому суда в кармане показываются в любом периоде."""
     start = datetime.combine(date_from, datetime.min.time())
     end = datetime.combine(date_to, datetime.max.time())
+    park = select(Berth.id).where(Berth.code == PARK_CODE).scalar_subquery()
     stmt = select(VesselPlacement).where(
-        VesselPlacement.starts_at <= end,
-        VesselPlacement.ends_at >= start,
+        or_(
+            (VesselPlacement.starts_at <= end) & (VesselPlacement.ends_at >= start),
+            VesselPlacement.berth_id == park,
+        )
     )
     if berth_id is not None:
         stmt = stmt.where(VesselPlacement.berth_id == berth_id)
@@ -256,6 +271,52 @@ def placements_in_period(
         .scalars()
         .all()
     )
+
+
+def apply_reberthing_state(db: Session, rows: list[VesselPlacement], *, now: datetime | None = None) -> None:
+    """Дата перестановки наступила — перешвартовка «состоялась».
+
+    Каждой строке навешиваются два вычисляемых поля (в БД их нет):
+    * ``committed`` — копия, чья дата начала уже прошла: это обычная
+      постановка, стрелка и пунктир больше не нужны — судно передвинулось;
+    * ``effective_ends_at`` — для оригинала с состоявшейся копией: оригинал
+      не показывают от начала копии и позже (иначе полоса «едет» за судном,
+      которое по плану уже ушло на другой причал).
+
+    Пока дата не наступила, вид плана прежний: оригинал, пунктирная копия,
+    стрелка. Карман «Ожидание» не трогаем: его слоты — формальность, чип
+    живёт в кармане, пока диспетчер его не уберёт.
+
+    ``now`` — момент, относительно которого судят о состоянии. Для просмотра
+    периода целиком в прошлом передаётся конец периода: диспетчер видит план
+    таким, каким он был тогда — с ещё не наступившими перестановками.
+    """
+    now = now or datetime.now()
+    park_id = db.execute(select(Berth.id).where(Berth.code == PARK_CODE)).scalar()
+    for r in rows:
+        r.committed = False
+        r.effective_ends_at = None
+    ids = [r.id for r in rows if r.id and r.berth_id != park_id]
+    cut: dict[int, datetime] = {}
+    if ids:
+        q = (
+            select(VesselPlacement.moved_from_id, func.min(VesselPlacement.starts_at))
+            .where(
+                VesselPlacement.moved_from_id.in_(ids),
+                VesselPlacement.starts_at <= now,
+                VesselPlacement.berth_id != park_id,
+            )
+            .group_by(VesselPlacement.moved_from_id)
+        )
+        cut = {int(oid): ts for oid, ts in db.execute(q)}
+    for r in rows:
+        if r.berth_id == park_id:
+            continue
+        if r.moved_from_id and r.starts_at <= now:
+            r.committed = True
+        earliest = cut.get(r.id)
+        if earliest is not None and earliest < r.ends_at:
+            r.effective_ends_at = earliest - SLOT
 
 
 def berths(db: Session, *, only_active: bool = False) -> list[Berth]:
@@ -273,6 +334,15 @@ def seed_berths(db: Session) -> int:
         db.add(Berth(code=code, depth=depth, length_m=length_m, lanes=2, sort_order=i))
     db.commit()
     return len(DEFAULT_BERTHS)
+
+
+def ensure_park(db: Session) -> bool:
+    """Заводит строку «Ожидание», если её нет. Идемпотентно: вызывается на каждом старте."""
+    if db.execute(select(Berth.id).where(Berth.code == PARK_CODE)).first():
+        return False
+    db.add(Berth(code=PARK_CODE, sort_order=PARK_SORT_ORDER))
+    db.commit()
+    return True
 
 
 def period_of(query_from: date | None, query_to: date | None, default_days: int = 31) -> tuple[date, date]:
@@ -301,6 +371,7 @@ def place_summary(p: VesselPlacement) -> str:
 
 __all__ = [
     "SLOT", "SLOT_HOURS", "DEFAULT_BERTHS", "BadPlan", "Conflict",
+    "PARK_CODE", "PARK_SORT_ORDER", "ensure_park",
     "berth_length", "berths", "find_conflict", "first_free_offset", "length_cells", "M_PER_CELL",
     "normalize", "period_of", "place_summary", "span_of",
     "placements_in_period", "rights_for", "seed_berths", "slots_count", "slots_in_range",

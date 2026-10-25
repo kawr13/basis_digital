@@ -18,8 +18,8 @@ from sqlalchemy import select
 from app.db import SessionLocal
 from app.main import app
 from app.models import (
-    AppSetting, FactCargoBalance, FactProcessingDynamics, FactWarehouseCapacity,
-    RefreshToken, SyncRun, User, Warehouse,
+    AppSetting, AuditLog, FactCargoBalance, FactProcessingDynamics, FactWarehouseCapacity,
+    RefreshToken, SyncRun, User, VesselPlacement, Warehouse,
 )
 from app.security import new_refresh_token
 from app.services import app_settings as store
@@ -179,6 +179,39 @@ def test_public_settings_for_any_role(client, admin_hdr, manager_hdr):
     assert client.get("/api/admin/sync/runs", headers=manager_hdr).status_code == 403
     assert client.get(SETTINGS_URL).status_code == 401
     assert client.get("/api/settings/public").status_code == 401
+
+
+# ------------------------------------------------- скрытые разделы кабинета ----
+
+def test_hidden_sections_default_public_and_admin_editable(client, admin_hdr, manager_hdr, settings_snapshot):
+    """Раздел можно прятать всем: значение в публичном срезе, нормализация, защита от «всего»."""
+    pub = client.get("/api/settings/public", headers=manager_hdr).json()
+    assert pub["ui.hidden_sections"] == [], "по умолчанию все разделы видимы"
+
+    # порядок и дубли нормализует бэк, порядок — как в choices
+    r = client.put(SETTINGS_URL, json={"ui.hidden_sections": ["warehouses", "statistics", "warehouses"]},
+                   headers=admin_hdr)
+    assert r.status_code == 200, r.text
+    assert r.json()["settings"]["ui.hidden_sections"] == ["statistics", "warehouses"]
+    assert "ui.hidden_sections" in r.json()["overridden"]
+
+    # публичный срез видит новое значение (по нему фронт прячет вкладки)
+    pub = client.get("/api/settings/public", headers=manager_hdr).json()
+    assert pub["ui.hidden_sections"] == ["statistics", "warehouses"]
+
+    # неизвестный раздел — 422 по-русски
+    r = client.put(SETTINGS_URL, json={"ui.hidden_sections": ["kassa"]}, headers=admin_hdr)
+    assert r.status_code == 422 and "неизвестные значения" in r.text, r.text
+
+    # спрятать все разделы нельзя — кабинет станет пустым
+    r = client.put(SETTINGS_URL,
+                   json={"ui.hidden_sections": ["statistics", "warehouses", "reports", "vessels"]},
+                   headers=admin_hdr)
+    assert r.status_code == 422 and "хотя бы один" in r.text, r.text
+
+    # менеджерам настройки недоступны, как и все остальные
+    r = client.put(SETTINGS_URL, json={"ui.hidden_sections": ["reports"]}, headers=manager_hdr)
+    assert r.status_code == 403
 
 
 # ----------------------------------------------------------------------- 1С ----
@@ -380,7 +413,14 @@ def test_lockout_uses_settings_and_unlock_works(client, admin_hdr, manager_hdr, 
     assert client.post(f"/api/admin/users/{uid}/unlock", headers=manager_hdr).status_code == 403
 
 
-def test_deactivate_user_soft(client, admin_hdr):
+def test_user_deactivate_then_delete(client, admin_hdr):
+    """«Отключить» (PATCH) и «удалить» (DELETE) — разные действия.
+
+    Увольнение — учётку выключают, история остаётся. Оплошность администратора
+    (лишняя учётка, опечатка в логине) — удаляют, иначе «отключён» висит в
+    списке навсегда. И проверка, что после удаления не остаётся сирот: SQLite
+    внешние ключи не включает, поэтому всё чистит код, а не база.
+    """
     admin_id = client.get("/api/auth/me", headers=admin_hdr).json()["id"]
     assert client.delete(f"/api/admin/users/{admin_id}", headers=admin_hdr).status_code == 400
 
@@ -388,24 +428,41 @@ def test_deactivate_user_soft(client, admin_hdr):
     with SessionLocal() as db:
         _, rec = new_refresh_token(uid, family_id="test-family")
         db.add(rec)
+        # учётка успела поставить судно: строка плана обязана пережить автора
+        plan = VesselPlacement(berth_id=1, lane=1, vessel="DELETE TEST SHIP",
+                               starts_at=datetime(2026, 3, 1, 6),
+                               ends_at=datetime(2026, 3, 1, 12),
+                               created_by=uid, updated_by=uid)
+        db.add(plan)
         db.commit()
-        token_id = rec.id
+        token_id, plan_id = rec.id, plan.id
 
-    r = client.delete(f"/api/admin/users/{uid}", headers=admin_hdr)
-    assert r.status_code == 200, r.text
-    assert r.json()["login"] == "kirill"
-
+    off = client.patch(f"/api/admin/users/{uid}", headers=admin_hdr, json={"is_active": False})
+    assert off.status_code == 200, off.text
     with SessionLocal() as db:
-        user = db.get(User, uid)
-        assert user.is_active is False, "удаление мягкое: учётка остаётся в базе"
-        assert db.get(RefreshToken, token_id).revoked_at is not None, "сессии отозваны"
+        assert db.get(User, uid).is_active is False, "PATCH выключает учётку, не удаляя"
+        assert db.get(RefreshToken, token_id).revoked_at is not None, "сессии отзваны"
+
+    gone = client.delete(f"/api/admin/users/{uid}", headers=admin_hdr)
+    assert gone.status_code == 204, gone.text
+    with SessionLocal() as db:
+        assert db.get(User, uid) is None, "DELETE удаляет учётку целиком"
+        assert db.get(RefreshToken, token_id) is None, "сессии не остаются сиротами"
+        row = db.get(VesselPlacement, plan_id)
+        assert row is not None, "строка плана пережила автора"
+        assert row.created_by is None and row.updated_by is None, "автор снят с строки"
+        assert db.query(AuditLog).filter(AuditLog.user_id == uid).count() == 0, \
+            "в журнале не осталось ссылок на удалённую учётку"
+        kept = db.scalars(select(AuditLog).where(AuditLog.action == "admin.user_create",
+                                               AuditLog.login == "kirill")).first()
+        assert kept is not None, "журнал переживает учётку: автор в нём записан текстом"
 
     assert client.delete("/api/admin/users/999999", headers=admin_hdr).status_code == 404
 
 
 # ------------------------------------------------------------------ склады ----
 
-def test_warehouse_crud_and_soft_delete(client, admin_hdr, manager_hdr):
+def test_warehouse_crud_and_delete(client, admin_hdr, manager_hdr):
     created = client.post("/api/admin/warehouses", headers=admin_hdr, json={
         "code": "TST-01", "name": "Тестовый склад", "kind": "warehouse",
         "capacity": 500, "unit": "т",
@@ -433,13 +490,48 @@ def test_warehouse_crud_and_soft_delete(client, admin_hdr, manager_hdr):
     # активный склад виден в метриках
     assert wh["id"] in {w["id"] for w in client.get("/api/warehouses", headers=admin_hdr).json()}
 
-    gone = client.delete(f"/api/admin/warehouses/{wh['id']}", headers=admin_hdr)
-    assert gone.status_code == 200, gone.text
-    assert gone.json()["is_active"] is False
-
+    # выключить — PATCH: склад уходит из метрик, но остаётся в базе
+    off = client.patch(f"/api/admin/warehouses/{wh['id']}", headers=admin_hdr,
+                       json={"is_active": False})
+    assert off.status_code == 200, off.text
+    assert off.json()["is_active"] is False
     assert wh["id"] not in {w["id"] for w in client.get("/api/warehouses", headers=admin_hdr).json()}
+    client.patch(f"/api/admin/warehouses/{wh['id']}", headers=admin_hdr,
+                 json={"is_active": True})
+
+    # склад без статистики удаляется без следа — для этого он и создаётся руками
+    gone = client.delete(f"/api/admin/warehouses/{wh['id']}", headers=admin_hdr)
+    assert gone.status_code == 204, gone.text
     with SessionLocal() as db:
-        assert db.get(Warehouse, wh["id"]) is not None, "факты и склад остаются в базе"
+        assert db.get(Warehouse, wh["id"]) is None, "склад удалён из справочника"
+    assert wh["id"] not in {w["id"] for w in client.get("/api/warehouses", headers=admin_hdr).json()}
+
+    # склад со статистикой молча не удаляется: вместе с ним уехали бы отчёты
+    with_data = client.post("/api/admin/warehouses", headers=admin_hdr, json={
+        "code": "TST-03", "name": "Со статистикой", "kind": "warehouse",
+    }).json()
+    with SessionLocal() as db:
+        db.add(FactCargoBalance(snapshot_at=datetime(2026, 3, 1), warehouse_id=with_data["id"],
+                                cargo_group="тест", qty=1, weight_t=2))
+        db.add(FactWarehouseCapacity(snapshot_at=datetime(2026, 3, 1),
+                                     warehouse_id=with_data["id"], used=10, capacity=100))
+        db.commit()
+    blocked = client.delete(f"/api/admin/warehouses/{with_data['id']}", headers=admin_hdr)
+    assert blocked.status_code == 409, blocked.text
+    assert "2 строк статистики" in blocked.json()["detail"], blocked.text
+    with SessionLocal() as db:
+        assert db.get(Warehouse, with_data["id"]) is not None, "409 ничего не удаляет"
+
+    purge = client.delete(f"/api/admin/warehouses/{with_data['id']}",
+                          params={"purge": True}, headers=admin_hdr)
+    assert purge.status_code == 204, purge.text
+    with SessionLocal() as db:
+        assert db.get(Warehouse, with_data["id"]) is None
+        left = db.query(FactCargoBalance).filter(
+            FactCargoBalance.warehouse_id == with_data["id"]).count()
+        assert left == 0, "витрина удаляется вместе со складом, а не осиротевшей"
+
+    assert client.delete("/api/admin/warehouses/999999", headers=admin_hdr).status_code == 404
 
     assert client.patch("/api/admin/warehouses/999999", headers=admin_hdr,
                         json={"name": "??"}).status_code == 404

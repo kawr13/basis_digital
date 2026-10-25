@@ -23,6 +23,9 @@ await page.screenshot({ path: "shot_login_error.png" });
 await page.fill("input[autocomplete=current-password]", process.env.PASS);
 await page.click("button.btn-primary");
 await page.waitForSelector("table", { timeout: 10000 });
+
+// «Статистика» стала главной страницей, витрина складов 1С — на вкладке «Склады 1С».
+await page.goto(`${BASE}/warehouses`, { waitUntil: "networkidle" });
 await page.waitForTimeout(600);
 console.log("url after login:", page.url());
 console.log("kpi:", (await page.$$eval(".num", (els) => els.slice(0, 6).map((e) => e.textContent))).join(" | "));

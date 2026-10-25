@@ -3,16 +3,19 @@ import { NavLink } from "react-router-dom";
 import { useAuth } from "../auth";
 import { roleLabel } from "../format";
 import { ageLabel, type Live } from "../live";
-import { resolveVesselRights, usePublicSettings } from "../settings";
+import { hiddenSections, resolveVesselRights, usePublicSettings } from "../settings";
 
+// `section` — id раздела в настройке ui.hidden_sections: админ может прятать
+// целые разделы для всех, вкладка и маршрут закрываются одновременно.
 const tabs = [
-  { to: "/", label: "Сводка", end: true, nav: "summary" },
-  { to: "/reports", label: "Отчёты", end: false, nav: "reports" },
+  { to: "/", label: "Статистика", end: true, nav: "summary", section: "statistics" },
+  { to: "/warehouses", label: "Склады 1С", end: true, nav: "warehouses", section: "warehouses" },
+  { to: "/reports", label: "Отчёты", end: false, nav: "reports", section: "reports" },
 ];
 
 // Вкладка постановки судов показывается только тем ролям, которым разрешён
 // просмотр плана (настройка vessels.view_roles) — маршрут закрыт и на бэкенде.
-const VESSELS_TAB = { to: "/vessels", label: "Постановка", end: false, nav: "vessels" };
+const VESSELS_TAB = { to: "/vessels", label: "Постановка", end: false, nav: "vessels", section: "vessels" };
 
 // Вкладка администратора видна только роли admin: маршрут /admin всё равно
 // закрыт редиректом, но лишний раз подсказывать про доступ не стоит.
@@ -38,9 +41,12 @@ export function AppShell({
   const { user, logout } = useAuth();
   const settings = usePublicSettings();
   const canSeeVessels = resolveVesselRights(user, settings).view;
+  const hidden = hiddenSections(settings);
   const navTabs = [
-    ...tabs,
-    ...(canSeeVessels ? [VESSELS_TAB] : []),
+    ...tabs.filter((t) => !hidden.has(t.section)),
+    ...(canSeeVessels && !hidden.has(VESSELS_TAB.section) ? [VESSELS_TAB] : []),
+    // Админка всегда остаётся: спрятать её от админа нельзя (и незачем),
+    // иначе настройки, которые её прячут, будет некому вернуть.
     ...(user?.role === "admin" ? [ADMIN_TAB] : []),
   ];
   const headerRef = useRef<HTMLElement>(null);
@@ -84,8 +90,8 @@ export function AppShell({
                 height={35}
                 className="h-8 w-auto shrink-0"
               />
-              <span className="hidden sm:block pl-3 border-l border-white/25 text-[11px] uppercase tracking-[0.18em] text-white/75">
-                Кабинет веб-статистики
+              <span className="hidden sm:block pl-3 border-l border-white/25 text-[11px] tracking-[0.18em] text-white/75">
+                Basis.Indicators
               </span>
             </div>
 

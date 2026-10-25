@@ -73,10 +73,26 @@ SPEC: dict[str, Spec] = {
     "ui.refresh_seconds": Spec("int", 60, minimum=5, maximum=900,
                                label="Как часто фронт сам подтягивает данные, сек",
                                hint="только когда вкладка видна; 15 с — интервал опроса свежести"),
+    "ui.hidden_sections": Spec("str_list", [],
+                               choices=("statistics", "warehouses", "reports", "vessels"),
+                               label="Какие разделы не показывать",
+                               hint="Скрытые для всех разделы в шапке: Статистика, Склады 1С, "
+                                     "Отчёты, Постановка. Хотя бы один раздел должен остаться видимым"),
     "thresholds.capacity_warn": Spec("int", 85, minimum=50, maximum=100,
                                      label="Порог «внимание», % загрузки склада"),
     "thresholds.capacity_crit": Spec("int", 95, minimum=50, maximum=100,
                                      label="Порог «критично», % загрузки склада"),
+    # --- отчёт диспетчера (страница «Статистика») ----------------------------
+    # Источник — файл xlsm (сегодня) или HTTP-сервис 1С (завтра): путь нужен
+    # только автоимпорту на старте, вручную файл загружается из админки.
+    "dispatcher.source_path": Spec("str", "", env="dispatcher_xlsm_path",
+                                   label="Файл отчёта диспетчера (путь на сервере)",
+                                   hint="например D:\Отчет диспетчера.xlsm; пусто — автоимпорт выключен"),
+    "dispatcher.auto_import": Spec("bool", True, env="dispatcher_auto_import",
+                                   label="Импортировать отчёт диспетчера при старте",
+                                   hint="только если файл изменился с прошлой загрузки"),
+    "dispatcher.default_period_days": Spec("int", 30, minimum=7, maximum=366,
+                                           label="Период на странице статистики, суток"),
     # --- доступ к «Постановке судов» ----------------------------------------
     # Роли через запятую. Раздельно: просмотр / постановка судна / удаление.
     # Смысл: план ведёт диспетчер, но остальной кабинет он — менеджер.
@@ -99,6 +115,7 @@ SPEC: dict[str, Spec] = {
 # Публичный набор: любой авторизованный пользователь (менеджеру — пороги и
 # периоды, чтобы UI и бэкенд считали одинаково).
 PUBLIC_KEYS = ("ui.dynamics_days", "reports.default_days", "ui.refresh_seconds",
+               "ui.hidden_sections",
                "thresholds.capacity_warn", "thresholds.capacity_crit",
                "vessels.view_roles", "vessels.edit_roles", "vessels.delete_roles")
 
@@ -242,6 +259,19 @@ def _coerce(key: str, spec: Spec, value: Any) -> Any:
             raise ValueError(f"«{label}»: не больше {spec.maximum}")
         return number
 
+    if spec.kind == "str_list":
+        if isinstance(value, str):
+            value = [t.strip() for t in value.split(",") if t.strip()]
+        if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+            raise ValueError(f"«{label}»: список значений")
+        allowed = spec.choices or ()
+        bad = [v for v in value if v not in allowed]
+        if bad:
+            raise ValueError(
+                f"«{label}»: неизвестные значения: {', '.join(bad)}. Можно: {', '.join(allowed)}")
+        # нормализуем: без дублей, в порядке допустимого списка
+        return [v for v in allowed if v in value]
+
     if spec.kind == "choice":
         if not isinstance(value, str):
             raise ValueError(f"«{label}»: строка")
@@ -282,6 +312,11 @@ def _validate_together(values: dict[str, Any]) -> None:
     crit = values.get("thresholds.capacity_crit")
     if warn is not None and crit is not None and crit < warn:
         raise ValueError("Порог «критично» не может быть ниже порога «внимание»")
+
+    hidden = values.get("ui.hidden_sections")
+    all_sections = set(SPEC["ui.hidden_sections"].choices or ())
+    if hidden is not None and set(hidden) == all_sections:
+        raise ValueError("Нельзя скрыть все разделы сразу: хотя бы один должен остаться видимым")
 
 
 # --------------------------------------------------------------------- запись ----

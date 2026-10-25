@@ -9,8 +9,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
-from .api import (admin, admin_settings, admin_warehouses, auth, meta, metrics, onec_push, reports,
-                  settings, vessels)
+from .api import (admin, admin_settings, admin_warehouses, auth, dispatcher, meta, metrics, onec_push,
+                  reports, settings, vessels)
 from .config import get_settings
 from .db import SessionLocal, get_db, init_db
 from .deps import require_roles
@@ -18,7 +18,8 @@ from .models import Role
 from .onec.sync import run_sync
 from .seed import ensure_admin, seed_demo_users
 from .services import app_settings, scheduling
-from .services.vessels import seed_berths
+from .services.dispatcher import auto_import
+from .services.vessels import ensure_park, seed_berths
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("statcab")
@@ -45,6 +46,17 @@ async def lifespan(app: FastAPI):
         created = seed_berths(db)
         if created:
             log.info("Справочник причалов заполнен: %d шт.", created)
+        # Строка «Ожидание» — часть документа, как и причалы: заводим и на новой
+        # базе, и на той, что жила до появления кармана.
+        if ensure_park(db):
+            log.info("Заведена строка «Ожидание»: суда вне причалов.")
+        # Отчёт диспетчера — реальные цифры страницы «Статистика». Файл лежит на
+        # сервере (пока 1С не отдаёт отчёт по HTTP), грузим его только когда он
+        # новее витрины; ошибка не мешает запуску кабинета.
+        try:
+            log.info("Отчёт диспетчера: %s", auto_import(db))
+        except Exception:                       # noqa: BLE001 — старт важнее
+            log.exception("Не удалось импортировать отчёт диспетчера")
     finally:
         db.close()
 
@@ -90,6 +102,8 @@ app.include_router(admin_warehouses.router)
 app.include_router(settings.router)
 app.include_router(reports.router)
 app.include_router(vessels.router)
+app.include_router(dispatcher.router)
+app.include_router(dispatcher.admin_router)
 app.include_router(onec_push.router)
 
 

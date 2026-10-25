@@ -13,12 +13,23 @@ import { schedulerNote } from "./useSettings";
 
 export type SettingsSection = { title: string; keys: string[]; note?: string };
 
+/** Подписи id разделов для чекбоксов (ui.hidden_sections). */
+const SECTION_LABELS: Record<string, string> = {
+  statistics: "Статистика",
+  warehouses: "Склады 1С",
+  reports: "Отчёты",
+  vessels: "Постановка",
+};
+
 type DraftValue = string | boolean;
 
-/** Значение настройки в виде строки (для input) или булева (для чекбокса). */
+/** Значение настройки в виде строки (для input) или булева (для чекбокса).
+ *  Для str_list список складываем в «a,b» — черновик остаётся строковым,
+ *  а чекбоксы рисуются из этой строки. */
 function toDraft(spec: SettingSpec | undefined, value: unknown): DraftValue {
   if (spec?.secret) return "";
   if (typeof value === "boolean") return value;
+  if (spec?.kind === "str_list") return Array.isArray(value) ? value.join(",") : "";
   return value === null || value === undefined ? "" : String(value);
 }
 
@@ -112,6 +123,11 @@ export function SettingsForm({
         patch[key] = Boolean(value);
         continue;
       }
+      if (spec.kind === "str_list") {
+        // бэк ждёт массив; пустой список — «ничего не прячем»
+        patch[key] = String(value).split(",").map((t) => t.trim()).filter(Boolean);
+        continue;
+      }
       if (spec.kind === "int" || spec.kind === "float") {
         const raw = String(value).trim().replace(",", ".");
         const num = Number(raw);
@@ -200,6 +216,34 @@ export function SettingsForm({
                         data-changed={isChanged ? "1" : "0"}
                       />
                       <span className="text-sm text-ink-300">{value === true ? "включено" : "выключено"}</span>
+                    </span>
+                  ) : spec.kind === "str_list" ? (
+                    <span className="flex flex-wrap gap-x-4 gap-y-1.5">
+                      {(spec.choices ?? []).map((c) => {
+                        const list = String(value).split(",").map((t) => t.trim()).filter(Boolean);
+                        return (
+                          <label
+                            key={c}
+                            className="inline-flex cursor-pointer items-center gap-2 text-sm text-ink-100"
+                          >
+                            <input
+                              type="checkbox"
+                              className="h-4 w-4 accent-[#1668a8]"
+                              checked={list.includes(c)}
+                              onChange={(e) => {
+                                const next = e.target.checked
+                                  ? [...list, c]
+                                  : list.filter((t) => t !== c);
+                                set(key, next.join(","));
+                              }}
+                              data-setting={key}
+                              data-choice={c}
+                              data-changed={isChanged ? "1" : "0"}
+                            />
+                            {SECTION_LABELS[c] ?? c}
+                          </label>
+                        );
+                      })}
                     </span>
                   ) : spec.kind === "choice" ? (
                     <select

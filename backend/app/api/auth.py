@@ -68,7 +68,7 @@ def _set_refresh_cookie(response: Response, raw: str) -> None:
     response.set_cookie(
         key=REFRESH_COOKIE, value=raw,
         max_age=s.refresh_token_ttl_days * 86400,
-        httponly=True, samesite="lax", secure=(s.environment == "prod"),
+        httponly=True, samesite="lax", secure=s.cookie_secure_effective,
         path="/api/auth",
     )
 

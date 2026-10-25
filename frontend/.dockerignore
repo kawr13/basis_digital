@@ -1,0 +1,7 @@
+# node_modules с рабочей машины (особенно Windows) перекроет те,
+# что npm install поставил внутри образа, — нативные бинарники не совпадут.
+node_modules
+dist
+.git
+*.tsbuildinfo
+.env

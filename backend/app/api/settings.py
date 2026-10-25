@@ -20,7 +20,13 @@ from ..services import app_settings
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 
-KNOWN_KEYS = {"dashboard_layout", "report_filters"}
+# statistics_layout / statistics_layout_lite — раскладка страницы «Статистика»
+# (отчёт диспетчера), своя для режима «подробно» и для «консервативно».
+# statistics_mode — сам режим: detailed | conservative.
+KNOWN_KEYS = {
+    "dashboard_layout", "statistics_layout", "statistics_layout_lite",
+    "statistics_mode", "report_filters",
+}
 MAX_VALUE_LEN = 20_000
 
 

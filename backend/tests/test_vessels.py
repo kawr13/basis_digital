@@ -93,6 +93,116 @@ def test_admin_sees_berth_book_even_if_plan_closed(client, admin_hdr):
         client.patch(f"/api/admin/users/{aid}", json={"vessel_right": None}, headers=admin_hdr)
 
 
+def test_plan_pdf_is_a_real_pdf_with_cyrillic(client, admin_hdr, manager_hdr):
+    """PDF строит бэкенд: файл должен открыться, а русские названия — читаться.
+
+    Свой причал и своё время: тесты делят одну базу, и судно на общем РП-1
+    ломало бы чужие проверки на конфликте.
+    """
+    own = client.post("/api/vessels/berths", json={"code": "PDF-1", "length_m": 120},
+                      headers=admin_hdr).json()["id"]
+    body = {"berth_id": own, "vessel": "СВЕТЛОГОРСК", "volume": "4 000", "cargo": "СБОРНИК",
+            "length_m": 60, "offset_m": 0,
+            "starts_at": "2026-05-03T06:00:00", "ends_at": "2026-05-05T12:00:00"}
+    assert client.post("/api/vessels/placements", json=body, headers=admin_hdr).status_code == 201
+    r = client.get("/api/vessels/placements", params=PERIOD, headers=manager_hdr).json()
+    ids = ",".join(str(b["id"]) for b in r["berths"][:3])
+    pdf = client.get("/api/vessels/plan.pdf",
+                     params={**PERIOD, "day_from": 2, "day_to": 9, "berth_ids": ids},
+                     headers=manager_hdr)
+    assert pdf.status_code == 200, pdf.text
+    assert pdf.headers["content-type"] == "application/pdf"
+    assert "attachment" in pdf.headers["content-disposition"]
+    body = pdf.content
+    assert body[:5] == b"%PDF-" and body.rstrip().endswith(b"%%EOF")
+    assert len(body) > 2000, "PDF подозрительно маленький — похоже, нечего рисовать"
+
+    from pypdf import PdfReader
+    import io
+    text = "".join(page.extract_text() or "" for page in PdfReader(io.BytesIO(body)).pages)
+    assert "СВЕТЛОГОРСК" in text, f"кириллица потерялась: {text[:200]}"
+    assert "План постановки судов" in text
+
+
+def test_plan_pdf_window_and_rights(client, admin_hdr, manager_hdr):
+    """В файл попадают только сутки и причалы из кадра; без права view — 403."""
+    own = client.post("/api/vessels/berths", json={"code": "PDF-2", "length_m": 100},
+                      headers=admin_hdr).json()["id"]
+    body = {"berth_id": own, "vessel": "PDF SHIP", "length_m": 50, "offset_m": 0,
+            "starts_at": "2026-05-20T06:00:00", "ends_at": "2026-05-21T12:00:00"}
+    assert client.post("/api/vessels/placements", json=body, headers=admin_hdr).status_code == 201
+    # сосед по периоду: его причал и его сутки за кадром — в листе их быть не должно
+    other = client.post("/api/vessels/berths", json={"code": "PDF-2B", "length_m": 100},
+                        headers=admin_hdr).json()["id"]
+    for berth, vessel, start, end in (
+        (other, "ВНЕ ПРИЧАЛА", "2026-05-20T06:00:00", "2026-05-21T12:00:00"),
+        (own, "ВНЕ СУТОК", "2026-05-27T06:00:00", "2026-05-28T12:00:00"),
+    ):
+        assert client.post("/api/vessels/placements", json={
+            "berth_id": berth, "vessel": vessel, "length_m": 40, "offset_m": 0,
+            "starts_at": start, "ends_at": end}, headers=admin_hdr).status_code == 201
+    ids = str(own)
+    narrow = client.get("/api/vessels/plan.pdf",
+                        params={**PERIOD, "day_from": 0, "day_to": 2, "berth_ids": ids},
+                        headers=manager_hdr)
+    assert narrow.status_code == 200
+
+    from pypdf import PdfReader
+    import io
+    text = "".join(p.extract_text() or "" for p in PdfReader(io.BytesIO(narrow.content)).pages)
+    assert "ВНЕ СУТОК" not in text, "судно за границей кадра по суткам уехало в лист"
+    assert "ВНЕ ПРИЧАЛА" not in text, "причал за границей кадра уехал в лист"
+    assert client.get("/api/vessels/plan.pdf", params=PERIOD,
+                      headers={"Authorization": "Bearer nope"}).status_code == 401
+    # закрытому праву файл не отдаём
+    uid = _user_id(client, admin_hdr, "sidorova")
+    client.patch(f"/api/admin/users/{uid}", json={"vessel_right": "none"}, headers=admin_hdr)
+    tok = client.post("/api/auth/login", json={"login": "sidorova", "password": "demo1234"}).json()["access_token"]
+    denied = client.get("/api/vessels/plan.pdf", params=PERIOD,
+                        headers={"Authorization": f"Bearer {tok}"})
+    assert denied.status_code == 403
+    client.patch(f"/api/admin/users/{uid}", json={"vessel_right": None}, headers=admin_hdr)
+
+
+def test_plan_pdf_header_on_every_sheet(client, admin_hdr, manager_hdr):
+    """Листов несколько — шапка и сноска обязаны быть на каждом.
+
+    Листы распечатывают и по одному: на листе без заголовка и без дат окна
+    непонятно, какой это кусок плана. Раньше второй лист уходил без шапки:
+    при переносе причала на новую страницу флаг «первый лист» ещё не сбросили.
+    """
+    made = []
+    for i in range(6):
+        berth = client.post("/api/vessels/berths", json={"code": f"MUL-{i}", "length_m": 130},
+                            headers=admin_hdr).json()["id"]
+        pid = client.post("/api/vessels/placements", json={
+            "berth_id": berth, "vessel": f"ЛИСТ {i}", "length_m": 60, "offset_m": 0,
+            "starts_at": "2026-07-02T06:00:00", "ends_at": "2026-07-03T12:00:00"},
+            headers=admin_hdr).json()["id"]
+        made.append((berth, pid))
+
+    pdf = client.get("/api/vessels/plan.pdf",
+                     params={"from": "2026-07-01", "to": "2026-07-07",
+                             "day_from": 0, "day_to": 6,
+                             "berth_ids": ",".join(str(b) for b, _ in made)},
+                     headers=manager_hdr)
+    assert pdf.status_code == 200, pdf.text
+
+    from pypdf import PdfReader
+    import io
+    pages = PdfReader(io.BytesIO(pdf.content)).pages
+    assert len(pages) > 1, f"шесть причалов по 130 м должны не на один лист, а их {len(pages)}"
+    for n, page in enumerate(pages, start=1):
+        text = page.extract_text() or ""
+        assert "План постановки судов" in text, f"лист {n} без шапки"
+        assert "Пунктир" in text, f"лист {n} без сноски"
+        assert "причал / метры" in text, f"лист {n} без шапки суток"
+
+    for berth, pid in made:   # прочий план не засоряем
+        client.delete(f"/api/vessels/placements/{pid}", headers=admin_hdr)
+        assert client.delete(f"/api/vessels/berths/{berth}", headers=admin_hdr).status_code == 204
+
+
 def test_berth_delete_needs_admin(client, admin_hdr):
     """Справочник причалов — админская зона: топ-менеджмент править справочник не может."""
     top = client.post("/api/auth/login", json={"login": "ivanova", "password": "demo1234"})
@@ -502,3 +612,118 @@ def test_rights_ship_with_the_user(client, admin_hdr):
         "view": False, "edit": False, "delete": False,
     }
     assert client.get("/api/vessels/placements", params=PERIOD, headers=hdr).status_code == 403
+
+
+def test_pocket_and_reberthing(client, admin_hdr):
+    """«Ожидание» — карман без конфликтов; перешвартовка — копия со ссылкой на оригинал."""
+    berths = client.get("/api/vessels/berths", headers=admin_hdr).json()
+    park = next(b for b in berths if b["code"] == "ОЖИДАНИЕ")
+    body = {"berth_id": park["id"], "vessel": "ЖДУЩИЙ", "length_m": 60, "offset_m": 0,
+            "starts_at": "2026-05-04T06:00:00", "ends_at": "2026-05-05T12:00:00"}
+    src = client.post("/api/vessels/placements", json=body, headers=admin_hdr)
+    assert src.status_code == 201, src.text
+    # в кармане суда не мешают друг другу: ни временем, ни одними и теми же метрами
+    twin = client.post("/api/vessels/placements", json={**body, "vessel": "ТОЖЕ ЖДЁТ"}, headers=admin_hdr)
+    assert twin.status_code == 201, twin.text
+
+    rp1 = next(b for b in berths if b["code"] == "РП-1")
+    copy = client.post("/api/vessels/placements", json={
+        "berth_id": rp1["id"], "vessel": "ЖДУЩИЙ", "length_m": 60, "offset_m": 0,
+        "starts_at": "2026-05-10T06:00:00", "ends_at": "2026-05-11T12:00:00",
+        "moved_from_id": src.json()["id"],
+    }, headers=admin_hdr)
+    assert copy.status_code == 201, copy.text
+    assert copy.json()["moved_from_id"] == src.json()["id"]
+    # исходной постановки нет — стрелке рисовать не из чего, 400
+    ghost = client.post("/api/vessels/placements", json={
+        "berth_id": rp1["id"], "vessel": "ПРИЗРАК", "length_m": 40, "offset_m": 80,
+        "starts_at": "2026-05-20T06:00:00", "ends_at": "2026-05-20T12:00:00",
+        "moved_from_id": 999999,
+    }, headers=admin_hdr)
+    assert ghost.status_code == 400
+    # на обычном причале правила прежние: те же слоты и метры — 409
+    clash = client.post("/api/vessels/placements", json={
+        "berth_id": rp1["id"], "vessel": "НАЕЗД", "length_m": 60, "offset_m": 0,
+        "starts_at": "2026-05-10T06:00:00", "ends_at": "2026-05-11T12:00:00",
+    }, headers=admin_hdr)
+    assert clash.status_code == 409
+
+
+def test_at_other_terminal_flag(client, admin_hdr):
+    """Красная рамка диспетчера: судно «на другом терминале» — флаг живёт в БД,
+    ставится при создании и снимается PATCH'ем (без поля — не меняется)."""
+    row = _mk(client, admin_hdr, vessel="ЧУЖОЙ ТЕРМИНАЛ",
+              start="2026-05-15T06:00:00", end="2026-05-16T12:00:00",
+              at_other_terminal=True).json()
+    assert row["at_other_terminal"] is True
+    plain = _mk(client, admin_hdr, vessel="В ПРОЛИВЕ", start="2026-05-17T06:00:00",
+                end="2026-05-18T12:00:00").json()
+    assert plain["at_other_terminal"] is False
+    patched = client.patch(f"/api/vessels/placements/{row['id']}",
+                           json={"at_other_terminal": False}, headers=admin_hdr)
+    assert patched.status_code == 200 and patched.json()["at_other_terminal"] is False
+    untouched = client.patch(f"/api/vessels/placements/{plain['id']}",
+                             json={"volume": "500"}, headers=admin_hdr)
+    assert untouched.json()["at_other_terminal"] is False
+
+
+def test_manual_bar_color(client, admin_hdr):
+    """Цвет полосы по желанию диспетчера: ручной задаётся при создании,
+    снимается PATCH'ем в null, мусор отклоняется."""
+    row = _mk(client, admin_hdr, code="РП-2", vessel="ЦВЕТНОЙ",
+              start="2026-05-15T06:00:00", end="2026-05-16T12:00:00", color="#A03F37").json()
+    assert row["color"] == "#a03f37"  # канонический нижний регистр
+    patched = client.patch(f"/api/vessels/placements/{row['id']}",
+                           json={"color": None}, headers=admin_hdr)
+    assert patched.json()["color"] is None
+    plain = _mk(client, admin_hdr, code="РП-2", vessel="БЕЗ ЦВЕТА",
+                start="2026-05-17T06:00:00", end="2026-05-18T12:00:00").json()
+    assert plain["color"] is None
+    bad = _mk(client, admin_hdr, code="РП-2", vessel="КРАСНЫЙ",
+              start="2026-05-19T06:00:00", end="2026-05-19T12:00:00", color="красный")
+    assert bad.status_code == 422
+
+
+def test_scheduled_move_takes_effect_on_its_date(client, admin_hdr):
+    """Перестановка по стрелке наступает сама: в дату копии судно «передвинуто» —
+    копия обычная (committed), оригинал не показывают от начала копии. Данные при
+    этом не меняются: редактор по-прежнему видит исходные границы."""
+    orig = _mk(client, admin_hdr, code="РП-2", vessel="ХОДОК",
+               start="2026-05-03T06:00:00", end="2026-05-05T12:00:00").json()
+    rp3 = _berth_id(client, admin_hdr, "РП-3")
+    past = client.post("/api/vessels/placements", json={
+        "berth_id": rp3, "vessel": "ХОДОК", "length_m": 40, "offset_m": 0,
+        "starts_at": "2026-05-04T00:00:00", "ends_at": "2026-05-06T12:00:00",
+        "moved_from_id": orig["id"],
+    }, headers=admin_hdr)
+    assert past.status_code == 201 and past.json()["committed"] is True  # дата в прошлом
+    rows = {r["id"]: r for r in client.get(
+        "/api/vessels/placements?from=2026-05-01&to=2026-05-31", headers=admin_hdr
+    ).json()["placements"]}
+    # оригинал обрезают за слот до старта копии…
+    assert rows[orig["id"]]["effective_ends_at"] == "2026-05-03T18:00:00"
+    # …но хранимая дата остаётся прежней
+    assert rows[orig["id"]]["ends_at"] == "2026-05-05T12:00:00"
+
+    # прошлый период показывают «как тогда»: на 3 мая перестановка ещё не наступила —
+    # оригинал не обрезан, состояние считают на последний день периода
+    rows_then = {r["id"]: r for r in client.get(
+        "/api/vessels/placements?from=2026-05-01&to=2026-05-03", headers=admin_hdr
+    ).json()["placements"]}
+    assert rows_then[orig["id"]]["effective_ends_at"] is None
+
+    # запланированная в будущее перестановка: дата не наступила — вид прежний
+    orig2 = _mk(client, admin_hdr, code="РП-4", vessel="ЖДУН",
+                start="2027-11-01T06:00:00", end="2027-11-05T12:00:00").json()
+    rp5 = _berth_id(client, admin_hdr, "РП-5")
+    future = client.post("/api/vessels/placements", json={
+        "berth_id": rp5, "vessel": "ЖДУН", "length_m": 40, "offset_m": 0,
+        "starts_at": "2027-11-03T00:00:00", "ends_at": "2027-11-04T12:00:00",
+        "moved_from_id": orig2["id"],
+    }, headers=admin_hdr).json()
+    assert future["committed"] is False
+    rows2 = {r["id"]: r for r in client.get(
+        "/api/vessels/placements?from=2027-11-01&to=2027-11-30", headers=admin_hdr
+    ).json()["placements"]}
+    assert rows2[orig2["id"]]["effective_ends_at"] is None
+    assert rows2[future["id"]]["committed"] is False

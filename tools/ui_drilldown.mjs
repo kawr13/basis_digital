@@ -37,6 +37,9 @@ async function login(loginName, password) {
   await page.fill("input[autocomplete=current-password]", password);
   await page.click("button.btn-primary");
   await page.waitForSelector("section[data-widget]", { timeout: 10000 });
+  // «Статистика» стала главной страницей — проваливаемся на витрину складов 1С.
+  await page.goto(`${BASE}/warehouses`, { waitUntil: "networkidle" });
+  await page.waitForSelector('section[data-widget="dynamics"]', { timeout: 10000 });
 }
 
 /** Первый столбец графика, за которым есть данные. */

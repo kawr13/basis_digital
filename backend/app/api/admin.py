@@ -8,7 +8,8 @@ from sqlalchemy.orm import Session
 from ..db import get_db
 from ..deps import current_user, require_roles
 from ..models import (
-    AuditLog, RefreshToken, Role, User, UserWarehouseScope, Warehouse, utcnow,
+    AuditLog, RefreshToken, Role, User, UserPreference, UserWarehouseScope, Warehouse,
+    VesselPlacement, utcnow,
 )
 from ..schemas import AuditOut, UserCreate, UserOut, UserUpdate
 from ..security import hash_password, password_is_strong, random_password
@@ -131,30 +132,53 @@ def unlock_user(user_id: int, db: Session = Depends(get_db), actor: User = Depen
     return _out(user, db)
 
 
-@router.delete("/users/{user_id}", response_model=UserOut)
-def deactivate_user(user_id: int, db: Session = Depends(get_db),
-                    actor: User = Depends(admin_only)):
-    """Мягкое удаление: учётка выключается, все refresh-токены отзываются.
+@router.delete("/users/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_user(user_id: int, db: Session = Depends(get_db),
+                actor: User = Depends(admin_only)):
+    """Удалить учётку целиком. Выключить — это PATCH c is_active=false.
 
-    Жёсткого удаления нет намеренно: аудит и история загрузок должны переживать
-    увольнение сотрудника. Себя деактивировать нельзя — иначе одним неверным
-    кликом можно закрыть себе доступ в админку.
+    Раньше DELETE только выключал учётку, и оплошность администратора (лишний
+    человек, опечатка в логине) оставалась в списке навсегда: «отключён» виден в
+    той же таблице. Увольнение — как раз случай, когда учётку надо выключить,
+    и кнопка «Отключить» для этого осталась на PATCH.
+
+    Удалять безопасно, потому что история не висит на учётке: в audit_log автор
+    записан ещё и текстом (login), а постановки хранят created_by/updated_by
+    числом без внешней ссылки. Строки плана и журнала переживают автора —
+    просто остаются без подписи, и об этом говорит плашка в UI.
     """
     if user_id == actor.id:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Нельзя деактивировать собственную учётку")
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Нельзя удалить собственную учётку")
+    # Себя удалить нельзя, а current_user не пускает в админку отключённого —
+    # значит хотя бы один активный администратор остаётся всегда, и отдельная
+    # проверка «последний админ» здесь не нужна.
     user = db.get(User, user_id)
     if not user:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Пользователь не найден")
 
-    user.is_active = False
-    user.locked_until = None
-    user.failed_attempts = 0
-    _revoke_tokens(db, user)
-    db.add(AuditLog(user_id=actor.id, login=actor.login, action="admin.user_deactivate",
-                    detail=f"target={user.login}"))
+    # Внешние ключи SQLite по умолчанию выключены, поэтому ON DELETE CASCADE сам
+    # ничего не чистит: удаляем явно, иначе останутся висячие строки и на SQLite,
+    # и на PostgreSQL поведение разойдётся.
+    sessions = db.query(RefreshToken).filter(RefreshToken.user_id == user_id).delete(
+        synchronize_session=False)
+    scopes = db.query(UserWarehouseScope).filter(UserWarehouseScope.user_id == user_id).delete(
+        synchronize_session=False)
+    db.query(UserPreference).filter(UserPreference.user_id == user_id).delete(
+        synchronize_session=False)
+    # журнал не вычищаем: отвязываем учётку, логин в записи уже лежит текстом
+    orphan_audit = db.query(AuditLog).filter(AuditLog.user_id == user_id).update(
+        {AuditLog.user_id: None}, synchronize_session=False)
+    orphan_plan = db.query(VesselPlacement).filter(VesselPlacement.created_by == user_id).update(
+        {VesselPlacement.created_by: None}, synchronize_session=False)
+    orphan_plan += db.query(VesselPlacement).filter(VesselPlacement.updated_by == user_id).update(
+        {VesselPlacement.updated_by: None}, synchronize_session=False)
+    login = user.login
+    db.delete(user)
+    db.add(AuditLog(user_id=actor.id, login=actor.login, action="admin.user_delete",
+                    detail=f"target={login} сессий={sessions} доступов={scopes} "
+                           f"журнал без автора={orphan_audit} план без автора={orphan_plan}"))
     db.commit()
-    db.refresh(user)
-    return _out(user, db)
+    return None
 
 
 @router.get("/audit", response_model=list[AuditOut])

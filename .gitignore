@@ -19,9 +19,15 @@ dist/
 *.pem
 *.key
 
+# Собранные релизы (pack_release.ps1)
+release/
+
 # IDE / OS
 .idea/
 .vscode/
 .DS_Store
 *.log
 frontend/tsconfig.tsbuildinfo
+
+# Скриншоты браузерных проверок (их пишут tools/ui_*.mjs)
+shot_*.png

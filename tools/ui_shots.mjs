@@ -13,6 +13,10 @@ await page.fill("input[autocomplete=username]", "admin");
 await page.fill("input[autocomplete=current-password]", process.env.PASS || "Top-Secret-2026");
 await page.click("button.btn-primary");
 await page.waitForSelector("section[data-widget]", { timeout: 10000 });
+
+// «Статистика» стала главной страницей, витрина складов 1С — на вкладке «Склады 1С».
+await page.goto(`${BASE}/warehouses`, { waitUntil: "networkidle" });
+await page.waitForSelector("section[data-widget]", { timeout: 10000 });
 await page.waitForTimeout(700);
 await page.screenshot({ path: "shot_theme_dashboard.png" });
 

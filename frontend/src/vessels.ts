@@ -65,9 +65,20 @@ export function barGeometry(p: Placement, periodStart: string, totalSlots: numbe
   return { left, width: right - left, clippedStart: firstSlot < 0, clippedEnd: firstSlot + span > totalSlots };
 }
 
-// Палитра подобрана по WCAG: белый текст на любой полосе ≥ 5.3:1 (AA с запасом),
-// цвета различимы и для дальтоников (разная светлота, не только оттенок).
-const PALETTE = ["#2b6a99", "#17705c", "#9a5c0b", "#7a4fa0", "#a03f37", "#4a6b1f"];
+/**
+ * Действительная постановка для рисования: когда дата перестановки наступила,
+ * оригинал не показывают от начала копии; если копия началась раньше оригинала —
+ * оригинал исчезает вовсе (судно уже передвинули по стрелке).
+ */
+export function displayed(p: Placement): Placement | null {
+  if (!p.effective_ends_at) return p;
+  if (parseLocal(p.effective_ends_at).getTime() < parseLocal(p.starts_at).getTime()) return null;
+  return { ...p, ends_at: p.effective_ends_at };
+}
+
+// Яркая палитра: насыщенные цвета различаются и по тону, и по светлоте
+// (различимы и для дальтоников). Подпись на полосе адаптируется — textColorOn.
+export const PALETTE = ["#2f9bff", "#12b886", "#ffb020", "#9775fa", "#ff5c5c", "#f06595"];
 
 /** Цвет по грузу: одинаковый груз — одна и та же полоса на любом экране. */
 export function cargoColor(cargo: string | null): string {
@@ -76,6 +87,19 @@ export function cargoColor(cargo: string | null): string {
   let hash = 0;
   for (const ch of key) hash = (hash * 31 + ch.charCodeAt(0)) % 997;
   return PALETTE[hash % PALETTE.length];
+}
+
+/** Цвет полосы: ручной цвет важнее автораскраски по грузу. */
+export function barColor(p: { cargo: string | null; color?: string | null }): string {
+  return p.color || cargoColor(p.cargo);
+}
+
+/** Подпись на светлой полосе — тёмная, на тёмной — белая: диспетчер может выбрать любой цвет. */
+export function textColorOn(hex: string): string {
+  const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex);
+  if (!m) return "#ffffff";
+  const [r, g, b] = [1, 2, 3].map((i) => parseInt(m[i], 16));
+  return (0.299 * r + 0.587 * g + 0.114 * b) / 255 > 0.5 ? "#101c2c" : "#ffffff";
 }
 
 /** Одна строка подписи полосы: «CROWN SAPPHIRE 5 500».

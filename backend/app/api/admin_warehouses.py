@@ -4,19 +4,25 @@
 новый склад раньше, чем начнёт по нему отдавать данные. Поэтому справочник
 можно вести руками: создать, переименовать, поправить ёмкость.
 
-Удаления нет: факты (остатки/ёмкость/динамика) висят внешним ключом на складе,
-и терять историю нельзя. «Удалить» = деактивировать (`is_active=false`) — склад
-перестаёт попадать в метрики и отчёты, строки остаются.
-"""
+«Выключить» и «удалить» — разные действия. Закрытый склад выключают: он
+перестаёт попадать в метрики и отчёты, а строки витрины остаются. Удаляют тот,
+которого на самом деле нет (создали ошибочно, 1С прислала дубль). Остатки,
+ёмкость и динамика висят на складе внешним ключом, поэтому склад со строками
+витрины удаляется только по явному `purge=true` — иначе `409` с числом строк,
+а не тихая потеря истории. Если 1С продолжит присылать этот код, склад
+появится снова: справочник складов ведёт 1С, не кабинет."""
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..db import get_db
 from ..deps import require_roles
-from ..models import AuditLog, Role, User, Warehouse
+from ..models import (
+    AuditLog, FactCargoBalance, FactProcessingDynamics, FactWarehouseCapacity, Role,
+    User, UserWarehouseScope, Warehouse,
+)
 from ..schemas import WAREHOUSE_KINDS, WarehouseAdminOut, WarehouseCreate, WarehouseUpdate
 
 router = APIRouter(prefix="/api/admin/warehouses", tags=["admin-warehouses"])
@@ -106,16 +112,40 @@ def update_warehouse(warehouse_id: int, payload: WarehouseUpdate, db: Session = 
     return wh
 
 
-@router.delete("/{warehouse_id}", response_model=WarehouseAdminOut)
-def deactivate_warehouse(warehouse_id: int, db: Session = Depends(get_db),
-                         actor: User = Depends(admin_only)):
-    """Мягкое удаление: склад выключается, факты остаются."""
+@router.delete("/{warehouse_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_warehouse(warehouse_id: int,
+                     purge: bool = Query(False, description="удалить и строки витрины по складу"),
+                     db: Session = Depends(get_db),
+                     actor: User = Depends(admin_only)):
+    """Удалить склад. Выключить — это PATCH c is_active=false (история остаётся)."""
     wh = db.get(Warehouse, warehouse_id)
     if not wh:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Склад не найден")
-    wh.is_active = False
-    db.add(AuditLog(user_id=actor.id, login=actor.login, action="admin.warehouse_deactivate",
-                    detail=f"code={wh.code}"))
+
+    facts = sum(
+        db.scalar(select(func.count()).select_from(model)
+                  .where(model.warehouse_id == warehouse_id)) or 0
+        for model in (FactCargoBalance, FactWarehouseCapacity, FactProcessingDynamics)
+    )
+    if facts and not purge:
+        # то же число, что и в подсказке UI: админ должен решать, глядя на цифру,
+        # а не на общий текст «есть данные»
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"По складу «{wh.code}» {facts} строк статистики. Если склад закрыли — "
+            "снимите его с активности, статистика останется в отчётах. Удаляйте со "
+            "статистикой, если склада не было и данные пришли ошибочно",
+        )
+
+    removed = 0
+    for model in (FactCargoBalance, FactWarehouseCapacity, FactProcessingDynamics):
+        removed += db.query(model).filter(
+            model.warehouse_id == warehouse_id).delete(synchronize_session=False)
+    scopes = db.query(UserWarehouseScope).filter(
+        UserWarehouseScope.warehouse_id == warehouse_id).delete(synchronize_session=False)
+    code = wh.code
+    db.delete(wh)
+    db.add(AuditLog(user_id=actor.id, login=actor.login, action="admin.warehouse_delete",
+                    detail=f"code={code} строк витрины={removed} доступов={scopes}"))
     db.commit()
-    db.refresh(wh)
-    return wh
+    return None

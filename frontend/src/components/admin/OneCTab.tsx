@@ -8,6 +8,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, type OneCTestResult, type SyncRun } from "../../api";
 import { asOf, nf } from "../../format";
+import { DispatcherImport } from "./DispatcherImport";
 import { SettingsForm } from "./SettingsForm";
 import type { AdminSettings } from "./useSettings";
 import { BusyNote, EmptyRow, errText, FormError, Notice, StatusChip, THEAD_ROW, Th, TR } from "./ui";
@@ -165,6 +166,8 @@ export function OneCTab({ settings }: { settings: AdminSettings }) {
           </div>
         )}
       </section>
+
+      <DispatcherImport />
 
       <section className="panel p-4">
         <div className="flex flex-wrap items-baseline justify-between gap-2">

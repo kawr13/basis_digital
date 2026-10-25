@@ -6,21 +6,34 @@
  * проверяет API. Кэшируем на весь сеанс — настройки меняются редко, а запрос копеечный.
  */
 import { useEffect, useState } from "react";
-import { api } from "./api";
+import { api, getAccessToken } from "./api";
+import { authReady } from "./auth";
 
-export type PublicSettings = Record<string, number | string>;
+export type PublicSettings = Record<string, number | string | string[]>;
 
 let cache: PublicSettings | null = null;
 let inflight: Promise<PublicSettings> | null = null;
+const listeners = new Set<() => void>();
+
+/** Подписка на обновление кэша: админ сохранил настройки — шапка и маршруты
+ *  в его же вкладке должны перестроиться без перезагрузки страницы. */
+function emitChange() {
+  for (const l of listeners) l();
+}
 
 export function loadPublicSettings(force = false): Promise<PublicSettings> {
   if (cache && !force) return Promise.resolve(cache);
   if (!inflight) {
-    inflight = api
-      .publicSettings()
+    inflight = (async () => {
+      // access-токена ещё нет (страница только что встала) — дождёмся бутстрапа
+      // сессии, иначе запрос уйдёт без заголовка и нарисует в консоли 401
+      if (!getAccessToken()) await authReady;
+      return api.publicSettings();
+    })()
       .then((s) => {
         cache = s;
         inflight = null;
+        emitChange();
         return s;
       })
       .catch((e) => {
@@ -38,19 +51,25 @@ export function cachedSettings(): PublicSettings | null {
 export function usePublicSettings(): PublicSettings | null {
   const [settings, setSettings] = useState<PublicSettings | null>(cache);
   useEffect(() => {
-    if (cache) {
-      setSettings(cache);
-      return;
-    }
-    let alive = true;
-    loadPublicSettings()
-      .then((s) => alive && setSettings(s))
-      .catch(() => undefined);
+    // подписка обязательна: кэш может обновиться в середине жизни вкладки
+    // (админ сохранил настройки) — иначе шапка будет ходить за бэком на шаг
+    const update = () => setSettings(cache);
+    listeners.add(update);
+    if (!cache) loadPublicSettings().catch(() => undefined);
     return () => {
-      alive = false;
+      listeners.delete(update);
     };
   }, []);
   return settings;
+}
+
+/** Разделы кабинета, которые админ скрыл для всех (настройка ui.hidden_sections).
+ *  Настройка недоступна или пуста — ничего не прячем: рисовать пустую шапку
+ *  из-за мигнувшего запроса неправильно. */
+export function hiddenSections(settings: PublicSettings | null): Set<string> {
+  const raw = settings?.["ui.hidden_sections"];
+  if (!Array.isArray(raw)) return new Set();
+  return new Set(raw.map(String));
 }
 
 /** Роль в списке из настройки вида «admin,top». Если настройки нет — не запрещаем:

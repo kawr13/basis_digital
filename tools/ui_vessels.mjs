@@ -6,6 +6,7 @@
  * Запуск: PW_CHROMIUM=<путь к chrome> [BASE=...] [PASS=...] node tools/ui_vessels.mjs
  */
 import { chromium } from "playwright-core";
+import { readFileSync } from "node:fs";
 
 const BASE = process.env.BASE || "http://localhost:5173";
 const API = process.env.API || "http://127.0.0.1:8000";
@@ -35,8 +36,10 @@ const login = async (page, who, pass, attempt = 0) => {
   await page.fill("input[autocomplete=username]", who);
   await page.fill("input[autocomplete=current-password]", pass);
   await page.click("button.btn-primary");
+  // «живой» индикатор в шапке живёт только на витрине складов, поэтому ждём
+  // универсального признака авторизованного кабинета — кнопки «Выйти».
   const entered = await page
-    .waitForSelector("[data-live]", { timeout: 15000 })
+    .waitForSelector("button:has-text('Выйти')", { timeout: 15000 })
     .then(() => true)
     .catch(() => false);
   if (!entered) {
@@ -284,10 +287,12 @@ ok(fitErr.includes("длина причала 120 м"), `судно длинне
 await page.click("[data-modal='placement-form'] [data-admin-action='close-modal']");
 await page.waitForSelector("[data-modal='placement-form']", { state: "detached" });
 
-// ────────────────────────────────── PDF / печать ──────────────────────────────────
+// ──────────────────────────────────────── PDF ──────────────────────────────────
+// Лист рисует бэкенд, браузер его только качает. Значит, проверяем два: какой
+// кусок плана уехал на сервер (он обязан равняться видимому кадру) и что назад
+// прилетел настоящий файл, а не страница кабинета.
 const pdfBtn = page.locator("[data-admin-action='export-pdf']");
 ok((await pdfBtn.count()) === 1, "кнопка «⤓ PDF» на месте");
-await page.evaluate(() => { window.print = () => {}; });   // диалог в headless не открываем
 
 // сдвигаем кадр: в PDF должно уйти ровно то, что видно, а не весь период
 await page.evaluate(() => {
@@ -308,57 +313,48 @@ const frame = await page.evaluate(() => {
 });
 ok(frame.days.length < frame.totalDays, `кадр меньше периода: видно ${frame.days.length} сут из ${frame.totalDays}`);
 
-await pdfBtn.click();
-await page.waitForTimeout(500);
-const sheet = await page.evaluate(() => {
-  const s = document.querySelector(".vp-print-sheet");
-  return {
-    days: [...s.querySelectorAll("[data-print-day]")].map((d) => d.dataset.printDay),
-    fields: [...s.querySelectorAll("[data-print-field]")].map((n) => Number(n.dataset.printField)),
-    bars: [...s.querySelectorAll("[data-print-bar]")].map((b) => b.dataset.berth),
-  };
+// ответ задерживаем намеренно: кнопка обязана стать неактивной, пока файл летит,
+// иначе диспетчер нажмёт «⤓ PDF» десять раз и десять раз пойдёт в бэкенд
+await page.route((url) => url.pathname.endsWith("/api/vessels/plan.pdf"), async (route) => {
+  await new Promise((r) => setTimeout(r, 500));
+  await route.continue();
 });
-ok(sheet.days.length > 0 && sheet.days.length < frame.totalDays,
-   `в PDF только видимые сутки: ${sheet.days.length} из ${frame.totalDays} (${sheet.days[0]} … ${sheet.at === undefined ? sheet.days[sheet.days.length - 1] : ""})`);
-ok(sheet.days.every((d) => frame.days.includes(d)), "суток за кадром в PDF нет");
-ok(JSON.stringify([...sheet.fields].sort()) === JSON.stringify([...frame.berthIds].sort()),
-   `в PDF только причалы из кадра: ${sheet.fields.join(", ")}`);
-ok(sheet.bars.every((code) => code), `полосы в листе на своих причалах: ${[...new Set(sheet.bars)].join(", ")}`);
 
-await page.emulateMedia({ media: "print" });
-await page.waitForTimeout(400);
-const printStyle = await page.evaluate(() => ({
-  header: getComputedStyle(document.querySelector("header.glass-navy")).display,
-  toolbar: getComputedStyle(document.querySelector("[data-vessels-toolbar]")).display,
-  grid: getComputedStyle(document.querySelector("[data-vp-grid]")).display,
-  sheet: getComputedStyle(document.querySelector(".vp-print-only")).display,
-}));
-ok(printStyle.header === "none" && printStyle.toolbar === "none",
-   "в PDF не уедут шапка кабинета и панель управления");
-ok(printStyle.grid === "none" && printStyle.sheet === "block",
-   "в PDF идёт отдельный лист с видимой областью, а не экранная сетка целиком");
+const resPromise = page.waitForResponse((r) => r.url().includes("/api/vessels/plan.pdf"));
+const dlPromise = page.waitForEvent("download");
+await pdfBtn.click();
+ok(await pdfBtn.isDisabled(), "пока PDF летит, кнопка неактивна и повторный клик не пройдёт");
+const pdfRes = await resPromise;
+const download = await dlPromise;
 
-// лист обязан влезать в любую бумагу: его ширины — проценты, а не пиксели.
-// пиксельный лист на A4 расползался на три страницы по горизонтали
-for (const [paper, w] of [["A3 landscape", 1527], ["A4 landscape", 1047], ["A4 portrait", 700]]) {
-  await page.setViewportSize({ width: w, height: 700 });
-  await page.waitForTimeout(350);
-  const fit = await page.evaluate(() => {
-    const s = document.querySelector(".vp-print-sheet");
-    const days = [...s.querySelectorAll("[data-print-day]")];
-    const last = days[days.length - 1].getBoundingClientRect();
-    return {
-      right: Math.round(s.getBoundingClientRect().right),
-      lastRight: Math.round(last.right),
-      overflow: Math.round(s.scrollWidth - s.clientWidth),
-      days: days.length,
-    };
-  });
-  ok(fit.lastRight <= fit.right + 1 && fit.overflow <= 1,
-     `лист прижат к ширине страницы (${paper}): ${fit.days} сут, край ${fit.lastRight} из ${fit.right}`);
-}
-await page.setViewportSize({ width: 1500, height: 950 });
-await page.emulateMedia({ media: "screen" });
+const q = new URL(pdfRes.url()).searchParams;
+const askedDays = Number(q.get("day_to")) - Number(q.get("day_from")) + 1;
+ok(askedDays === frame.days.length,
+   `на сервер ушли только видимые сутки: ${askedDays} из ${frame.totalDays} (${frame.days[0]} … ${frame.days[frame.days.length - 1]})`);
+const askedBerths = (q.get("berth_ids") || "").split(",").filter(Boolean).map(Number);
+ok(askedBerths.length > 0 && askedBerths.length === frame.berthIds.length
+   && askedBerths.every((id) => frame.berthIds.includes(id)),
+   `на сервер ушли причалы из кадра: ${askedBerths.join(", ")} (в кадре ${frame.berthIds.join(", ")})`);
+
+// тело ответа браузер уже отдал загрузке, поэтому смотрим на сам сохранённый
+// файл: это ровно то, что диспетчер увидит на диске
+const savedPath = await download.path();
+const file = savedPath ? readFileSync(savedPath) : Buffer.alloc(0);
+ok(pdfRes.status() === 200 && file.subarray(0, 5).toString("latin1") === "%PDF-" && file.length > 2000,
+   `браузер сохранил настоящий PDF, а не страницу кабинета: ${file.length} байт`);
+ok((pdfRes.headers()["content-type"] || "").startsWith("application/pdf"), "ответ помечен как application/pdf");
+ok(/attachment/.test(pdfRes.headers()["content-disposition"] || ""), "файл уходит как вложение, а не открывается во вкладке");
+
+const name = await download.suggestedFilename();
+ok(/^план_постановки_\d{4}-\d{2}-\d{2}_\d{4}-\d{2}-\d{2}\.pdf$/.test(name),
+   `файл назван по видимому окну, а не по периоду: ${name}`);
+
+await page.waitForSelector("[data-saved-note]");
+ok(true, "после выгрузки показана плашка «PDF готов»");
+await page.waitForTimeout(600);
+ok(!(await pdfBtn.isDisabled()), "PDF дошёл — кнопка снова работает: следующий кусок берут этим же кадром");
+await page.unroute((url) => url.pathname.endsWith("/api/vessels/plan.pdf"));
+
 await page.evaluate(() => { const g = document.querySelector("[data-vp-grid]"); g.scrollLeft = 0; g.scrollTop = 0; });
 await page.waitForTimeout(400);
 
@@ -532,6 +528,9 @@ await page.click("[data-nav='vessels']");
 await page.waitForSelector("[data-vessels-page]");
 ok((await page.locator("[data-admin-action='new-placement']").count()) === 0,
    "менеджер не видит кнопку «Новая постановка»");
+// план грузится асинхронно: без ожидания полос проверка «менеджер план видит»
+// выигрывает гонку у первого ответа API и падает на ровном месте
+await page.waitForSelector("[data-vp-bar]", { timeout: 8000 }).catch(() => undefined);
 ok((await page.locator("[data-vp-bar]").count()) > 0, "менеджер план видит");
 const hint = (await page.textContent("[data-vessels-page]")) || "";
 ok(hint.includes("ставят и правят") && hint.includes("топ-менеджмент"),

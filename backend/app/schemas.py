@@ -314,6 +314,12 @@ class PlacementIn(BaseModel):
     note: str | None = Field(default=None, max_length=1000)
     starts_at: datetime
     ends_at: datetime
+    # перешвартовка: копия, созданная из этой постановки (стрелка на фронте)
+    moved_from_id: int | None = None
+    # судно сейчас на другом терминале (красная рамка); без флага — в проливе
+    at_other_terminal: bool = False
+    # цвет полосы вручную; пусто — автоматом по грузу
+    color: str | None = Field(default=None, pattern=r"^#[0-9a-fA-F]{6}$")
 
 
 class PlacementUpdate(BaseModel):
@@ -327,6 +333,8 @@ class PlacementUpdate(BaseModel):
     note: str | None = Field(default=None, max_length=1000)
     starts_at: datetime | None = None
     ends_at: datetime | None = None
+    at_other_terminal: bool | None = None
+    color: str | None = Field(default=None, pattern=r"^#[0-9a-fA-F]{6}$")
 
 
 class PlacementOut(BaseModel):
@@ -343,5 +351,12 @@ class PlacementOut(BaseModel):
     note: str | None
     starts_at: datetime
     ends_at: datetime
+    moved_from_id: int | None
+    at_other_terminal: bool
+    color: str | None
+    # «действительный» вид при чтении (в БД не хранится): дата перестановки
+    # наступила — копия обычная (committed), оригинал обрывается на старте копии
+    committed: bool = False
+    effective_ends_at: datetime | None = None
     created_at: datetime
     updated_at: datetime

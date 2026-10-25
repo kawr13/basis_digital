@@ -60,6 +60,10 @@ await page.goto(`${BASE}/login`, { waitUntil: "networkidle" });
 await page.fill("input[autocomplete=username]", "admin");
 await page.fill("input[autocomplete=current-password]", PASS);
 await page.click("button.btn-primary");
+await page.waitForSelector("button:has-text('Выйти')", { timeout: 15000 });
+
+// «Статистика» стала главной страницей, витрина складов 1С — на вкладке «Склады 1С».
+await page.goto(`${BASE}/warehouses`, { waitUntil: "networkidle" });
 await page.waitForSelector("[data-live]", { timeout: 15000 });
 
 // --- 1. чип живого статуса на месте -----------------------------------------

@@ -34,6 +34,23 @@ const loginRes = await fetch(`${API}/api/auth/login`, {
   body: JSON.stringify({ login: ADMIN_LOGIN, password: PASS }),
 });
 const tok = (await loginRes.json()).access_token;
+// прямой запрос нужен, чтобы проверять состояние после удаления не только глазами UI
+const apiGet = async (path) =>
+  (await fetch(`${API}${path}`, { headers: { Authorization: `Bearer ${tok}` } })).json();
+const apiSend = async (method, path, body) => {
+  const res = await fetch(`${API}${path}`, {
+    method,
+    headers: { Authorization: `Bearer ${tok}`, "Content-Type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const text = await res.text();
+  if (!res.ok) throw new Error(`${method} ${path} → ${res.status}: ${text}`);
+  return text ? JSON.parse(text) : null;
+};
+const dayIso = (offset) => {
+  const d = new Date(Date.now() + offset * 86400_000);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+};
 
 // ru-RU разделяет разряды неразрывным пробелом — в проверках нормализуем
 const norm = (s) => (s || "").replace(/\u00a0|\u202f/g, " ").replace(/\s+/g, " ");
@@ -190,6 +207,20 @@ await page.waitForFunction(
 ).catch(() => {});
 ok(((await page.textContent(`tr[data-user="${NEW_LOGIN}"]`)) || "").includes("Переименованный"), "правка ФИО сохранилась");
 
+// ------------------------------------------- удаление учётки, а не выключение ---
+await row.locator('[data-admin-action="delete-user-ask"]').click();
+await row.locator('[data-admin-action="delete-user"]').click();
+await page.waitForFunction(
+  (sel) => !document.querySelector(sel),
+  `tr[data-user="${NEW_LOGIN}"]`,
+  { timeout: 8000 },
+);
+ok(true, "«Удалить» убирает учётку из списка, а не переводит её в «отключён»");
+const delNote = norm(await page.textContent("[data-notice]"));
+ok(/без автора/.test(delNote), `удаление честно говорит про историю: «${delNote}»`);
+ok(!(await apiGet("/api/admin/users")).some((u) => u.login === NEW_LOGIN),
+   "учётки нет и в ответе API — удаление настоящее");
+
 // ------------------------------------------------------------------- склады ---
 await page.click('[data-tab="warehouses"]');
 await page.waitForSelector('[data-tab-panel="warehouses"]');
@@ -220,10 +251,41 @@ await page.waitForFunction(
   NEW_WH,
   { timeout: 8000 },
 );
-ok(true, "склад отключён вместо удаления (история сохраняется)");
+ok(true, "«Отключить» выключает склад: он уходит из метрик, но остаётся в справочнике");
 await whRow.locator('[data-admin-action="enable-warehouse"]').click();
 await page.waitForTimeout(600);
 ok(((await whRow.textContent()) || "").includes("активен"), "склад снова активен");
+
+// ---------------------------------- удаление склада: пустой и со статистикой ---
+await whRow.locator('[data-admin-action="delete-warehouse-ask"]').click();
+await whRow.locator('[data-admin-action="delete-warehouse"]').click();
+await page.waitForFunction(
+  (code) => !document.querySelector(`tr[data-warehouse-code="${code}"]`),
+  NEW_WH,
+  { timeout: 8000 },
+);
+ok(true, "склад без статистики удалён из справочника");
+
+// склад, по которому есть витрина, молча не удаляется: иначе из отчётов исчезнут строки
+const balance = await apiGet("/api/metrics/cargo-balance");
+const withFacts = (balance.rows || [])[0];
+if (withFacts) {
+  const factCode = (await apiGet("/api/admin/warehouses")).find(
+    (w) => w.id === withFacts.warehouse_id)?.code;
+  const factRow = page.locator(`tr[data-warehouse-code="${factCode}"]`);
+  await factRow.locator('[data-admin-action="delete-warehouse-ask"]').click();
+  await factRow.locator('[data-admin-action="delete-warehouse"]').click();
+  await page.waitForSelector("[data-form-error]", { timeout: 8000 });
+  const refuse = norm(await page.textContent("[data-form-error]"));
+  ok(/строк статистики/.test(refuse), `склад со статистикой не удалили молча: «${refuse}»`);
+  ok((await factRow.locator('[data-admin-action="purge-warehouse"]').count()) === 1,
+     "предложили осознанный второй шаг — «удалить со статистикой»");
+  await factRow.locator('[data-admin-action="cancel"]').last().click();
+  ok((await page.locator(`tr[data-warehouse-code="${factCode}"]`).count()) === 1,
+     "отказ ничего не удалил: склад на месте");
+} else {
+  ok(false, "в витрине нет ни одного склада — проверка «не удалять со статистикой» не выполнена");
+}
 await page.screenshot({ path: "shot_admin_warehouses.png", fullPage: true });
 
 // --------------------------------------------------------------- причалы ---
@@ -290,13 +352,27 @@ await page.waitForFunction(
   NEW_BERTH, { timeout: 8000 },
 );
 ok(true, "пустой причал удалён из справочника");
-// а причал с постановками удалить нельзя — только снять с линии
-const busyRow = page.locator("tr[data-berth-code='РП-1']");
+// а причал с постановками удалить нельзя — только снять с линии. Причал и
+// постановку заводим сами: на чистой базе у типовых РП-1…РП-6 истории нет, и
+// проверка проверяла бы пустое место
+const busyCode = `QB-${stamp.slice(-5)}`.toUpperCase();
+const busyBerth = await apiSend("POST", "/api/vessels/berths", { code: busyCode, length_m: 100 });
+const busyPlacement = await apiSend("POST", "/api/vessels/placements", {
+  berth_id: busyBerth.id, vessel: "QA BUSY SHIP", length_m: 50, offset_m: 0,
+  starts_at: `${dayIso(1)}T06:00:00`, ends_at: `${dayIso(2)}T12:00:00`,
+});
+await page.reload({ waitUntil: "networkidle" });
+await page.click('[data-tab="berths"]');
+await page.waitForSelector(`tr[data-berth-code="${busyCode}"]`, { timeout: 8000 });
+const busyRow = page.locator(`tr[data-berth-code="${busyCode}"]`);
 await busyRow.locator('[data-admin-action="delete-berth-ask"]').click();
 await busyRow.locator('[data-admin-action="delete-berth"]').click();
 await page.waitForSelector("[data-tab-panel='berths'] [role=alert], [data-tab-panel='berths'] [data-form-error], [data-tab-panel='berths'] .text-crit", { timeout: 8000 });
 const delErr = (await page.textContent("[data-tab-panel='berths']")).toLowerCase();
 ok(delErr.includes("снимите его с линии"), "причал с историей удалять не дали — предложили снять с линии");
+// убираем за собой, иначе следующий прогон упрётся в дубль кода
+await apiSend("DELETE", `/api/vessels/placements/${busyPlacement.id}`);
+await apiSend("DELETE", `/api/vessels/berths/${busyBerth.id}`);
 await page.screenshot({ path: "shot_admin_berths.png", fullPage: true });
 
 // ------------------------------------------------------- 1С: проверка и загрузка ---
