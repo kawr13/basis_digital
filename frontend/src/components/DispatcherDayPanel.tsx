@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { api, type DispatcherDay } from "../api";
-import { dayFull, nf, pct } from "../format";
+import { dayFull, dmyhm, nf, pct } from "../format";
 
 /**
  * Панель детализации суток по отчёту диспетчера: что происходило в порту
@@ -257,7 +257,7 @@ export function DispatcherDayPanel({
                       <span className="text-ink-300"> · {a.berth} · {a.cargo_group}</span>
                     </span>
                     <span className="num shrink-0 text-ink-300">
-                      {a.eta ? new Date(a.eta).toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }) : "—"}{" "}
+                      {a.eta ? dmyhm(a.eta) : "—"}{" "}
                       · {a.plan_raw || "—"}
                     </span>
                   </li>

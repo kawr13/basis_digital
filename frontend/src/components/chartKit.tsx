@@ -53,16 +53,30 @@ export const reducedMotion = () =>
   typeof window !== "undefined" &&
   window.matchMedia?.("(prefers-reduced-motion: reduce)").matches === true;
 
-/** Ширина контейнера: графики перерисовываются при resize плашки. */
+/** Ширина контейнера: графики перерисовываются при resize плашки.
+
+ * ПОЧЕМУ ЗДЕСЬ (замер `tools/ui_perf.mjs`, TASKS.md п.8): раньше ширину читали
+ * `el.clientWidth` и в момент маунта, и в каждом колбэке ResizeObserver. Чтение
+ * `clientWidth` — это принудительная раскладка ВСЕЙ страницы, а наблюдатель
+ * срабатывает на каждое изменение размера плашки, то есть на каждой перерисовке
+ * графика: 22 графика × принудительный layout = 69 мс главного потока. Из записи
+ * наблюдателя ширину берём бесплатно — браузер её уже посчитал.
+ */
 export function useSize<T extends HTMLElement>(min = 240) {
   const ref = useRef<T>(null);
   const [width, setWidth] = useState(720);
   useLayoutEffect(() => {
     const el = ref.current;
     if (!el) return;
-    const apply = () => setWidth(Math.max(min, el.clientWidth));
-    apply();
-    const ro = new ResizeObserver(apply);
+    // Первое измерение — синхронное: с отложенным графики рисовали бы первый кадр
+    // в ширину по умолчанию, и было бы видно, как они «усаживаются» в размер.
+    setWidth(Math.max(min, el.clientWidth));
+    const ro = new ResizeObserver((entries) => {
+      const w = entries[entries.length - 1]?.contentRect.width ?? 0;
+      // 0 — значит контейнер скрыт (display:none, пропущенная content-visibility);
+      // прошлое значение лучше, чем график шириной в ноль
+      if (w > 0) setWidth(Math.max(min, w));
+    });
     ro.observe(el);
     return () => ro.disconnect();
   }, [min]);

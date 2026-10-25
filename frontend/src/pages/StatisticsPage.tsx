@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState, useTransition } from "react";
 import {
   api,
   type DispatcherMeta,
@@ -16,7 +16,7 @@ import {
 } from "../components/charts";
 import { KpiCard } from "../components/KpiCard";
 import { mergeLayout, WidgetGrid, type WidgetDef } from "../components/WidgetGrid";
-import { asOf, dayLabel, dmy, nf } from "../format";
+import { asOf, dayLabel, dmy, dmyhm, nf } from "../format";
 import { CHART } from "../components/chartKit";
 
 /**
@@ -95,6 +95,14 @@ export default function StatisticsPage() {
   const [mode, setMode] = useState<Mode>("detailed");
   // клик по графику → таблица строк витрины, из которых он посчитан
   const [rowsQuery, setRowsQuery] = useState<{ kind: DispatcherRowKind; key: string | null } | null>(null);
+  // ПОЧЕМУ ЗДЕСЬ (TASKS.md, п.8). Тяжёлое на странице — 34 плашки, которые
+  // пересобираются из одного ответа overview: по профилю это ~200 мс в одной задаче.
+  // `startTransition` помечает такие обновления прерываемыми, а `useDeferredValue`
+  // отдаёт графикам данные на шаг позже остальной страницы — панель периода и шапка
+  // реагируют на клик сразу, тяжёлая часть дорисовывается следом.
+  const [, startRender] = useTransition();
+  const chartData = useDeferredValue(data);
+
   const saveTimer = useRef<number | undefined>(undefined);
 
   // ---- раскладка (та же механика, что на дашборде: порядок и размеры — на человеке)
@@ -138,16 +146,23 @@ export default function StatisticsPage() {
       if (!quiet) setBusy(true);
       try {
         const ov = await api.dispatcherOverview({ from: period?.from, to: period?.to, shift });
-        setData(ov);
+        // ПОЧЕМУ ЗДЕСЬ: ответ overview — единственный триггер перерисовки всех 34
+        // плашек. Без перехода это одна задача главному потоку на 200+ мс, и до неё
+        // не успевают дорисоваться ни шапка, ни панель периода. `busy` снимаем в том
+        // же переходе: снятый сразу, он на кадр показал бы «Нет данных» (ниже по
+        // разметке условие !busy && !data).
+        startRender(() => {
+          setData(ov);
+          setError("");
+          if (!quiet) setBusy(false);
+        });
         if (!period) setPeriod({ from: ov.period.from, to: ov.period.to });
-        setError("");
       } catch (e) {
         setError(e instanceof Error ? e.message : "Не удалось загрузить статистику");
-      } finally {
         if (!quiet) setBusy(false);
       }
     },
-    [period, shift],
+    [period, shift, startRender],
   );
 
   useEffect(() => {
@@ -221,17 +236,23 @@ export default function StatisticsPage() {
     setRowsQuery((cur) => (cur && cur.kind === kind && cur.key === key ? null : { kind, key }));
   }, []);
 
-  const chooseMode = useCallback((next: Mode) => {
-    setMode(next);
-    api.savePreference(MODE_KEY, next).catch(() => undefined);
-  }, []);
+  const chooseMode = useCallback(
+    (next: Mode) => {
+      // ПОЧЕМУ ЗДЕСЬ: переключение режима — это ±4 блока и перестройка всей сетки;
+      // переходом оно перестаёт блокировать нажатие по кнопке.
+      startRender(() => setMode(next));
+      api.savePreference(MODE_KEY, next).catch(() => undefined);
+    },
+    [startRender],
+  );
 
   const defs = useMemo<WidgetDef[]>(
     () =>
-      buildWidgets(data, selectedDay, selectDay, openRows).filter((w) =>
+      buildWidgets(chartData, selectedDay, selectDay, openRows).filter((w) =>
         mode === "detailed" ? !LITE_ONLY.has(w.id) : !LITE_HIDE.has(w.id),
       ),
-    [data, selectedDay, selectDay, mode, openRows],
+    // chartData, а не data: отложенное значение здесь читают именно тяжёлые графики
+    [chartData, selectedDay, selectDay, mode, openRows],
   );
 
   const presets = [7, 14, 30, 90];
@@ -1104,7 +1125,7 @@ function buildWidgets(
             {(data?.arrivals ?? []).slice(0, 40).map((a, i) => (
               <Tr key={`${a.vessel}-${a.eta}-${i}`}>
                 <Td className="text-ink-300" title={a.eta ?? ""}>
-                  {a.eta ? new Date(a.eta).toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }) : "—"}
+                  {a.eta ? dmyhm(a.eta) : "—"}
                 </Td>
                 <Td className="text-ink-100">{a.vessel}</Td>
                 <Td>{a.berth || "—"}</Td>
