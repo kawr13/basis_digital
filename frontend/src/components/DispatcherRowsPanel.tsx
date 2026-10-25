@@ -7,8 +7,9 @@ import { dmy, nf } from "../format";
  *
  * Открывается кликом по любому графику страницы «Статистика». Колонки описывает
  * бэкенд (`/api/dispatcher/rows`), поэтому таблица на экране и цифры на графике
- * физически из одного источника. Отсюда же выгрузка CSV — диспетчеру часто
- * нужен именно список, а не картинка.
+ * физически из одного источника. Экран показывает страницу (`limit` строк), а
+ * CSV пишет тот же бэкенд (`/api/dispatcher/rows.csv`) и без лимита: выгрузка
+ * не обязана зависеть от того, сколько диспетчер успел доскроллить.
  */
 export function DispatcherRowsPanel({
   kind, rowKey, from, to, shift, onClose,
@@ -22,6 +23,7 @@ export function DispatcherRowsPanel({
 }) {
   const [data, setData] = useState<DispatcherRowsResult | null>(null);
   const [error, setError] = useState("");
+  const [csvBusy, setCsvBusy] = useState(false);
   const ref = useRef<HTMLElement>(null);
 
   useEffect(() => {
@@ -46,25 +48,18 @@ export function DispatcherRowsPanel({
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
-  /** CSV как в отчётах: `;`, десятичная запятая, BOM — открывается в Excel. */
-  const exportCsv = () => {
-    if (!data) return;
-    const head = data.columns.map((c) => c.label).join(";");
-    const body = data.rows.map((r) =>
-      data.columns
-        .map((c) => {
-          const v = r[c.key];
-          if (v === null || v === undefined) return "";
-          return typeof v === "number" ? nf(v, 2).replace(/\s/g, "").replace(".", ",") : String(v);
-        })
-        .join(";"),
-    );
-    const blob = new Blob(["\ufeff" + [head, ...body].join("\r\n")], { type: "text/csv;charset=utf-8" });
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = `${data.kind}${rowKey ? `-${rowKey}` : ""}-${from}_${to}.csv`;
-    a.click();
-    URL.revokeObjectURL(a.href);
+  /** CSV: файл собирает бэкенд, поэтому в нём весь период, а не экран. */
+  const exportCsv = async () => {
+    if (!data || csvBusy) return;
+    setCsvBusy(true);
+    try {
+      await api.dispatcherRowsCsv({ from, to, shift, kind, key: rowKey ?? undefined });
+      setError("");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Не удалось выгрузить CSV");
+    } finally {
+      setCsvBusy(false);
+    }
   };
 
   const cell = (v: string | number | null) => {
@@ -90,13 +85,17 @@ export function DispatcherRowsPanel({
           <div className="mt-0.5 text-[11px] text-ink-300 num">
             {dmy(from)} — {dmy(to)}
             {shift && shift !== "all" ? ` · смена ${shift === "08-20" ? "08–20" : "20–08"}` : " · все смены"}
-            {data ? ` · строк: ${nf(data.rows.length, 0)}` : ""}
+            {data
+              ? data.truncated
+                ? ` · показаны первые ${nf(data.rows.length, 0)} из ${nf(data.total, 0)}`
+                : ` · строк: ${nf(data.total, 0)}`
+              : ""}
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-2">
-          <button className="btn-ghost text-xs" onClick={exportCsv} disabled={!data?.rows.length}
-                  data-rows-csv>
-            CSV
+          <button className="btn-ghost text-xs" onClick={exportCsv}
+                  disabled={!data?.rows.length || csvBusy} data-rows-csv>
+            {csvBusy ? "Выгружаем…" : "CSV"}
           </button>
           <button className="btn-ghost text-xs" onClick={onClose} data-rows-close>
             Закрыть
@@ -152,6 +151,9 @@ export function DispatcherRowsPanel({
       <p className="mt-3 text-[11px] leading-relaxed text-ink-300">
         Это строки витрины «Отчёт диспетчера», из которых посчитан график. Период и фильтр смены
         те же, что на странице.
+        {data?.truncated
+          ? " На экране — первые строки, в файле CSV с сервера — весь период."
+          : ""}
       </p>
     </aside>
   );

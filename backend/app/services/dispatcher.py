@@ -725,8 +725,16 @@ ARRIVAL_COLS = [
 
 
 def detail_rows(db: Session, date_from: date, date_to: date, shift: str | None,
-                kind: str, key: str | None = None) -> dict:
-    """Строки витрины за период по измерению графика (для клика по бару)."""
+                kind: str, key: str | None = None, *,
+                limit: int | None = None, offset: int = 0) -> dict:
+    """Строки витрины за период по измерению графика (для клика по бару).
+
+    `limit`/`offset` — страница экрана: до неё урезается `rows`, а `total` и
+    `totals` считаются по всей выборке, чтобы «итого» под таблицей оставалось
+    итогом графика, а не тем, что влезло в окно. `limit=None` — вся выборка;
+    так отдаёт файл `GET /api/dispatcher/rows.csv`, который обязан быть полнее
+    того, что пользователь видит на экране.
+    """
     if kind not in ROW_KINDS:
         raise ValueError(f"неизвестный разрез: {kind}")
     rows = load_rows(db, date_from, date_to, shift)
@@ -816,16 +824,32 @@ def detail_rows(db: Session, date_from: date, date_to: date, shift: str | None,
         } for p in rows.platforms if not needle or p.owner.lower() == needle]
         title = f"Платформы аренды{'' if not needle else ' · ' + key}"
 
-    # итог по числовым колонкам — таблица без него нечитаемая
+    # итог по числовым колонкам — таблица без него нечитаемая; считаем по всей
+    # выборке, до лимита: панель — детализация графика, её итог обязан равняться
+    # числу на баре, а не сумме видимых строк
     totals: dict[str, float | None] = {}
     for c in cols:
         if not c.get("right") or c.get("sum") is False:
             continue
         vals = [r[c["key"]] for r in out_rows if isinstance(r.get(c["key"]), (int, float))]
         totals[c["key"]] = _r(sum(vals), 0) if vals else None
+
+    # Лимит — в самом конце, на готовом списке, а не в SQL. Строки разреза
+    # приходят из того же `load_rows`, что и графики (иначе цифры панели и
+    # баров разъехались бы), а фильтр ключа живёт в Python: груз подписывается
+    # через `names.label`, вагоны «ВЫВОД» и «ВВОД» склеиваются из двух таблиц и
+    # сортируются уже после склейки. `COUNT(*)`, положенный в SQL, считался бы
+    # по другому условию, чем экран, и `total` врал бы о числе строк таблицы.
+    # Порядок строк при этом не меняется — срез берёт готовый список.
+    total = len(out_rows)
+    start = max(0, offset)
+    page = out_rows[start:] if limit is None else out_rows[start:start + limit]
     return {
         "kind": kind, "key": key, "title": title, "columns": cols,
-        "rows": out_rows, "totals": totals,
+        "rows": page, "total": total,
+        # впереди ещё строки: по этому флагу фронт пишет «показаны первые N из M»
+        "truncated": start + len(page) < total,
+        "totals": totals,
         "period": {"from": date_from, "to": date_to, "shift": shift},
     }
 

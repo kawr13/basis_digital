@@ -5,8 +5,6 @@
 """
 from __future__ import annotations
 
-import csv
-import io
 from datetime import date
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
@@ -19,6 +17,7 @@ from ..models import User, Warehouse
 from ..services import metrics as q
 from ..services import app_settings
 from ..services import reports as r
+from .csv_export import to_csv_response
 
 router = APIRouter(prefix="/api/reports", tags=["reports"])
 
@@ -48,19 +47,12 @@ def _scope(db: Session, user: User, warehouses: str | None) -> list[int]:
 # ------------------------------------------------------------------ CSV ----
 
 def _to_csv(headers: list[str], rows: list[list[object]]) -> Response:
-    """CSV для русскоязычного Excel: разделитель «;», десятичный «,», BOM в начале."""
-    buf = io.StringIO()
-    writer = csv.writer(buf, delimiter=";", lineterminator="\r\n")
-    writer.writerow(headers)
-    for row in rows:
-        writer.writerow([
-            f"{v:.1f}".replace(".", ",") if isinstance(v, float) else v for v in row
-        ])
-    return Response(
-        content="\ufeff" + buf.getvalue(),
-        media_type="text/csv; charset=utf-8",
-        headers={"Content-Disposition": 'attachment; filename="report.csv"'},
-    )
+    """CSV для русскоязычного Excel: `;`, десятичный «,», BOM в начале.
+
+    Сам писатель — в `csv_export`: тот же формат обязана отдавать и выгрузка
+    строк «Статистики», иначе две кнопки «CSV» в кабинете давали бы разные файлы.
+    """
+    return to_csv_response(headers, rows, "report.csv")
 
 
 def _fmt_dt(value) -> str:

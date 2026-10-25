@@ -13,6 +13,11 @@
 файла, а страницу перерисовывают чаще, чем кто-то успевает их изменить.
 Поэтому `/meta`, `/overview` и `/rows` отдают собранный payload из
 `services/data_cache` (байты + ETag), а не пересчитывают его на каждый запрос.
+`/rows.csv` из этого списка исключён намеренно: файл генерируют редко, а
+протухшая выгрузка хуже медленной — её отдадут в бухгалтерию цифрами, которых в
+витрине уже нет.
+Ключ кэша `/rows` обязан включать `limit`/`offset`: вторая страница дриллдауна
+не имеет права получать байты первой.
 """
 from __future__ import annotations
 
@@ -38,6 +43,7 @@ from ..onec.dispatcher_xlsm import describe, parse_workbook
 from ..services import app_settings
 from ..services import data_cache
 from ..services import dispatcher as svc
+from .csv_export import to_csv_response
 
 router = APIRouter(prefix="/api/dispatcher", tags=["dispatcher"])
 admin_router = APIRouter(prefix="/api/admin/dispatcher", tags=["dispatcher-admin"])
@@ -48,6 +54,13 @@ admin_router = APIRouter(prefix="/api/admin/dispatcher", tags=["dispatcher-admin
 # Дорогое здесь не проверка, а тело ответа, поэтому к `no-cache` приложен ETag:
 # при неизменных данных браузер получает 304 без тела вместо 700 КБ JSON.
 CACHE_CONTROL = "private, no-cache"
+
+# Дриллдаун обязан отдавать страницу, а не всю выборку: 31 сутки порта — это
+# ~160 КБ JSON, год — ~1,9 МБ, а читают таблицу глазами по первым строкам.
+# Лимит щедрый специально: срезанная страница не должна выглядеть как полная
+# выборка — за всем периодом адресован `/rows.csv`, а не экран.
+ROWS_LIMIT_DEFAULT = 500
+ROWS_LIMIT_MAX = 2000
 
 
 def _bounds(db: Session) -> tuple[date | None, date | None]:
@@ -230,20 +243,67 @@ def rows_view(request: Request,
               kind: str = Query(..., pattern="^(vessel|berth|cargo|rail_cargo|truck_cargo|"
                                              "station|rail_move|platform)$"),
               key: str | None = Query(default=None, max_length=120),
+              limit: int = Query(default=ROWS_LIMIT_DEFAULT, ge=1, le=ROWS_LIMIT_MAX),
+              offset: int = Query(default=0, ge=0),
               user: User = Depends(current_user), db: Session = Depends(get_db)):
-    """Строки витрины, из которых собран график: клик по бару = таблица цифр."""
+    """Строки витрины, из которых собран график: клик по бару = таблица цифр.
+
+    Ответ — страница: `rows` — срез `limit`/`offset`, `total` — сколько строк
+    подходит под фильтр всего, `truncated` — что впереди ещё есть. `totals`
+    считаются по всей выборке, поэтому итог панели равен цифре на графике, а не
+    сумме видимых строк. Полную выборку отдаёт `/rows.csv`.
+    """
     start, end = _period(db, date_from, date_to)          # 400 — до обращения к кэшу
     only_shift = None if shift in (None, "all") else shift
 
     def build() -> dict:
         try:
-            return svc.detail_rows(db, start, end, only_shift, kind, key)
+            return svc.detail_rows(db, start, end, only_shift, kind, key,
+                                   limit=limit, offset=offset)
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
 
     cache_key = ("rows", kind, key or "", start.isoformat(), end.isoformat(),
-                 shift or "all", _raw(date_from), _raw(date_to))
+                 shift or "all", _raw(date_from), _raw(date_to), limit, offset)
     return _cached(request, db, cache_key, build)
+
+
+def _rows_filename(kind: str, key: str | None, start: date, end: date) -> str:
+    """Имя файла — в духе фронта: `<kind>[-<key>]-<from>_<to>.csv`."""
+    return f"{kind}{f'-{key}' if key else ''}-{start}_{end}.csv"
+
+
+@router.get("/rows.csv")
+def rows_csv(date_from: date | None = Query(default=None, alias="from"),
+             date_to: date | None = Query(default=None, alias="to"),
+             shift: str | None = Query(default=None, pattern="^(all|08-20|20-08)$"),
+             kind: str = Query(..., pattern="^(vessel|berth|cargo|rail_cargo|truck_cargo|"
+                                            "station|rail_move|platform)$"),
+             key: str | None = Query(default=None, max_length=120),
+             user: User = Depends(current_user), db: Session = Depends(get_db)) -> Response:
+    """Выгрузка строк дриллдауна: `;`, десятичная запятая, BOM — как в отчётах.
+
+    Лимита здесь нет намеренно: экран отдаёт страницу (до `ROWS_LIMIT_MAX`
+    строк), файл — всю выборку периода, иначе кнопка «CSV» срезала бы то, что
+    пользователь ещё не доскроллил. Период и права — те же, что у `/rows`
+    (портовая витрина: любой авторизованный), годовый размах так же отсекается
+    `dispatcher.max_period_days`. В кэш ответ не кладётся: протухшая выгрузка
+    хуже медленной.
+    """
+    start, end = _period(db, date_from, date_to)          # 400 — тот же лимит периода, п. 5
+    only_shift = None if shift in (None, "all") else shift
+    try:
+        data = svc.detail_rows(db, start, end, only_shift, kind, key)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    # колонки диктует бэкенд — та же таблица, что рисует панель, поэтому новая
+    # колонка появляется и в экране, и в файле без правок фронта
+    cols = data["columns"]
+    return to_csv_response(
+        [c["label"] for c in cols],
+        [[row.get(c["key"]) for c in cols] for row in data["rows"]],
+        _rows_filename(kind, key, start, end),
+    )
 
 
 # ------------------------------------------------------------------- импорт ----

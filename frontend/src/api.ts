@@ -227,8 +227,17 @@ export type DispatcherRowsResult = {
   kind: string; key: string | null; title: string;
   columns: { key: string; label: string; right?: boolean; sum?: boolean }[];
   rows: Record<string, string | number | null>[];
+  /** строк всего подходит под фильтр: с `limit` на экране их меньше, чем в выборке */
+  total: number;
+  /** впереди ещё строки — экран показывает первые `rows.length` из `total` */
+  truncated: boolean;
   totals: Record<string, number | null>;
   period: { from: string; to: string; shift: string | null };
+};
+
+/** Параметры дриллдауна: период + смена + разрез и (необязательно) его часть. */
+export type DispatcherRowsParams = {
+  from?: string; to?: string; shift?: string; kind: DispatcherRowKind; key?: string;
 };
 
 export type DispatcherRowKind =
@@ -677,6 +686,42 @@ export type VesselPlan = {
   placements: Placement[];
 };
 
+// --------------------------------------------------- дриллдаун «Статистики» ----
+
+/**
+ * Query строк дриллдауна: у `/rows` и `/rows.csv` параметры одинаковые, поэтому
+ * и собирает их одна функция — иначе выгрузка начала бы жить своей жизнью от того,
+ * что показывает экран.
+ */
+function rowsQuery(p: DispatcherRowsParams & { limit?: number; offset?: number }): URLSearchParams {
+  const q = new URLSearchParams();
+  if (p.from) q.set("from", p.from);
+  if (p.to) q.set("to", p.to);
+  if (p.shift && p.shift !== "all") q.set("shift", p.shift);
+  q.set("kind", p.kind);
+  if (p.key) q.set("key", p.key);
+  if (p.limit !== undefined) q.set("limit", String(p.limit));
+  if (p.offset !== undefined) q.set("offset", String(p.offset));
+  return q;
+}
+
+/** Имя файла: `<kind>[-<ключ>]-<from>_<to>.csv` — по нему видно, что за разрез. */
+function rowsFilename(p: DispatcherRowsParams): string {
+  return `${p.kind}${p.key ? `-${p.key}` : ""}-${p.from ?? ""}_${p.to ?? ""}.csv`;
+}
+
+/** Сохранить бинарный ответ на диск браузера: временная ссылка + клик по ней. */
+function saveBlob(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
 export const api = {
   async login(login: string, password: string): Promise<User> {
     const data = await request<Tokens>("/api/auth/login", {
@@ -750,16 +795,20 @@ export const api = {
     request<DispatcherDay>(
       `/api/dispatcher/day?date=${day}${shift && shift !== "all" ? `&shift=${shift}` : ""}`,
     ),
-  dispatcherRows: (p: {
-    from?: string; to?: string; shift?: string; kind: DispatcherRowKind; key?: string;
-  }) => {
-    const q = new URLSearchParams();
-    if (p.from) q.set("from", p.from);
-    if (p.to) q.set("to", p.to);
-    if (p.shift && p.shift !== "all") q.set("shift", p.shift);
-    q.set("kind", p.kind);
-    if (p.key) q.set("key", p.key);
-    return request<DispatcherRowsResult>(`/api/dispatcher/rows?${q.toString()}`);
+  /**
+   * Строки витрины для дриллдауна — страницей: `limit` строк с `offset`, а
+   * `total` и `truncated` говорят, сколько всего и есть ли что долистать.
+   */
+  dispatcherRows: (p: DispatcherRowsParams & { limit?: number; offset?: number }) =>
+    request<DispatcherRowsResult>(`/api/dispatcher/rows?${rowsQuery(p).toString()}`),
+  /**
+   * Выгрузка строк дриллдауна. Файл собирает бэкенд, и лимита на нём нет, поэтому
+   * CSV полнее экрана: на экране страница, в файле — весь период. Запрос идёт
+   * через `requestBlob`: он умеет повтор по 401, а `raw` для файла не годится.
+   */
+  async dispatcherRowsCsv(p: DispatcherRowsParams) {
+    const blob = await requestBlob(`/api/dispatcher/rows.csv?${rowsQuery(p).toString()}`);
+    saveBlob(blob, rowsFilename(p));
   },
   dispatcherStatus: () => request<DispatcherStatus>("/api/admin/dispatcher/status"),
   dispatcherImport: (body: { path?: string; content_base64?: string; filename?: string }) =>
@@ -800,15 +849,7 @@ export const api = {
   async downloadCsv(path: string, p: ReportParams, filename: string) {
     const res = await raw(`${path}?${qs(p)}`);
     if (!res.ok) throw new ApiError(res.status, "Не удалось выгрузить отчёт");
-    const blob = await res.blob();
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(url);
+    saveBlob(await res.blob(), filename);
   },
 
   // ---- постановка судов ----
