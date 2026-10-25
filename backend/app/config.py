@@ -55,6 +55,19 @@ class Settings(BaseSettings):
     one_c_login: str = ""
     one_c_password: str = ""
     one_c_timeout_sec: int = 30
+    # Таймаут «проверки связи» с 1С: он заведомо короче рабочего, чтобы клик
+    # в админке не вешал поток кабинета на 4 × one_c_timeout_sec (см. docs/03, §4).
+    one_c_probe_timeout_sec: int = 8
+
+    # Пул соединений PostgreSQL. SQLite их не понимает, поэтому db.py передаёт их
+    # только не-sqlite URL.
+    # Потолок для сервера: воркеров uvicorn × (db_pool_size + db_max_overflow)
+    # должно быть меньше max_connections PostgreSQL (по умолчанию 100).
+    db_pool_size: int = 10
+    db_max_overflow: int = 20
+    # Переиспользовать соединение через N секунд: pooler или файрвол молча рвёт
+    # простой коннект — recycle дешевле, чем заметить это на первом же запросе.
+    db_pool_recycle_sec: int = 1800
 
     # Токен для push-режима: 1С сама присылает срез на POST /api/onec/push
     # (заголовок X-OneC-Token). Пусто — push выключен (503).

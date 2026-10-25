@@ -23,12 +23,18 @@ SYNC_JOB_ID = "onec_sync"
 
 def sync_job() -> None:
     """Загрузка среза в отдельной сессии — её зовёт APScheduler из своего потока."""
-    from ..onec.sync import run_sync
+    from ..onec.sync import try_sync
 
     db = SessionLocal()
     try:
-        run = run_sync(db)
-        log.info("Плановая синхронизация: %s, строк %d", run.status, run.rows)
+        # max_instances=1 у job-а спасает от наложения самой себя, но не от ручной
+        # кнопки в админке: если витрину уже пишет чей-то пинк, цикл пропускаем —
+        # следующий придёт по своему интервалу.
+        run = try_sync(db)
+        if run is None:
+            log.info("Плановая синхронизация пропущена: уже идёт загрузка")
+        else:
+            log.info("Плановая синхронизация: %s, строк %d", run.status, run.rows)
     finally:
         db.close()
 

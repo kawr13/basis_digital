@@ -17,4 +17,8 @@ RUN useradd -m -u 10001 statcab && mkdir -p /app/data && chown -R statcab /app
 USER statcab
 
 EXPOSE 8000
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
+# Shell-форма CMD нужна ради переменной ${UVICORN_WORKERS:-2}: в exec-форме docker
+# их не подставляет. exec обязателен: shell уступает место uvicorn, тот остаётся
+# PID 1 и получает SIGTERM от `docker stop` напрямую — успевает погасить воркеров,
+# а не дожидается SIGKILL через 10 секунд. httptools — быстрый парсер вместо h11.
+CMD exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers ${UVICORN_WORKERS:-2} --http httptools

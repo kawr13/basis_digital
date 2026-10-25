@@ -1,6 +1,9 @@
 # Точные версии для продакшена (Docker-образ на Python 3.12).
 fastapi==0.115.6
 uvicorn[standard]==0.34.0
+# HTTP-парсер для uvicorn (--http httptools в Dockerfile). uvicorn[standard] ставит
+# его сам как extra, но пин видимый: без пакета образ молча возвращается на h11.
+httptools==0.9.0
 sqlalchemy==2.0.36
 pydantic==2.10.4
 pydantic-settings==2.7.1

@@ -16,8 +16,9 @@ import { BusyNote, EmptyRow, errText, FormError, Notice, StatusChip, THEAD_ROW, 
 const SECTIONS = [
   {
     title: "Источник данных 1С",
-    keys: ["onec.source", "onec.base_url", "onec.login", "onec.password", "onec.push_token", "onec.timeout_sec"],
-    note: "mock — демо-данные кабинета, http — HTTP-сервис 1С. Пароль и токен push наружу не отдаются: пустое поле означает «не менять».",
+    keys: ["onec.source", "onec.base_url", "onec.login", "onec.password", "onec.push_token",
+           "onec.timeout_sec", "onec.probe_timeout_sec"],
+    note: "mock — демо-данные кабинета, http — HTTP-сервис 1С. Пароль и токен push наружу не отдаются: пустое поле означает «не менять». Таймауты разные: загрузка среза ждёт общий таймаут onec.timeout_sec, а проверка связи — короткий onec.probe_timeout_sec (четыре GET, ~30 с на всё).",
   },
   {
     title: "Загрузка витрины по расписанию",

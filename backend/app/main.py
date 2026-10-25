@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, Request
+from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
@@ -15,7 +15,8 @@ from .config import get_settings
 from .db import SessionLocal, get_db, init_db
 from .deps import require_roles
 from .models import Role
-from .onec.sync import run_sync
+from .onec.http_source import close_clients
+from .onec.sync import SYNC_BUSY, run_sync, try_sync
 from .seed import ensure_admin, seed_demo_users
 from .services import app_settings, scheduling
 from .services.dispatcher import auto_import
@@ -79,6 +80,10 @@ async def lifespan(app: FastAPI):
 
     app.state.scheduler = None
     scheduler.shutdown(wait=False)
+    # Общий httpx.Client живёт до остановки процесса: соединение с 1С должно
+    # закрываться здесь, а не висеть до милости сборщика мусора.
+    if close_clients():
+        log.info("HTTP-клиенты 1С закрыты")
 
 
 app = FastAPI(title=get_settings().app_name, version="0.1.0", lifespan=lifespan)
@@ -121,7 +126,9 @@ def manual_sync(db: Session = Depends(get_db)):
 
     Оставлен, чтобы не сломать существующие скрипты и документацию.
     """
-    run = run_sync(db)
+    run = try_sync(db)
+    if run is None:
+        raise HTTPException(status.HTTP_409_CONFLICT, SYNC_BUSY)
     return {"status": run.status, "rows": run.rows, "source": run.source, "error": run.error}
 
 

@@ -34,27 +34,6 @@ SYNC_JOB = "onec_sync"
 PUSH_SNAPSHOT = "2020-01-15 10:00:00"
 
 
-@pytest.fixture()
-def settings_snapshot():
-    """После теста — точная копия таблицы настроек из до-состояния."""
-    db = SessionLocal()
-    try:
-        before = {r.key: r.value for r in db.scalars(select(AppSetting))}
-    finally:
-        db.close()
-    yield
-    db = SessionLocal()
-    try:
-        for rec in list(db.scalars(select(AppSetting))):
-            if rec.key in before:
-                rec.value = before[rec.key]
-            else:
-                db.delete(rec)
-        db.commit()
-    finally:
-        db.close()
-
-
 def _patch(client, admin_hdr, payload: dict):
     return client.put(SETTINGS_URL, json=payload, headers=admin_hdr)
 

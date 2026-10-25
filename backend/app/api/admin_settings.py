@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 from ..db import get_db
 from ..deps import require_roles
 from ..models import Role, SyncRun, User
-from ..onec.sync import get_source, run_sync
+from ..onec.sync import SYNC_BUSY, get_source, try_sync
 from ..schemas import OneCCheck, OneCTestOut, SettingsEnvelope, SyncRunOut, SyncRunResult
 from ..services import app_settings
 from ..services import scheduling
@@ -112,8 +112,14 @@ def test_onec_connection(_: User = Depends(admin_only), db: Session = Depends(ge
 @router.post("/sync/run", response_model=SyncRunResult)
 def manual_sync(days: int | None = Query(default=None, ge=1, le=366),
                 actor: User = Depends(admin_only), db: Session = Depends(get_db)):
-    """Пинком загрузить витрину из 1С (админ). days — иначе из настройки sync.window_days."""
-    run = run_sync(db, days=days)
+    """Пинком загрузить витрину из 1С (админ). days — иначе из настройки sync.window_days.
+
+    Пока загрузка идёт, любой повторный пинк (и плановый, и ручной) получает 409:
+    вторая выгрузка пила бы витрину одновременно с первой.
+    """
+    run = try_sync(db, days=days)
+    if run is None:
+        raise HTTPException(status.HTTP_409_CONFLICT, SYNC_BUSY)
     return SyncRunResult(
         id=run.id, started_at=run.started_at, finished_at=run.finished_at,
         source=run.source, status=run.status, rows=run.rows, error=run.error,

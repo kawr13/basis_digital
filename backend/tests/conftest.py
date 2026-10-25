@@ -9,6 +9,7 @@ import os
 import tempfile
 
 import pytest
+from sqlalchemy import select
 
 _tmpdir = tempfile.mkdtemp(prefix="statcab_test_")
 os.environ.update(
@@ -29,7 +30,9 @@ os.environ.update(
 
 from fastapi.testclient import TestClient  # noqa: E402
 
+from app.db import SessionLocal  # noqa: E402
 from app.main import app  # noqa: E402
+from app.models import AppSetting  # noqa: E402
 
 ADMIN = {"login": "admin", "password": "Adm1n-Passw0rd"}
 
@@ -57,3 +60,29 @@ def manager_hdr(client) -> dict:
     r = client.post("/api/auth/login", json={"login": "petrov", "password": "demo1234"})
     assert r.status_code == 200, r.text
     return {"Authorization": f"Bearer {r.json()['access_token']}"}
+
+
+@pytest.fixture
+def settings_snapshot():
+    """После теста — точная копия таблицы настроек из до-состояния.
+
+    Настройки кабинета глобальны на процесс, а тесты пишут их через админку:
+    без возврата к исходному состоянию следующий тест проверял бы уже чужую
+    конфигурацию (адрес 1С, интервал синхронизации, пороги).
+    """
+    db = SessionLocal()
+    try:
+        before = {r.key: r.value for r in db.scalars(select(AppSetting))}
+    finally:
+        db.close()
+    yield
+    db = SessionLocal()
+    try:
+        for rec in list(db.scalars(select(AppSetting))):
+            if rec.key in before:
+                rec.value = before[rec.key]
+            else:
+                db.delete(rec)
+        db.commit()
+    finally:
+        db.close()

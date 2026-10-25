@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -33,19 +34,22 @@ def get_source(db: Session | None = None) -> StatsSource:
         from ..services import app_settings
 
         cfg = {key: app_settings.get(db, key) for key in (
-            "onec.source", "onec.base_url", "onec.login", "onec.password", "onec.timeout_sec")}
+            "onec.source", "onec.base_url", "onec.login", "onec.password", "onec.timeout_sec",
+            "onec.probe_timeout_sec")}
     else:
         s = get_settings()
         cfg = {"onec.source": s.one_c_source, "onec.base_url": s.one_c_base_url,
                "onec.login": s.one_c_login, "onec.password": s.one_c_password,
-               "onec.timeout_sec": s.one_c_timeout_sec}
+               "onec.timeout_sec": s.one_c_timeout_sec,
+               "onec.probe_timeout_sec": s.one_c_probe_timeout_sec}
 
     kind = str(cfg.get("onec.source") or "mock").strip().lower()
     if kind == "http":
         from .http_source import HttpSource
 
         return HttpSource(base_url=cfg.get("onec.base_url"), login=cfg.get("onec.login"),
-                          password=cfg.get("onec.password"), timeout=cfg.get("onec.timeout_sec"))
+                          password=cfg.get("onec.password"), timeout=cfg.get("onec.timeout_sec"),
+                          probe_timeout=cfg.get("onec.probe_timeout_sec"))
     from .mock import MockSource
 
     return MockSource()
@@ -177,3 +181,30 @@ def run_sync(db: Session, days: int | None = None) -> SyncRun:
         db.commit()
         log.exception("Синхронизация с 1С упала")
         return run
+
+
+# ------------------------------------------------------------------ блокировка --
+# Загрузка на процесс одна. apply_snapshot ищет строку по ключу и под двумя
+# параллельными прогонами способен наплодить дубликатов, а планировщик и ручная
+# кнопка в админке друг про друга ничего не знают. Тому, кто пришёл на занятую
+# блокировку, очередь не делают: try_sync отвечает None, а эндпоинт превращает
+# это в 409 с текстом SYNC_BUSY.
+_SYNC_LOCK = threading.Lock()
+
+SYNC_BUSY = ("Синхронизация уже выполняется: дождитесь, пока кабинет закончит текущую "
+             "загрузку из 1С (она видна в журнале «Последние загрузки»).")
+
+
+def try_sync(db: Session, days: int | None = None) -> SyncRun | None:
+    """run_sync, если никто другой не грузит; None — когда загрузка уже идёт.
+
+    Блокировка местная, на процесс. От двух планировщиков в разных воркерах
+    uvicorn она не спасает — там нужен внешний мьютекс (advisory-лок PostgreSQL
+    или отдельный сервис синхронизации), это за рамками пункта.
+    """
+    if not _SYNC_LOCK.acquire(blocking=False):
+        return None
+    try:
+        return run_sync(db, days=days)
+    finally:
+        _SYNC_LOCK.release()

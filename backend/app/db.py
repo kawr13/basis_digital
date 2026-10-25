@@ -14,15 +14,25 @@ class Base(DeclarativeBase):
 
 
 def _build_engine():
-    url = get_settings().database_url
+    s = get_settings()
+    url = s.database_url
     if url.startswith("sqlite"):
         raw = url.split("///", 1)[-1]
         if raw and raw != ":memory:":
             Path(raw).parent.mkdir(parents=True, exist_ok=True)
         connect_args = {"check_same_thread": False}
+        # SQLite не принимает параметры пула: у него своя политика соединений,
+        # pool_size для него — TypeError на старте кабинета.
+        pool_kwargs: dict = {}
     else:
         connect_args = {}
-    return create_engine(url, connect_args=connect_args, pool_pre_ping=True, future=True)
+        # Дефолтный пул (5 + 10 overflow на процесс) упирается в потолок на первой
+        # же параллельной загрузке дашбордов, поэтому размеры — из настроек.
+        # Сколько их ставить и как не превысить max_connections — docs/06, §9.
+        pool_kwargs = {"pool_size": s.db_pool_size, "max_overflow": s.db_max_overflow,
+                       "pool_recycle": s.db_pool_recycle_sec}
+    return create_engine(url, connect_args=connect_args, pool_pre_ping=True, future=True,
+                         **pool_kwargs)
 
 
 engine = _build_engine()

@@ -10,10 +10,16 @@
 
 Параметры подключения приходят аргументами конструктора — их берёт стор настроек
 (app_settings), а .env остаётся запасным вариантом, если админ ничего не менял.
+
+Таймаута два, и они разные. Рабочий срез ждёт `onec.timeout_sec`: 1С имеет право
+думать минуту. Проверка связи в админке ждёт `onec.probe_timeout_sec` (по
+умолчанию 8 с на запрос, 3 с на соединение, ~30 с на все четыре GET): клик по
+кнопке не должен вешать поток кабинета на две минуты.
 """
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from datetime import date, timedelta
 from typing import Any
@@ -26,12 +32,83 @@ from .parse import parse_capacity, parse_cargo, parse_dt, parse_dynamics, parse_
 
 log = logging.getLogger("statcab.onec.http")
 
+# Сколько ждать установленное TCP/TLS-соединение. Заведомо меньше чтения:
+# недоступный хост виден через 3 с, а не через весь таймаут проверки.
+CONNECT_TIMEOUT_SEC = 3.0
+
+# Сколько запросов в пробе (/warehouses /balance /capacity /dynamics) — по нему
+# считается и суммарный лимит длительности проверки.
+PROBE_REQUESTS = 4
+
+# ------------------------------------------------------------------- клиенты --
+# httpx.Client дорог (TCP + TLS) и при этом потокобезопасен, поэтому держим
+# один клиент на процесс для каждого набора «адрес + учётка», а не по клиенту на
+# запрос: keep-alive работает, рукопожатие одно.
+#
+# Ключ — отпечаток подключения (verify зашит в клиента, он пока один — True).
+# Сменил админ адрес или пароль в UI — ключ другой: клиент создаётся заново,
+# а старый по прежнему адресу закрывается, иначе кабинет ходил бы в прежнюю 1С
+# до перезапуска контейнера и держал бы закро́м открытые соединения.
+_CLIENTS: dict[tuple[str, str, str], httpx.Client] = {}
+_LOCK = threading.Lock()
+
+
+def _new_client(auth, timeout: float) -> httpx.Client:
+    """Точка подмены в тестах: транспорт подставляют вместо настоящего."""
+    return httpx.Client(timeout=timeout, auth=auth, verify=True)
+
+
+def _close_quietly(client: httpx.Client) -> None:
+    try:
+        client.close()
+    except Exception:  # noqa: BLE001 — закрытие не должно ронять ни запрос, ни остановку
+        log.debug("HTTP-клиент 1С закрылся с ошибкой", exc_info=True)
+
+
+def _client_for(base: str, auth, timeout: float) -> httpx.Client:
+    """Общий клиент процесса для пары «адрес + учётка» (создаётся один раз)."""
+    login, password = auth if auth else ("", "")
+    key = (base, login, password)
+    with _LOCK:
+        client = _CLIENTS.get(key)
+        if client is not None:
+            return client
+        for stale in [k for k in _CLIENTS if k[0] != base]:
+            _close_quietly(_CLIENTS.pop(stale))
+        client = _new_client(auth, timeout)
+        _CLIENTS[key] = client
+        log.info("HTTP-клиент 1С: новый клиент для %s", base)
+        return client
+
+
+def close_clients() -> int:
+    """Закрыть все клиенты. Зовёт lifespan при остановке приложения."""
+    with _LOCK:
+        clients = list(_CLIENTS.values())
+        _CLIENTS.clear()
+    for client in clients:
+        _close_quietly(client)
+    return len(clients)
+
+
+def _as_number(value: Any, fallback: Any, default: float) -> float:
+    """Число из стора/.env: значения приходят и строками, и пустыми."""
+    for candidate in (value, fallback):
+        if candidate is None or (isinstance(candidate, str) and not candidate.strip()):
+            continue
+        try:
+            return float(candidate)
+        except (TypeError, ValueError):
+            continue
+    return default
+
 
 class HttpSource:
     name = "http"
 
     def __init__(self, base_url: str | None = None, login: str | None = None,
-                 password: str | None = None, timeout: int | None = None) -> None:
+                 password: str | None = None, timeout: int | None = None,
+                 probe_timeout: int | None = None) -> None:
         """None — значит параметр не задан в сторе, берём из .env (как раньше)."""
         s = get_settings()
         base = (s.one_c_base_url if base_url is None else base_url) or ""
@@ -41,24 +118,33 @@ class HttpSource:
         password = s.one_c_password if password is None else password
         self.base = base.strip().rstrip("/")
         self.auth = (login or "", password or "") if (login or "") else None
-        try:
-            self.timeout = float(timeout) if timeout is not None else float(s.one_c_timeout_sec)
-        except (TypeError, ValueError):
-            self.timeout = 30.0
+        self.timeout = _as_number(timeout, s.one_c_timeout_sec, 30.0)
+        self.probe_timeout = _as_number(probe_timeout, s.one_c_probe_timeout_sec, 8.0)
 
     # ------------------------------------------------------------------ запросы --
+    @staticmethod
+    def _timeout(total: float) -> httpx.Timeout:
+        """Таймаут одного запроса: connect короче — мёртвый адрес виден сразу."""
+        total = max(float(total), 0.1)
+        return httpx.Timeout(total, connect=min(CONNECT_TIMEOUT_SEC, total))
+
     def _client(self) -> httpx.Client:
-        return httpx.Client(timeout=self.timeout, auth=self.auth, verify=True)
+        """Общий клиент процесса — не закрывать (его закрывает close_clients)."""
+        return _client_for(self.base, self.auth, self.timeout)
 
     def _get(self, path: str, params: dict | None = None) -> dict:
-        with self._client() as client:
-            resp = client.get(f"{self.base}{path}", params=params,
-                              headers={"Accept": "application/json"})
-            resp.raise_for_status()
-            return resp.json()
+        resp = self._client().get(f"{self.base}{path}", params=params,
+                                  headers={"Accept": "application/json"},
+                                  timeout=self._timeout(self.timeout))
+        resp.raise_for_status()
+        return resp.json()
 
     def probe(self, days: int = 7) -> list[dict[str, Any]]:
         """Проверка связи: по очереди бьём все четыре метода, ошибки не роняем.
+
+        Каждый запрос живёт не дольше `onec.probe_timeout_sec`, а вся проверка —
+        не дольше PROBE_REQUESTS × того же времени: даже полностью недоступная
+        1С не держит поток кабинета дольше ~30 с.
 
         Возвращает список проверок: path / ok / status / ms / error.
         """
@@ -70,16 +156,25 @@ class HttpSource:
             ("/dynamics", {"from": (today - timedelta(days=days - 1)).isoformat(),
                            "to": today.isoformat()}),
         ]
+        budget = PROBE_REQUESTS * self.probe_timeout
+        deadline = time.perf_counter() + budget
         checks: list[dict[str, Any]] = []
         for path, params in targets:
             started = time.perf_counter()
             code: int | None = None
             error: str | None = None
             ok = False
+            left = deadline - started
+            if left <= 0:
+                # Суммарный лимит выбран не для красоты: без него четыре
+                # зависших запроса дают 4 × таймаут занятого потока.
+                checks.append({"path": path, "ok": False, "status": None, "ms": 0,
+                               "error": f"проверка прервана: суммарный лимит {budget:g} с исчерпан"})
+                continue
             try:
-                with self._client() as client:
-                    resp = client.get(f"{self.base}{path}", params=params,
-                                      headers={"Accept": "application/json"})
+                resp = self._client().get(f"{self.base}{path}", params=params,
+                                          headers={"Accept": "application/json"},
+                                          timeout=self._timeout(min(self.probe_timeout, left)))
                 code = resp.status_code
                 if resp.status_code >= 400:
                     error = f"HTTP {resp.status_code}"

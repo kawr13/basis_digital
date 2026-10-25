@@ -59,6 +59,14 @@ SPEC: dict[str, Spec] = {
                             hint="заголовок X-OneC-Token; пусто — push выключен"),
     "onec.timeout_sec": Spec("int", 30, env="one_c_timeout_sec", minimum=5, maximum=300,
                              label="Таймаут запросов к 1С, сек"),
+    # Проверка связи — не рабочий срез: четыре GET подряд. Держим её таймаут
+    # отдельно и заметно короче, иначе недоступная 1С вешает поток кабинета
+    # на 4 × onec.timeout_sec (см. docs/03, раздел 4).
+    "onec.probe_timeout_sec": Spec("int", 8, env="one_c_probe_timeout_sec",
+                                   minimum=2, maximum=60,
+                                   label="Таймаут проверки связи с 1С, сек",
+                                   hint="на каждый из четырёх GET; вся проверка — "
+                                        "не дольше ~30 с, соединение — 3 с"),
     # --- синхронизация -------------------------------------------------------
     "sync.enabled": Spec("bool", True, env="sync_enabled", label="Синхронизировать по расписанию"),
     "sync.interval_minutes": Spec("int", 15, env="sync_interval_minutes", minimum=1, maximum=1440,

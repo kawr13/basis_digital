@@ -21,6 +21,14 @@ services:
     environment:
       ENVIRONMENT: ${ENVIRONMENT:-prod}
       DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-statcab}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-statcab}
+      # воркеры uvicorn (передаются в CMD образа); ориентир — 2 × vCPU + 1
+      UVICORN_WORKERS: ${UVICORN_WORKERS:-2}
+      # пул SQLAlchemy на каждый воркер: UVICORN_WORKERS × (pool + overflow)
+      # не должно превышать max_connections PostgreSQL (по умолчанию 100)
+      DB_POOL_SIZE: ${DB_POOL_SIZE:-10}
+      DB_MAX_OVERFLOW: ${DB_MAX_OVERFLOW:-20}
+      # отпускать соединение раз в N секунд — pooler/файрвол рвёт простые коннекты молча
+      DB_POOL_RECYCLE_SEC: ${DB_POOL_RECYCLE_SEC:-1800}
       SECRET_KEY: ${SECRET_KEY:?укажите SECRET_KEY в .env}
       ACCESS_TOKEN_TTL_MINUTES: ${ACCESS_TOKEN_TTL_MINUTES:-30}
       REFRESH_TOKEN_TTL_DAYS: ${REFRESH_TOKEN_TTL_DAYS:-1}
@@ -32,6 +40,8 @@ services:
       ONE_C_LOGIN: ${ONE_C_LOGIN:-}
       ONE_C_PASSWORD: ${ONE_C_PASSWORD:-}
       ONE_C_TIMEOUT_SEC: ${ONE_C_TIMEOUT_SEC:-30}
+      # таймаут кнопки «проверить связь»: четыре GET, connect — 3 с (см. docs/03, §4)
+      ONE_C_PROBE_TIMEOUT_SEC: ${ONE_C_PROBE_TIMEOUT_SEC:-8}
       # push из 1С: POST /api/onec/push с заголовком X-OneC-Token (пусто = выключено)
       ONEC_PUSH_TOKEN: ${ONEC_PUSH_TOKEN:-}
       SYNC_ENABLED: ${SYNC_ENABLED:-true}
