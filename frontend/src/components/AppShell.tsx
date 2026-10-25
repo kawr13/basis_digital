@@ -28,6 +28,7 @@ export function AppShell({
   actions,
   live,
   wide,
+  busy,
 }: {
   children: React.ReactNode;
   asOf?: string;
@@ -37,6 +38,9 @@ export function AppShell({
   live?: Live;
   /** на всю ширину окна: план постановки читают поперёк, 1500px ему тесно */
   wide?: boolean;
+  /** догружается чанк раздела: чип держит высоту второй строки шапки, иначе */
+  /** приехавшая страница подтягивает контент на ~30px вверх */
+  busy?: boolean;
 }) {
   const { user, logout } = useAuth();
   const settings = usePublicSettings();
@@ -129,6 +133,13 @@ export function AppShell({
           </div>
 
           <div className="flex items-center gap-2 py-2 text-xs text-white/70">
+            {/* Заполнитель строки, пока догружается чанк раздела (см. PageSkeleton). */}
+            {/* Декорация: озвучивает состояние сама плашка скелона, поэтому aria-hidden. */}
+            {busy && (
+              <span className="chip bg-white/10 border border-white/15 text-white/70" aria-hidden="true">
+                Загрузка раздела
+              </span>
+            )}
             {asOf && (
               <span
                 className="chip bg-white/10 border border-white/15 text-white/85"

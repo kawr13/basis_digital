@@ -1,12 +1,24 @@
+import { Suspense } from "react";
 import { Navigate, Route, Routes } from "react-router-dom";
 import { useAuth } from "./auth";
+import { ChunkErrorBoundary } from "./components/ChunkErrorBoundary";
+import { PageSkeleton, type SkeletonVariant } from "./components/PageSkeleton";
+import { lazyRoute } from "./lazyRoute";
 import { hiddenSections, resolveVesselRights, usePublicSettings } from "./settings";
-import DashboardPage from "./pages/DashboardPage";
-import StatisticsPage from "./pages/StatisticsPage";
 import LoginPage from "./pages/LoginPage";
-import ReportsPage from "./pages/ReportsPage";
-import VesselsPage from "./pages/VesselsPage";
-import AdminPage from "./pages/AdminPage";
+
+/**
+ * Разделы кабинета — ленивые (TASKS.md, п.7 «Code-splitting»): экран входа больше
+ * не тянет «Статистику» (1357 строк), админку, постановку судов и отчёты, а после
+ * релиза неизменённые чанки react и чужих страниц остаются в кэше браузера.
+ * LoginPage намеренно статический: это первый экран, он обязан рисоваться без
+ * дополнительного запроса, — иначе вход стал бы медленнее, а не быстрее.
+ */
+const StatisticsPage = lazyRoute(() => import("./pages/StatisticsPage"));
+const DashboardPage = lazyRoute(() => import("./pages/DashboardPage"));
+const ReportsPage = lazyRoute(() => import("./pages/ReportsPage"));
+const VesselsPage = lazyRoute(() => import("./pages/VesselsPage"));
+const AdminPage = lazyRoute(() => import("./pages/AdminPage"));
 
 function Boot() {
   return (
@@ -63,6 +75,32 @@ function VesselsGuard({ children }: { children: React.ReactNode }) {
   return <>{children}</>;
 }
 
+/**
+ * Обёртка ленивого раздела: скелон на время загрузки чанка + граница ошибок
+ * импорта. Порядок снаружи обязателен: guards (AdminOnly/SectionGuard/VesselsGuard)
+ * остаются в индексном чанке и считаются ДО запроса чанка страницы — права из
+ * vessel_rights и ui.hidden_sections не переезжают в ленивый чанк, поэтому скрытый
+ * раздел не мелькнёт вкладкой и не откроется на кадр человеку без доступа.
+ */
+function LazySection({
+  section,
+  variant = "default",
+  wide = false,
+  children,
+}: {
+  section: string;
+  variant?: SkeletonVariant;
+  /** wide-раскладка шапки, как у самой страницы, — чтобы не гуляла ширина контейнера */
+  wide?: boolean;
+  children: React.ReactNode;
+}) {
+  return (
+    <ChunkErrorBoundary key={section} resetKey={section} wide={wide}>
+      <Suspense fallback={<PageSkeleton variant={variant} wide={wide} />}>{children}</Suspense>
+    </ChunkErrorBoundary>
+  );
+}
+
 export default function App() {
   const { user, booting } = useAuth();
   return (
@@ -72,7 +110,9 @@ export default function App() {
         path="/"
         element={
           <SectionGuard section="statistics">
-            <StatisticsPage />
+            <LazySection section="statistics" wide>
+              <StatisticsPage />
+            </LazySection>
           </SectionGuard>
         }
       />
@@ -83,7 +123,9 @@ export default function App() {
         path="/warehouses"
         element={
           <SectionGuard section="warehouses">
-            <DashboardPage />
+            <LazySection section="warehouses">
+              <DashboardPage />
+            </LazySection>
           </SectionGuard>
         }
       />
@@ -91,7 +133,9 @@ export default function App() {
         path="/reports"
         element={
           <SectionGuard section="reports">
-            <ReportsPage />
+            <LazySection section="reports" variant="table">
+              <ReportsPage />
+            </LazySection>
           </SectionGuard>
         }
       />
@@ -99,7 +143,9 @@ export default function App() {
         path="/vessels"
         element={
           <VesselsGuard>
-            <VesselsPage />
+            <LazySection section="vessels" wide>
+              <VesselsPage />
+            </LazySection>
           </VesselsGuard>
         }
       />
@@ -107,7 +153,9 @@ export default function App() {
         path="/admin"
         element={
           <AdminOnly>
-            <AdminPage />
+            <LazySection section="admin" variant="table">
+              <AdminPage />
+            </LazySection>
           </AdminOnly>
         }
       />

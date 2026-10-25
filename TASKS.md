@@ -15,7 +15,7 @@
 | 4 | Кэш агрегатов `dispatcher/overview` + `ETag` / `Cache-Control` | P0 | ✅ |
 | 5 | Ограничение длины периода (годовой запрос = 1.2 с и 743 КБ) | P0 | ✅ |
 | 6 | Лимит строк в `/api/dispatcher/rows` + серверный CSV | P1 | ✅ |
-| 7 | Code-splitting: ленивые страницы + `manualChunks` | P1 | ⬜ |
+| 7 | Code-splitting: ленивые страницы + `manualChunks` | P1 | ✅ |
 | 8 | Разбить long task 200 мс на главной | P1 | ⬜ |
 | 9 | Воркеры uvicorn, `httptools`, размер пула соединений | P1 | ⬜ |
 | 10 | Долгие обращения к 1С не должны занимать воркер | P1 | ⬜ |
