@@ -95,6 +95,8 @@ export type DispatcherMeta = {
   date_min: string | null;
   date_max: string | null;
   default_period_days: number;
+  /** самый длинный период, который бэкенд согласится посчитать (`dispatcher.max_period_days`) */
+  max_period_days: number;
   shifts: { shift: string; count: number }[];
   updated_at: string | null;
   sources: { source: string; count: number }[];

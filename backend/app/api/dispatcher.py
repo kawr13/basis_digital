@@ -62,20 +62,60 @@ def _bounds(db: Session) -> tuple[date | None, date | None]:
                                    lambda: svc.period_bounds(db))
 
 
+def _period_limits(db: Session) -> tuple[int, int]:
+    """(период по умолчанию, лимит длины периода) — одним походом к настройкам.
+
+    Спрашивают их разрешение периода, `/meta` и ключ кэша `/meta`: версия данных
+    от настроек не сдвигается, поэтому лимит обязан входить в ключ — иначе после
+    `PUT /api/admin/settings` страница строила бы панель периода по устаревшему
+    значению до первой же новой смены в витрине.
+    """
+    values = app_settings.get_all(db)
+    return (int(values["dispatcher.default_period_days"]),
+            int(values["dispatcher.max_period_days"]))
+
+
+def _check_period_length(start: date, end: date, limit: int) -> None:
+    """Длина периода не больше `dispatcher.max_period_days`.
+
+    Годовой запрос — самый дешёвый способ выложить кабинет: ~1.2 с сервером и
+    ~740 КБ JSON, а экран столько не рисует осмысленно (агрегацию считает сам
+    кабинет, см. docs/05). Проверка живёт в `_period`, то есть до обращения к
+    кэшу: 400 — ошибка запроса, а не вариант ответа, и в кэше он не лежит.
+    """
+    days = (end - start).days + 1
+    if days <= limit:
+        return
+    raise HTTPException(
+        400,
+        f"Период {days} суток длиннее разрешённого: максимум {limit} суток. "
+        "Выберите пресет (7/14/30/90 суток) или более короткий промежуток; "
+        "лимит меняет администратор: администрирование → Настройки → «Максимальная "
+        "длина периода, суток».",
+    )
+
+
 def _period(db: Session, date_from: date | None, date_to: date | None) -> tuple[date, date]:
-    """Период статистики: по умолчанию — последние N суток, но не раньше данных."""
+    """Период статистики: по умолчанию — последние N суток, но не раньше данных.
+
+    Разрешённый период обязан уложиться в `dispatcher.max_period_days` — и для
+    явных `from`/`to`, и для периода по умолчанию (`/overview` и `/rows` зовут
+    `_period` обе).
+    """
     lo, hi = _bounds(db)
-    days = int(app_settings.get(db, "dispatcher.default_period_days"))
+    days, limit = _period_limits(db)
     if date_from and date_to:
         if date_to < date_from:
             raise HTTPException(400, "Дата окончания раньше даты начала")
-        return date_from, date_to
-    end = date_to or hi or date.today()
-    start = date_from or (end - timedelta(days=days - 1))
-    if lo and start < lo:
-        start = lo
-    if start > end:
-        start = end
+        start, end = date_from, date_to
+    else:
+        end = date_to or hi or date.today()
+        start = date_from or (end - timedelta(days=days - 1))
+        if lo and start < lo:
+            start = lo
+        if start > end:
+            start = end
+    _check_period_length(start, end, limit)          # 400 — до обращения к кэшу
     return start, end
 
 
@@ -121,6 +161,7 @@ def _cached(request: Request, db: Session, key: tuple, build) -> Response:
 def _meta(db: Session) -> dict:
     """Содержимое `/meta`: вынесено, чтобы эндпоинт остался тонким (кэш + ответ)."""
     lo, hi = _bounds(db)
+    default_days, max_days = _period_limits(db)
     shifts = list(db.execute(
         select(FactDispatcherShift.shift, func.count(FactDispatcherShift.id))
         .group_by(FactDispatcherShift.shift)
@@ -128,7 +169,10 @@ def _meta(db: Session) -> dict:
     return {
         "date_min": lo,
         "date_max": hi,
-        "default_period_days": int(app_settings.get(db, "dispatcher.default_period_days")),
+        "default_period_days": default_days,
+        # по нему фронт строит панель периода: `min`/`max` у полей ввода и
+        # пресеты длиннее лимита — иначе страница ловила бы 400 догадками
+        "max_period_days": max_days,
         "shifts": [{"shift": s, "count": c} for s, c in sorted(shifts)],
         "updated_at": db.scalar(select(func.max(FactDispatcherShift.updated_at))),
         "sources": [{"source": src, "count": n} for src, n in db.execute(
@@ -141,7 +185,11 @@ def _meta(db: Session) -> dict:
 @router.get("/meta")
 def meta(request: Request, user: User = Depends(current_user), db: Session = Depends(get_db)):
     """Справоч страницы: границы данных, смены, источники. Тоже из кэша."""
-    return _cached(request, db, ("meta",), lambda: _meta(db))
+    # Настройки периода входят в ключ кэша: версия данных от них не сдвигается,
+    # а `max_period_days` фронт читает отсюда — после сохранения в админке панель
+    # периода обязана перестроиться сразу, а не доедать старый ответ.
+    default_days, max_days = _period_limits(db)
+    return _cached(request, db, ("meta", default_days, max_days), lambda: _meta(db))
 
 
 @router.get("/overview")

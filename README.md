@@ -104,7 +104,8 @@ docker compose logs backend | grep администратор
 `sync.enabled|interval_minutes|window_days`, `ui.dynamics_days`,
 `reports.default_days`, `thresholds.capacity_warn|capacity_crit`,
 `security.max_failed_logins|lockout_minutes`, `dispatcher.source_path`,
-`dispatcher.auto_import`, `dispatcher.default_period_days`; вид страницы —
+`dispatcher.auto_import`, `dispatcher.default_period_days`,
+`dispatcher.max_period_days`; вид страницы —
 `statistics_mode`, `statistics_layout`, `statistics_layout_lite`,
 `ui.hidden_sections` (какие разделы кабинета не показывать всем). Секреты (`onec.password`,
 `onec.push_token`) наружу не отдаются: в ответе маска `***` и флаг `..._set`.
@@ -237,7 +238,9 @@ HTTP, витрину наполняет файл `Отчет диспетчер�
 «Загрузить файл…» прямо из браузера. Повторный импорт **заменяет** смены из
 файла, поэтому дубликатов не будет. Настройки: `dispatcher.source_path`,
 `dispatcher.auto_import` (забрать файл при старте, если он свежее последней
-загрузки), `dispatcher.default_period_days`.
+загрузки), `dispatcher.default_period_days` (сколько суток считать по умолчанию)
+и `dispatcher.max_period_days` (самый длинный период, который кабинет
+согласится посчитать) — см. `docs/05_статистика_порта.md`.
 
 Разбор файла изолирован от остального кабинета: `onec/dispatcher_xlsm.py`
 (листки → dataclass-ы) → `onec/dispatcher.py::apply_snapshot` (запись) →

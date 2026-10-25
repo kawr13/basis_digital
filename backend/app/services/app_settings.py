@@ -8,7 +8,7 @@
 
 Пока админ ничего не трогал в UI, кабинет ведёт себя ровно как раньше.
 
-Здесь же — валидация (тип, диапазон, согласованность пары порогов) и аудит:
+Здесь же — валидация (тип, диапазон, согласованность связанных ключей) и аудит:
 любая запись настроек оставляет след в `audit_log`.
 """
 from __future__ import annotations
@@ -93,6 +93,14 @@ SPEC: dict[str, Spec] = {
                                    hint="только если файл изменился с прошлой загрузки"),
     "dispatcher.default_period_days": Spec("int", 30, minimum=7, maximum=366,
                                            label="Период на странице статистики, суток"),
+    # Самый длинный период, который кабинет согласится посчитать. Агрегаты
+    # «Статистики» считает кабинет на Python, поэтому годовой запрос — самый
+    # дешёвый способ выложить себя: ~1.2 с сервером и ~740 КБ JSON, а экран
+    # столько не рисует осмысленно (см. docs/05, раздел про API).
+    "dispatcher.max_period_days": Spec("int", 184, minimum=7, maximum=366,
+                                        label="Максимальная длина периода, суток",
+                                        hint="длиннее периода не пройдёт проверку; не может быть "
+                                             "меньше периода на странице статистики"),
     # --- доступ к «Постановке судов» ----------------------------------------
     # Роли через запятую. Раздельно: просмотр / постановка судна / удаление.
     # Смысл: план ведёт диспетчер, но остальной кабинет он — менеджер.
@@ -307,7 +315,7 @@ def role_set(db: Session, key: str) -> set[str]:
 
 
 def _validate_together(values: dict[str, Any]) -> None:
-    """Согласованность пары порогов: «критично» не ниже «внимания»."""
+    """Согласованность связанных ключей: пороги, скрытые разделы, лимит периода."""
     warn = values.get("thresholds.capacity_warn")
     crit = values.get("thresholds.capacity_crit")
     if warn is not None and crit is not None and crit < warn:
@@ -317,6 +325,17 @@ def _validate_together(values: dict[str, Any]) -> None:
     all_sections = set(SPEC["ui.hidden_sections"].choices or ())
     if hidden is not None and set(hidden) == all_sections:
         raise ValueError("Нельзя скрыть все разделы сразу: хотя бы один должен остаться видимым")
+
+    # Период по умолчанию страница применяет без параметров запроса: если бы
+    # лимит был меньше дефолта, открытие «Статистики» получало бы 400 по своему
+    # же периоду — проверку длины делает `api/dispatcher.py::_period`.
+    default_days = values.get("dispatcher.default_period_days")
+    max_days = values.get("dispatcher.max_period_days")
+    if default_days is not None and max_days is not None and max_days < default_days:
+        raise ValueError(
+            "Максимальная длина периода не может быть меньше периода на странице "
+            f"статистики: страница откроется {default_days} сутками, а разрешено {max_days}",
+        )
 
 
 # --------------------------------------------------------------------- запись ----

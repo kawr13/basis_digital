@@ -69,6 +69,15 @@ const shiftDays = (isoDate: string, days: number) => {
   d.setDate(d.getDate() + days);
   return iso(d);
 };
+/**
+ * Границы периода: лимит длины задаёт бэкенд (`dispatcher.max_period_days`,
+ * приходит в `meta.max_period_days`) — годовой запрос агрегация не тянет и
+ * отвечает на него 400. Панель строит `min`/`max` полей и пресеты по этому
+ * числу, а не по догадкам. ISO-строки `YYYY-MM-DD` сравнимы лексикографически.
+ */
+const minIso = (a: string, b: string) => (a <= b ? a : b);
+const maxIso = (a: string, b: string) => (a >= b ? a : b);
+const isIso = (v: string | undefined | null): v is string => !!v && /^\d{4}-\d{2}-\d{2}$/.test(v);
 const pc = (v: number | null | undefined, digits = 0) => (v === null || v === undefined ? "—" : `${nf(v, digits)}%`);
 const toneOf = (v: number | null | undefined) =>
   v === null || v === undefined ? "default" : v >= 100 ? "ok" : v >= 80 ? "default" : v >= 60 ? "warn" : "crit";
@@ -156,14 +165,48 @@ export default function StatisticsPage() {
     return () => window.clearInterval(t);
   }, [load]);
 
+  // лимит длины периода — тот же, что проверяет бэкенд; 0 = мету ещё не получили
+  const maxDays = meta?.max_period_days ?? 0;
+
   const pickPreset = useCallback(
     (days: number) => {
       const anchor = meta?.date_max ?? data?.period.to;
       if (!anchor) return;
       setSelectedDay(null);
-      setPeriod({ from: shiftDays(anchor, -(days - 1)), to: anchor });
+      // пресет длиннее лимита кнопка не вызывает, но и тут не разъезжается
+      const span = maxDays > 0 ? Math.min(days, maxDays) : days;
+      setPeriod({ from: shiftDays(anchor, -(span - 1)), to: anchor });
     },
-    [meta, data],
+    [meta, data, maxDays],
+  );
+
+  /** «с»: значение не дальше лимита назад от выбранной «по». */
+  const pickFrom = useCallback(
+    (value: string) => {
+      setPeriod((p) => {
+        const other = p?.to ?? "";
+        // нативный `min` бережёт календарь, но не ввод с клавиатуры
+        const next = maxDays > 0 && isIso(value) && isIso(other)
+          ? maxIso(value, shiftDays(other, -(maxDays - 1)))
+          : value;
+        return { from: next, to: other || value };
+      });
+    },
+    [maxDays],
+  );
+
+  /** «по»: значение не дальше лимита вперёд от выбранной «с». */
+  const pickTo = useCallback(
+    (value: string) => {
+      setPeriod((p) => {
+        const other = p?.from ?? "";
+        const next = maxDays > 0 && isIso(value) && isIso(other)
+          ? minIso(value, shiftDays(other, maxDays - 1))
+          : value;
+        return { from: other || value, to: next };
+      });
+    },
+    [maxDays],
   );
 
   const selectDay = useCallback((day: string) => {
@@ -192,6 +235,17 @@ export default function StatisticsPage() {
   );
 
   const presets = [7, 14, 30, 90];
+
+  // границы полей: с одной стороны — витрина (`meta.date_min`/`date_max`), с
+  // другой — лимит длины периода, отсчитанный от второй даты выбранного периода
+  const dateFrom = period?.from ?? "";
+  const dateTo = period?.to ?? "";
+  const minFrom = maxDays > 0 && isIso(dateTo)
+    ? maxIso(shiftDays(dateTo, -(maxDays - 1)), meta?.date_min ?? "")
+    : meta?.date_min ?? "";
+  const maxTo = maxDays > 0 && isIso(dateFrom)
+    ? minIso(shiftDays(dateFrom, maxDays - 1), meta?.date_max ?? "")
+    : meta?.date_max ?? "";
 
   return (
     <AppShell
@@ -241,10 +295,16 @@ export default function StatisticsPage() {
               const anchor = meta?.date_max ?? data?.period.to;
               const active =
                 !!period && !!anchor && period.to === anchor && period.from === shiftDays(anchor, -(d - 1));
+              // пресет длиннее лимита бэкенд не примет — он неактивен, а не молча врёт
+              const tooLong = maxDays > 0 && d > maxDays;
               return (
                 <button
                   key={d}
-                  className={`btn btn-mini ${active ? "btn-primary" : "btn-ghost"}`}
+                  className={`btn btn-mini ${active ? "btn-primary" : "btn-ghost"}${
+                    tooLong ? " opacity-40 cursor-not-allowed" : ""
+                  }`}
+                  disabled={tooLong}
+                  title={tooLong ? `Максимум ${maxDays} сут — лимит меняет администратор` : undefined}
                   onClick={() => pickPreset(d)}
                 >
                   {d} сут
@@ -259,9 +319,9 @@ export default function StatisticsPage() {
               type="date"
               className="field-mini"
               value={period?.from ?? ""}
-              min={meta?.date_min ?? undefined}
+              min={minFrom || undefined}
               max={period?.to ?? undefined}
-              onChange={(e) => setPeriod((p) => ({ from: e.target.value, to: p?.to ?? e.target.value }))}
+              onChange={(e) => pickFrom(e.target.value)}
             />
             по
             <input
@@ -269,8 +329,8 @@ export default function StatisticsPage() {
               className="field-mini"
               value={period?.to ?? ""}
               min={period?.from ?? undefined}
-              max={meta?.date_max ?? undefined}
-              onChange={(e) => setPeriod((p) => ({ from: p?.from ?? e.target.value, to: e.target.value }))}
+              max={maxTo || undefined}
+              onChange={(e) => pickTo(e.target.value)}
             />
           </label>
 
