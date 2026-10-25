@@ -6,7 +6,7 @@
  *тут останется только статус — разбор уйдёт в app/onec/dispatcher_xlsx.py.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, type DispatcherImportResult, type DispatcherStatus } from "../../api";
+import { ApiError, api, type DispatcherImportResult, type DispatcherStatus } from "../../api";
 import { asOf, dmy, nf } from "../../format";
 import { errText, Field, FormError, Notice, StatusChip } from "./ui";
 
@@ -18,6 +18,18 @@ function fileToBase64(file: File): Promise<string> {
     fr.onerror = () => reject(new Error("файл не читается"));
     fr.readAsDataURL(file);
   });
+}
+
+/**
+ * 413 отвечает nginx до всякого кода приложения: тело — его собственная страница
+ * ошибки, `detail` не разбирается, и наружу вылезло бы сырое сообщение fetch.
+ */
+function importErrorText(e: unknown): string {
+  if (e instanceof ApiError && e.status === 413) {
+    return "Файл больше разрешённого размера: сервер принимает запросы до 16 МБ, а отчёт " +
+      "едёт в base64 (+33 % к весу). Положите файл на сервер и импортируйте по пути.";
+  }
+  return errText(e, "Импорт не выполнен");
 }
 
 export function DispatcherImport() {
@@ -54,7 +66,7 @@ export function DispatcherImport() {
       setNotice(`${label}: ${res.described}.`);
       await load();
     } catch (e) {
-      setError(errText(e, "Импорт не выполнен"));
+      setError(importErrorText(e));
     } finally {
       setBusy(false);
     }
