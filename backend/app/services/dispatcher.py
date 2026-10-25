@@ -24,7 +24,7 @@ from ..models import (
     FactRailDeparture, FactRailOperation, FactTruckOperation,
     FactVesselArrival, FactVesselOperation,
 )
-from . import app_settings
+from . import app_settings, data_cache
 
 SHIFT_LABELS = {"08-20": "День 08–20", "20-08": "Ночь 20–08"}
 WEEKDAYS = ("Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс")
@@ -866,4 +866,7 @@ def auto_import(db: Session) -> str:
     if not snapshot.shifts:
         return f"в файле {path.name} не найдено листов отчёта"
     apply_snapshot(db, snapshot)
+    # Причина та же, что в `api/dispatcher.import_file`: витрина изменилась,
+    # собранные ответы больше не действительны.
+    data_cache.invalidate()
     return f"импортировано из {path.name}: {describe(snapshot)}"

@@ -12,7 +12,7 @@
 | 1 | Сжатие ответов API (gzip на проксируемых ответах) | P0 | ✅ |
 | 2 | `Cache-Control` для `index.html`, `immutable` для статики | P0 | ✅ |
 | 3 | `client_max_body_size` 2m → 16m (импорт .xlsm не влезает в base64) | P0 | ✅ |
-| 4 | Кэш агрегатов `dispatcher/overview` + `ETag` / `Cache-Control` | P0 | ⬜ |
+| 4 | Кэш агрегатов `dispatcher/overview` + `ETag` / `Cache-Control` | P0 | ✅ |
 | 5 | Ограничение длины периода (годовой запрос = 1.2 с и 743 КБ) | P0 | ⬜ |
 | 6 | Лимит строк в `/api/dispatcher/rows` + серверный CSV | P1 | ⬜ |
 | 7 | Code-splitting: ленивые страницы + `manualChunks` | P1 | ⬜ |
@@ -88,13 +88,20 @@ API — это `proxy_pass`.
   `threading.Lock` (воркеров несколько).
 - Инвалидация — по версии данных, ручного сброса не нужно; импорт `.xlsm` обязан
   сдвигать версию (посмотреть, что `apply_snapshot` обновляет `updated_at`).
-- HTTP: `ETag` + `Cache-Control: private, max-age=60` на
+- HTTP: `ETag` + `Cache-Control: private, no-cache` на
   `/api/dispatcher/overview|rows|meta`, обработка `If-None-Match` → 304.
+  Именно `no-cache`, а не `max-age=60`: импорт `.xlsm` обязан быть виден сразу,
+  а удорожания всё равно нет — неизменившийся ответ приходит как 304 без тела.
   На `/api/meta/freshness` кэш не вешать.
 
 **Проверка.** pytest: повторный вызов `overview` не обращается к БД (посчитать запросы
 через `sqlalchemy.event`), после записи новой смены кэш протухает, `If-None-Match`
 возвращает 304. Все существующие тесты зелёные.
+
+**Итог (замер 2026-10-25 после правки, тот же разрез в 34 310 строк).**
+31 сутки: 110 мс → 5.8 мс; 365 суток: 1129 мс → 7.3 мс, тело ответа при неизменных
+dанных — 0 байт вместо 743 КБ. Новое: `backend/app/services/data_cache.py`,
+`backend/tests/test_dispatcher_cache.py` (11 тестов).
 
 ## 5. Ограничение периода
 
