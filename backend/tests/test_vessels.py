@@ -170,9 +170,15 @@ def test_plan_pdf_header_on_every_sheet(client, admin_hdr, manager_hdr):
     Листы распечатывают и по одному: на листе без заголовка и без дат окна
     непонятно, какой это кусок плана. Раньше второй лист уходил без шапки:
     при переносе причала на новую страницу флаг «первый лист» ещё не сбросили.
+
+    Шапка суток теперь одна на лист (а не над каждым причалом), поэтому на
+    каждом листе она обязана оказаться ровно один раз — и ни на одном листе
+    она не имеет права исчезнуть.
     """
     made = []
-    for i in range(6):
+    # двенадцать причалов по 130 м — план, который не влезает даже при поле
+    # шкалы: именно он и обязан распасться на листы
+    for i in range(12):
         berth = client.post("/api/vessels/berths", json={"code": f"MUL-{i}", "length_m": 130},
                             headers=admin_hdr).json()["id"]
         pid = client.post("/api/vessels/placements", json={
@@ -191,12 +197,12 @@ def test_plan_pdf_header_on_every_sheet(client, admin_hdr, manager_hdr):
     from pypdf import PdfReader
     import io
     pages = PdfReader(io.BytesIO(pdf.content)).pages
-    assert len(pages) > 1, f"шесть причалов по 130 м должны не на один лист, а их {len(pages)}"
+    assert len(pages) > 1, f"двенадцать причалов по 130 м должны не на один лист, а их {len(pages)}"
     for n, page in enumerate(pages, start=1):
         text = page.extract_text() or ""
         assert "План постановки судов" in text, f"лист {n} без шапки"
         assert "Пунктир" in text, f"лист {n} без сноски"
-        assert "причал / метры" in text, f"лист {n} без шапки суток"
+        assert text.count("причал / метры") == 1, f"лист {n} без шапки суток (или их несколько)"
 
     for berth, pid in made:   # прочий план не засоряем
         client.delete(f"/api/vessels/placements/{pid}", headers=admin_hdr)
@@ -820,18 +826,28 @@ def _pdf_label_positions(content: bytes) -> dict[str, tuple[int, float, float]]:
     return found
 
 
+def _page_of(pages: list[str], needle: str) -> int:
+    """Лист, на котором напечатана подпись (шифр судна или причала).
+
+    Номер листа берётся из самого рендера: подписи «лист N» проверяются против
+    факта, а не против числа, которое кто-то посчитал руками на глаз.
+    """
+    hits = [n for n, t in enumerate(pages) if needle in t]
+    assert hits, f"«{needle}» не найдено ни на одном листе"
+    return hits[0]
+
+
 def test_plan_pdf_reberthing_across_sheets(client, admin_hdr):
     """Перешвартовка не должна исчезать, когда причалы разъехались по листам.
 
-    Шесть причалов по 130 м: на первый лист лезут четыре, чип «Ожидания»
-    внизу не влезает и уезжает на лист 2, остальные причалы — на лист 3.
-    Цепочка АРВ-1 (лист 1) → АРВ-6 (лист 3) → чип «Ожидания» → АРВ-3 (лист 1):
-    на листе начала остаётся стрелка в нижний край блока с подписью «лист 3»,
-    на листе цели стрелка входит в полосу со стороны шапки с подписью «лист 1»,
-    а у каждой стрелки — свой номер шага цепочки.
+    План заведомо крупнее листа: восемь причалов по 200 м даже при поле шкалы
+    в один лист не просятся. Цепочка АРВ-1 → АРВ-6 → чип «Ожидания» → АРВ-3
+    лежит на разных листах, а номер листа в подписи берётся из самого рендера:
+    тест проверяет, что огрызок смотрит туда, где конец связи напечатан, а не
+    туда, куда удобно раскладке.
     """
     _clear_reberthings(client, admin_hdr)
-    bids = [_own_berth(client, admin_hdr, f"АРВ-{i}") for i in range(1, 7)]
+    bids = [_own_berth(client, admin_hdr, f"АРВ-{i}", 200) for i in range(1, 9)]
     made: list[int] = []
 
     def mk(berth_id, vessel, start, end, **kw):
@@ -852,13 +868,19 @@ def test_plan_pdf_reberthing_across_sheets(client, admin_hdr):
         mk(bids[2], "ШАГ ЧЕТЫРЕ", "2028-01-16T00:00:00", "2028-01-18T12:00:00", moved_from_id=c3)
 
         pages = _pdf_page_texts(_plan_pdf(client, admin_hdr, bids, "2028-01-01", "2028-01-31"))
-        assert len(pages) == 3, f"ждём три листа (4 причала + чип + 2), а их {len(pages)}"
-        # лист 1: оригинал уходит на лист 3; копия из чипа приходит с листа 2
-        assert "шаг 1→2 → АРВ-6 · лист 3" in pages[0], pages[0][:400]
-        assert "шаг 3→4 от Ожидание · лист 2" in pages[0]
-        # лист 3: стрелка входит в полосу со стороны шапки + стрелка в чип этого же листа
-        assert "шаг 1→2 от АРВ-1 · лист 1" in pages[2], pages[2][:400]
-        assert "шаг 2→3" in pages[2], "стрелка полоса → чип не рисуется вовсе"
+        assert len(pages) > 1, f"причалы обязаны не влезть в один лист, а их {len(pages)}"
+        p1 = _page_of(pages, "ШАГ ОДИН")     # лист оригинала (АРВ-1)
+        p6 = _page_of(pages, "ШАГ ДВА")      # лист копии (АРВ-6) — другой лист
+        p3 = _page_of(pages, "ШАГ ЧЕТЫРЕ")   # лист полосы после «Ожидания» (АРВ-3)
+        assert p1 != p6, "причалы цепочки должны разъехаться по листам — иначе тест ни о чём"
+        # лист начала: стрелка уходит в нижний край блока и знает номер листа цели
+        assert f"шаг 1→2 → АРВ-6 · лист {p6 + 1}" in pages[p1], pages[p1][:400]
+        # лист цели: стрелка входит в полосу со стороны шапки и знает номер начала
+        assert f"шаг 1→2 от АРВ-1 · лист {p1 + 1}" in pages[p6], pages[p6][:400]
+        # чип «Ожидания» печатается внизу каждого листа, поэтому связи с ним
+        # рисуются целиком — на листе своей полосы, без огрызков
+        assert "шаг 2→3" in pages[p6], "стрелка полоса → чип не рисуется вовсе"
+        assert "шаг 3→4" in pages[p3], "стрелка чип → полоса не рисуется вовсе"
         # вся цепочка подписана шагами — на резаном по причалам листу иначе не свести
         for tag in ("шаг 1→2", "шаг 2→3", "шаг 3→4"):
             assert any(tag in t for t in pages), f"у цепочки потерялась подпись {tag}"
@@ -902,6 +924,76 @@ def test_plan_pdf_bar_to_waiting_chip(client, admin_hdr):
         for pid in made:
             client.delete(f"/api/vessels/placements/{pid}", headers=admin_hdr)
         client.delete(f"/api/vessels/berths/{own}", headers=admin_hdr)
+
+
+def test_plan_pdf_typical_window_fits_one_sheet(client, admin_hdr):
+    """Типовое окно плана — шесть причалов и 19 суток — обязано влезть в один лист.
+
+    Ради этого лист и сжали по высоте: пока план резался на листы, каждая
+    стрелка через границу превращалась в огрызок «лист N», и диспетчер сводил
+    листы руками. Здесь ровно тот кадр, из-за которого правка и началась:
+    шесть причалов, девятнадцать суток, чип «Ожидания» и цепочка из пяти
+    постановок — и ни одной границы листа.
+    """
+    _clear_reberthings(client, admin_hdr)
+    bids = [_own_berth(client, admin_hdr, f"ТЕСН-{i}", 110) for i in range(1, 7)]
+    made: list[int] = []
+
+    def mk(berth_id, vessel, start, end, **kw):
+        r = client.post("/api/vessels/placements", json={
+            "berth_id": berth_id, "vessel": vessel, "length_m": 80, "offset_m": 0,
+            "starts_at": start, "ends_at": end, **kw}, headers=admin_hdr)
+        assert r.status_code == 201, r.text
+        made.append(r.json()["id"])
+        return r.json()["id"]
+
+    try:
+        park_id = next(b["id"] for b in client.get("/api/vessels/berths", headers=admin_hdr).json()
+                       if b["code"] == "ОЖИДАНИЕ")
+        a = mk(bids[0], "ТЕСН ОДИН", "2031-05-02T00:00:00", "2031-05-04T12:00:00")
+        b2 = mk(bids[4], "ТЕСН ДВА", "2031-05-06T00:00:00", "2031-05-08T12:00:00", moved_from_id=a)
+        c3 = mk(park_id, "ТЕСН ТРИ", "2031-05-09T00:00:00", "2031-05-11T12:00:00",
+                moved_from_id=b2, at_other_terminal=True)
+        d4 = mk(bids[2], "ТЕСН ЧЕТЫРЕ", "2031-05-12T00:00:00", "2031-05-14T12:00:00",
+                moved_from_id=c3)
+        mk(bids[1], "ТЕСН ПЯТЬ", "2031-05-15T00:00:00", "2031-05-17T12:00:00", moved_from_id=d4)
+
+        pages = _pdf_page_texts(_plan_pdf(client, admin_hdr, bids, "2031-05-01", "2031-05-19"))
+        assert len(pages) == 1, f"шесть причалов должны влезть в один лист, а их {len(pages)}"
+        text = pages[0]
+        assert "План постановки судов" in text and "Пунктир" in text
+        assert text.count("причал / метры") == 1, "шапка суток должна быть одна на лист"
+        assert "Ожидание — ждут череди" in text, "чипов «Ожидания» не стало"
+        for tag in ("шаг 1→2", "шаг 2→3", "шаг 3→4", "шаг 4→5"):
+            assert tag in text, f"на листе не осталось подписи {tag}: {text[:300]}"
+        # план на одном листе — значит ни одна стрелка не имеет права смотреть «за лист»
+        # (сама сноска слова «лист N» и «вне кадра» упоминает всегда — ищем огрызки)
+        assert "· лист" not in text and "· вне кадра" not in text, text[:400]
+    finally:
+        _drop(client, admin_hdr, made, bids)
+
+
+def test_plan_pdf_overflow_still_splits_sheets(client, admin_hdr):
+    """Невмещающийся план обязан распадаться на листы и не терять стрелки.
+
+    Десять причалов по 220 м — больше, чем лист вмещает даже при поле шкалы, и
+    компактность не имеет права отнимать fallback: план уезжает на второй лист,
+    а стрелка через границу оставляет огрызки с номером листа с обеих сторон —
+    ровно как печаталась до сжатия.
+    """
+    _clear_reberthings(client, admin_hdr)
+    bids = [_own_berth(client, admin_hdr, f"МНОГО-{i:02d}", 220) for i in range(1, 11)]
+    made = _chain(client, admin_hdr, [bids[0], bids[-1]], "2032-04-02", gap_days=6)
+    try:
+        pages = _pdf_page_texts(_plan_pdf(client, admin_hdr, bids, "2032-04-01", "2032-04-30"))
+        assert len(pages) > 1, "план из десяти причалов по 220 м не должен влезать в один лист"
+        src_page = _page_of(pages, "ЦЕПОЧКА 1")
+        dst_page = _page_of(pages, "ЦЕПОЧКА 2")
+        assert src_page != dst_page, "причалы цепочки должны разъехаться по листам"
+        assert f"шаг 1→2 → МНОГО-10 · лист {dst_page + 1}" in pages[src_page], pages[src_page][:400]
+        assert f"шаг 1→2 от МНОГО-01 · лист {src_page + 1}" in pages[dst_page], pages[dst_page][:400]
+    finally:
+        _drop(client, admin_hdr, made, bids)
 
 
 def test_plan_pdf_step_numbers_survive_the_filter(client, admin_hdr):
@@ -1024,11 +1116,17 @@ def test_arrow_plan_picks_the_stub_for_every_combination():
 def test_plan_pdf_layout_coordinates_frozen(client, admin_hdr):
     """Геометрия листа заморожена: стрелки появились, полосы — не сдвинулись.
 
-    Восемь причалов по 140 м: cell_h = 6 pt независимо от чипов «Ожидания»
-    (сетка всё равно не влезает), на лист встаёт по три блока, чип всегда
-    помещается внизу — значит координаты не зависят от того, что осталось
-    в кармане после других тестов. Значения зафиксированы с версии кода
-    до двухпроходной раскладки: после правок они обязаны совпасть.
+    Значения зафиксированы рендером версии «план влезает в один лист» (правка
+    раскладки в plan_pdf.py: одна шапка суток на лист вместо шапки над каждым
+    причалом, строка метража 16 → 10 точек, зазор между блоками 6 → 3, шкала
+    сжимается до 3,5 точек вместо шести). Из-за этого полосы уехали вверх:
+    раньше над каждой из них висело по 26 точек повторных дат.
+
+    Восемь причалов по 140 м — как раз тот случай, который в лист не влезает
+    даже при поле шкалы: он и обязан распасться на листы (теперь на два, а не
+    на три). Координаты здесь именно что заморожены: они ловят случайный дрейф
+    раскладки, а не запрещают жить нужной правке — поправляются только вместе
+    с осознанным изменением вёрстки листа.
     """
     _clear_reberthings(client, admin_hdr)
     bids = [_own_berth(client, admin_hdr, f"ЛАЙ-{i}", 140) for i in range(1, 9)]
@@ -1044,11 +1142,11 @@ def test_plan_pdf_layout_coordinates_frozen(client, admin_hdr):
             made.append(r.json()["id"])
         content = _plan_pdf(client, admin_hdr, bids, "2028-03-01", "2028-03-07")
         texts = _pdf_page_texts(content)
-        assert len(texts) == 3, f"число листов поехало: {len(texts)} вместо 3"
+        assert len(texts) == 2, f"число листов поехало: {len(texts)} вместо 2"
         assert _pdf_label_positions(content) == {
-            "ЛОЖЕНИЕ А": (0, 222.1, 493.1),   # первый блок первого листа
-            "ЛОЖЕНИЕ Б": (1, 222.1, 481.1),   # первый блок второго листа, отм. 20 м
-            "ЛОЖЕНИЕ В": (2, 222.1, 337.1),   # второй блок третьего листа, отм. 40 м
+            "ЛОЖЕНИЕ А": (0, 222.1, 499.1),   # первый блок первого листа
+            "ЛОЖЕНИЕ Б": (0, 222.1, 306.1),   # четвёртый блок первого листа, отм. 20 м
+            "ЛОЖЕНИЕ В": (1, 222.1, 485.1),   # второй блок второго листа, отм. 40 м
         }
     finally:
         for pid in made:

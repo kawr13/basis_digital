@@ -8,17 +8,25 @@
 Что попадает в лист решает фронтенд: он знает, что в кадре, и присылает `day_from`
 / `day_to` (сутки окна) и `berth_ids` (причалы окна). Сервер только рисует.
 
+Лист сжат по высоте, а не разрезан: шапка суток печатается ОДНА на лист, строка
+метража уплотнена, зазор между блоками маленький, а метровая шкала имеет право
+сжиматься вплоть до CELL_H_MIN. Типовое окно из шести причалов поэтому лежит на
+одном листе, и стрелки перешвартовок вовсе не пересекают границу листа. Если не
+влезло и при поле — план распадается на листы с теми же огрызками, что и раньше.
+
 Стрелки перешвартовок через границу листа: лист разрезан по причалам и суткам,
 и пара «оригинал → копия» может оказаться на разных листах — или наполовину за
 пределами кадра. Раскладка поэтому считается в два прохода: сначала «какой
-причал на каком листе», потом рисование. А вот что рисовать у каждой половины
-связи, решает одна функция — `_arrow_plan`: если напечатан хотя бы один конец,
-на бумаге обязана быть подпись «шаг N→M» с теми же номерами, что на экране.
-Второй конец на другом листе → огрызок «· лист N»; не напечатан вовсе (причал
-не в фильтре либо постановка вне напечатанных суток) → «· вне кадра». Уходящий
-огрызок идёт в нижний край блока причала («шаг N→M → РП-6 · лист 2»), входящий
-входит в полосу со стороны шапки («шаг N→M от РП-3 · лист 1»), у чипа «Ожидания»
-огрызок растёт вверх от его верхней грани.
+причал на каком листе» (там же рождаются и сами листы), потом рисование —
+второй проход берёт числа первого, а не считает их заново. А вот что рисовать
+у каждой половины связи, решает одна функция — `_arrow_plan`: если напечатан
+хотя бы один конец, на бумаге обязана быть подпись «шаг N→M» с теми же
+номерами, что на экране. Второй конец на другом листе → огрызок «· лист N»;
+не напечатан вовсе (причал не в фильтре либо постановка вне напечатанных
+суток) → «· вне кадра». Уходящий огрызок идёт в нижний край блока причала
+(«шаг N→M → РП-6 · лист 2»), входящий входит в полосу со стороны шапки
+(«шаг N→M от РП-3 · лист 1»), у чипа «Ожидания» огрызок растёт вверх от его
+верхней грани.
 
 Проверка прав та же, что у JSON-плана: без права `view` файл не отдаём.
 """
@@ -318,63 +326,98 @@ def build_plan_pdf(
     for p in placements:
         by_berth.setdefault(p.berth_id, []).append(p)
 
-    # ── раскладка: альбом A4, полей по 8 мм ─────────────────────────────────
+    # ── раскладка: альбом A4, поля по 8 мм, лист сжат по высоте ─────────────
+    # Листы печатают по одному, а стрелка, чьи концы разъехались по листам,
+    # превращается в огрызки «лист N» и читается хуже. Поэтому вертикаль
+    # экономится, а не переносится: одна шапка суток на лист (это шапка
+    # таблицы, а не шапка причала), уплотнённая строка метража, маленький
+    # зазор между блоками и право метровой шкале сжиматься до пола.
     page_w_pt, page_h_pt = landscape(A4)
     margin = 8 * MM
     left_col = 34 * MM          # колонка причала: код, осадка, метраж
     field_w = page_w_pt - 2 * margin - left_col
     slot_w = field_w / win_slots
-    row_head = 16                # строка с метражом причала
-    head_h = 26                  # шапка: дата + слоты
-    # 10 точек на 10 м причала — ровно 1 точка на метр, шкала читается без
-    # пересчёта. Но если сетка всех причалов вместе с низом листа влезает и
-    # при меньшей ячейке — сжимаем: листы печатают целиком, а не разрезают.
-    # Ниже 6 pt не идём: полосы короче 13 м остались бы без подписи.
+    head_h = 26                  # шапка суток: один раз на лист, над первым блоком
+    row_head = 10                # строка метража причала: шифр, длина, осадка
+    block_gap = 3                # зазор между блоками причалов
+    CELL_H_TOP = 10              # 10 точек на 10 м причала — ровно 1 точка на метр
+    CELL_H_MIN = 3.5             # ниже подпись судна в полосе не читается
+    # «Ожидание» — не причал: отдельный список ждущих судов внизу листа, в три
+    # колонки; размеры чипов — общие переменные, их же читает waiting_section
     waiting = sorted(by_berth.get(park.id, []), key=lambda p: p.vessel) if park else []
-    waiting_h = 14 + math.ceil(len(waiting) / 3) * 20 if waiting else 0
-    avail = page_h_pt - 2 * margin - 30 - waiting_h - 10
+    chip_rows = math.ceil(len(waiting) / 3)
+    chip_h, chip_gap = 16, 4
+    waiting_need = 14 + chip_rows * (chip_h + chip_gap) if waiting else 0
+    head_y = page_h_pt - margin - 28        # рабочая строка сразу после page_head()
+    avail = head_y - margin - waiting_need  # сколько точек остаётся под блоки причалов
     total_cells = sum(length_cells(b) for b in berths)
-    fit = ((avail - (head_h + row_head + 6) * len(berths)) / total_cells) if total_cells else 10
-    cell_h = max(6, min(10, math.floor(fit)))
+    # Хватит ли одного листа, даже когда шкалу сжали до CELL_H_MIN. Считается
+    # ЗДЕСЬ, до первого прохода раскладки: оба прохода обязаны вести одни числа.
+    fit = ((avail - head_h - (row_head + block_gap) * len(berths)) / total_cells
+           if total_cells else CELL_H_TOP)
+    # Влезает — берём целое число точек, чтобы линейка метров не спотыкалась.
+    # Не влезло и в поле — всё равно печатаем максимально плотно, а лишнее
+    # уходит на следующий лист: распасться план умеет ровно как раньше.
+    cell_h = (min(CELL_H_TOP, max(CELL_H_MIN, math.floor(fit)))
+              if fit >= CELL_H_MIN else CELL_H_MIN)
+    squeezed = cell_h < CELL_H_TOP          # шкала мельче обычной — об этом сноска
     # Подписи шапки суток зависят от ширины слота: уже 7 pt — «00 06 12 18»
     # сливаются, сутку меньше 18 pt — даты наезжают друг на друга. Сетка важнее
     # подписей: часы убираем совсем, даты рисуем через одну-две.
     show_hours = slot_w >= 7
     day_step = max(1, math.ceil(18 / (len(SLOT_HOURS) * slot_w)))
-    row_head = 16                # строка с метражом причала
-    head_h = 26                  # шапка: дата + слоты
+    # шаг подписей линейки метров: на сжатом листе метки каждой второй отметки
+    # сливаются, поэтому шаг растёт вместе с сжатием (сами отметки остаются).
+    # Рост останавливается там, где подписи перестали бы попадать в поле.
+    cells_max = max((length_cells(b) for b in berths), default=10)
+    ruler_step = 20
+    while ruler_step / 10 * cell_h < 9 and ruler_step <= cells_max * 5:
+        ruler_step *= 2
     f = font_name()
+
+    def block_need(cells: int, with_head: bool) -> float:
+        """Сколько точек по вертикали съедает блок причала: строка метража + поле
+        + зазор, а у первого на листе блока ещё и шапка суток (она одна на лист).
+
+        Числа считаются один раз: по ним первый проход раскладывает причалы по
+        листам, а второй их рисует. Раскладка не имеет права разойтись с
+        рисованием ни на точку, иначе подпись «лист N» посмотрит не туда, где
+        лежит второй конец связи.
+        """
+        return (head_h if with_head else 0) + row_head + cells * cell_h + block_gap
 
     # ── первый проход раскладки: на каком листе окажется каждый причал ──────
     # Стрелка через границу листа обязана быть осмысленной на обоих концах:
     # на листе начала — «уходит», на листе цели — «приходит». Значит, лист
-    # каждой половины нужен до рисования. Здесь шаг в шаг повторяется основной
-    # цикл ниже (те же need, то же условие переноса, тот же перенос чипов
-    # «Ожидания»): второй проход рисует ровно то, что посчитано здесь, —
-    # раскладка не имеет права сдвинуться ни на точку.
-    head_y = page_h_pt - margin - 28  # рабочая строка сразу после page_head()
-    chip_rows = math.ceil(len(waiting) / 3)
-    waiting_need = 14 + chip_rows * (16 + 4) if waiting else 0  # как в waiting_section
+    # каждой половины нужен до рисования. Здесь рождается таблица листов:
+    # (причал, верх блока, шапка суток над ним) плюс вертикаль блока
+    # «Ожидание». Второй проход сам ничего не решает — только исполняет эти
+    # числа, поэтому лист и раскладка не могут разойтись в принципе.
     berth_page: dict[int, int] = {}  # причал → лист, на котором напечатан его блок
-    chip_pages: set[int] = set()     # листы, внизу которых напечатан блок «Ожидание»
-    _y, _page = head_y, 0
+    pages: list[list[tuple[Berth, float, bool]]] = [[]]
+    chip_at: dict[int, float] = {}   # лист → вертикаль блока «Ожидание» под ним
+    _y, _head = head_y, False        # _head — шапка суток на этом листе уже есть
     for b in berths:
-        # запас считаем вместе с шапкой суток: ровно как в основном цикле ниже
-        need = head_h + row_head + length_cells(b) * cell_h + 6
+        need = block_need(length_cells(b), not _head)
         if _y - need < margin:
-            if waiting:
-                if _y - waiting_need < margin:  # чипы не влезли — уехали на следующий лист
-                    _page += 1
+            if waiting:  # чипы допечатываются в низ дописываемого листа
+                if _y - waiting_need < margin:  # не влезли — уехали на свой лист
+                    pages.append([])
                     _y = head_y
-                chip_pages.add(_page)
-            _page += 1
-            _y = head_y
-        berth_page[b.id] = _page
+                chip_at.setdefault(len(pages) - 1, _y)
+            pages.append([])
+            _y, _head = head_y, False
+            need = block_need(length_cells(b), True)
+        pages[-1].append((b, _y, not _head))
+        berth_page[b.id] = len(pages) - 1
+        _head = True
         _y -= need
-    if waiting:  # финальный вызов waiting_section после последнего причала
+    if waiting:  # финальный блок «Ожидание» после последнего причала
         if _y - waiting_need < margin:
-            _page += 1
-        chip_pages.add(_page)
+            pages.append([])
+            _y = head_y
+        chip_at.setdefault(len(pages) - 1, _y)
+    chip_pages = set(chip_at)
 
 
     buf = io.BytesIO()
@@ -578,18 +621,19 @@ def build_plan_pdf(
         cells = length_cells(b)
         field_h = cells * cell_h
 
-        # строка причала
+        # строка причала: шифр, метраж, осадка — уплотнённая (10 точек вместо 16),
+        # иначе шесть причалов в лист не встают
         c.setFillColor(HexColor("#f2f5fa"))
         c.setStrokeColor(HexColor("#8fa2bd"))
         c.rect(margin, y_top - row_head, left_col, row_head, stroke=1, fill=1)
         c.rect(margin + left_col, y_top - row_head, field_w, row_head, stroke=1, fill=1)
-        c.setFont(f, 8)
+        c.setFont(f, 7)
         c.setFillColor(HexColor("#101c2c"))
-        c.drawString(margin + 3, y_top - row_head + 5, b.code)
+        c.drawString(margin + 3, y_top - row_head + 3, b.code)
         meta = f"{b.length_m} м длины · {cells} ячеек по 10 м" if b.length_m else "метраж не задан · 100 м"
         if b.depth:
             meta = f"{meta}   осадка {str(b.depth).replace('.', ',')} м"
-        c.drawString(margin + left_col + 4, y_top - row_head + 5, _clip(meta, field_w - 8, 8))
+        c.drawString(margin + left_col + 4, y_top - row_head + 3, _clip(meta, field_w - 8, 7))
         y_top -= row_head
 
         # поле шкалы
@@ -623,8 +667,9 @@ def build_plan_pdf(
             y = y_top - (m / 10) * cell_h
             c.line(margin + left_col, y, margin + left_col + field_w, y)
             # последнюю границу (конец причала) не подписываем: подпись висела бы
-            # на нижнем крае поля и при плотной ячейке залезала на шапку следующего
-            if m % 20 == 0 and m < cells * 10:
+            # на нижнем крае поля и при плотной ячейке залезала на строку метража;
+            # на сжатом листе шаг подписей растёт (ruler_step), сами отметки — нет
+            if m % ruler_step == 0 and m < cells * 10:
                 c.drawRightString(margin + left_col - 3, y - 2, str(m))
 
         # полосы судов
@@ -653,17 +698,24 @@ def build_plan_pdf(
                 if cut_end:
                     c.line(x + w - 1, bottom, x + w - 1, bottom + h)
                 c.setDash()
-            label = _clip(p.vessel, w - 4, 6.5)
+            # подпись живёт внутри полосы: на сжатом листе полоса бывает ниже
+            # подписи, поэтому шрифт подбирается под полосу, а текст наружу неё
+            # не выходит (снаружи полосы подписей не бывает вовсе)
             c.setFillColor(HexColor(text_on(bar_color(p))))
-            c.setFont(f, 6.5)
             if h >= 18:
-                c.drawString(x + 3, bottom + h - 8, label)
+                c.setFont(f, 6.5)
+                c.drawString(x + 3, bottom + h - 8, _clip(p.vessel, w - 4, 6.5))
                 sub = " · ".join(x2 for x2 in (p.volume, f"{p.length_m} м" if p.length_m else None) if x2)
                 if sub:
                     c.setFont(f, 5.5)
                     c.drawString(x + 3, bottom + h - 15, _clip(sub, w - 4, 5.5))
-            elif h >= 8:
-                c.drawString(x + 3, bottom + h - 7, label)
+            else:
+                size = 6.5 if h >= 13 else 5.2
+                # полоса ниже подписи — оставляем её пустой: лучше полоса без
+                # шифра, чем текст, нарезавший соседние шкалы
+                if h >= size + 1.5:
+                    c.setFont(f, size)
+                    c.drawString(x + 3, bottom + h - size - 1.2, _clip(p.vessel, w - 4, size))
             anchors[p.id] = (page_no, x + w, bottom + h / 2, x)
             bar_rect[p.id] = (page_no, x, x + w, bottom, bottom + h)
             # огрызки своей полосы («лист N» / «вне кадра»): рисуем сразу — после
@@ -678,31 +730,30 @@ def build_plan_pdf(
                     draw_exit_arrow(bar_rect[p.id], bottom_edge, color, text, n)
                 else:
                     draw_entry_arrow(bar_rect[p.id], y_top, color, text, n)
-        # целые стрелки «полоса → полоса» этого листа: пара соединяется, только
-        # когда обе полосы уже нарисованы, — пробуем их после каждого блока причала
-        for src_id, dst_id, text in list(full_bar.get(page_no, [])):
-            a, b = anchors.get(src_id), anchors.get(dst_id)
-            if not (a and b and a[0] == b[0] == page_no):
-                continue
-            full_bar[page_no].remove((src_id, dst_id, text))
-            color = bar_color(chain_by[dst_id])
-            x1, y1, rightward = draw_arrow(a, b, HexColor(color))
-            arrow_label(text, x1 - 3 if rightward else x1 + 3, y1 + 2, color,
-                        align="right" if rightward else "left")
+        # целые стрелки «полоса → полоса» рисуются после всех блоков листа —
+        # там, где обе полосы уже нарисованы (см. второй проход раскладки)
 
-        return y_top - field_h - 6
+        return y_top - field_h - block_gap
 
-    # ── рисуем: сколько причалов влезает в лист, остальное — на следующий ──────
+    # ── рисуем: ровно то, что посчитала раскладка, лист за листом ─────────────
 
     def foot_note() -> None:
-        """Сноска под каждым листом: листы распечатывают и по одному."""
+        """Сноска под каждым листом: листы распечатывают и по одному.
+
+        В одну строку она не влезала уже до сжатия листа — хвост уходил за правый
+        край бумаги, поэтому теперь строк две: про стрелки и про то, чем лист
+        собран и почему шкала на нём может быть мельче обычной.
+        """
         c.setFont(f, 6)
         c.setFillColor(HexColor("#566a85"))
         c.drawString(margin, margin - 2,
                      "Пунктир — постановка продолжается за границей кадра. Стрелка — "
                      "запланированная перестановка; «лист N» — её продолжение на другом "
-                     "листе, «вне кадра» — за пределами напечатанных суток или причалов. "
-                     "Лист собран по тому, что видно в окне плана.")
+                     "листе, «вне кадра» — за пределами напечатанных суток или причалов.")
+        c.drawString(margin, margin - 9,
+                     "Лист собран по тому, что видно в окне плана."
+                     + (" Лист сжат по высоте: метровая шкала мельче обычной, чтобы "
+                        "уместиться на один лист." if squeezed else ""))
 
     def page_head(fresh: bool = False) -> float:
         """Верх листа с шапкой; fresh=True — начать новый лист.
@@ -723,23 +774,23 @@ def build_plan_pdf(
     # копиям этого листа и обратно — в обоих направлениях перешвартовки
 
     def waiting_section(y: float) -> float:
-        """Низ листа: чипы ждущих судов + стрелки между чипами и копиями этого листа."""
+        """Низ листа: чипы ждущих судов + стрелки между чипами и копиями этого листа.
+
+        Место под блок резервирует раскладка (`chip_at`), а не этот рисовальщик:
+        решение «влезли чипы или уехали на свой лист» принято в первом проходе,
+        и здесь оно уже не имеет права пересматриваться.
+        """
         if not waiting:
             return y
         chip_w = (left_col + field_w - 2 * 4) / 3
-        chip_h, gap = 16, 4
-        rows = math.ceil(len(waiting) / 3)
-        if y - (14 + rows * (chip_h + gap)) < margin:
-            foot_note()
-            y = page_head(fresh=True)
         c.setFont(f, 8)
         c.setFillColor(HexColor("#1b3360"))
         c.drawString(margin, y - 9, f"Ожидание — ждут череди: {len(waiting)}")
         y -= 14
         first_row_top = y  # верхняя грань чипов первой строки — по ней решаем, насколько поднимать огрызок
         for i, p in enumerate(waiting):
-            x = margin + (i % 3) * (chip_w + gap)
-            cy = y - (i // 3) * (chip_h + gap)
+            x = margin + (i % 3) * (chip_w + chip_gap)
+            cy = y - (i // 3) * (chip_h + chip_gap)
             color = bar_color(p)
             c.setFillColor(HexColor(color))
             if p.at_other_terminal:
@@ -789,19 +840,20 @@ def build_plan_pdf(
                 n = chip_stub.get(key, 0)   # у чипа может быть два огрызка: откуда и куда
                 chip_stub[key] = n + 1
                 draw_chip_stub(cr, color, text, cr[4] == first_row_top, n)
-        return y - rows * (chip_h + gap)
+        return y - chip_rows * (chip_h + chip_gap)
 
-    y = page_head()
-    for b in berths:
-        # запас считаем вместе с шапкой суток: без неё блок «влезал» в остаток
-        # страницы и упирался сеткой в нижнее поле
-        need = head_h + row_head + length_cells(b) * cell_h + 6
-        if y - need < margin:
-            y = waiting_section(y)  # низ допечатываемого листа: чипы + стрелки
-            foot_note()
-            y = page_head(fresh=True)
-        # шапка суток — своя у каждого причала: лист с одним причалом читают
-        # отдельно от остальных
+    # ── второй проход: рисуем ровно то, что посчитал первый ────────────────
+    # Порядок листов задаёт раскладка, а не рисовальщик: лист, на который что-то
+    # не влезло, известен заранее, поэтому подпись «лист N» смотрит туда, где
+    # конец связи действительно напечатан.
+
+    def day_header(y: float) -> None:
+        """Шапка суток — ОДНА на лист, над первым его блоком: это шапка таблицы.
+
+        Те же 26 точек над каждым причалом и отправляли шесть причалов на второй
+        лист: даты окна от причала не зависят, а 6 × 26 точек — это половина
+        сетки одного причала, выкинутая ради повтора одних и тех же дат.
+        """
         c.setFillColor(HexColor("#f2f5fa"))
         c.setStrokeColor(HexColor("#8fa2bd"))
         c.rect(margin, y - head_h, left_col, head_h, stroke=1, fill=1)
@@ -823,10 +875,26 @@ def build_plan_pdf(
             if show_hours:
                 for j, h in enumerate(SLOT_HOURS):
                     c.drawCentredString(x + (j + 0.5) * slot_w, y - 19, f"{h:02d}")
-        y -= head_h
-        y = draw_block(b, y)
 
-    y = waiting_section(y)
-    foot_note()
+    for n, blocks in enumerate(pages):
+        page_head(fresh=bool(n))   # шапка листа и сноска — на каждом листе
+        for b, y_top, with_head in blocks:
+            if with_head:
+                day_header(y_top)
+            draw_block(b, y_top - (head_h if with_head else 0))
+        # целые стрелки «полоса → полоса» этого листа: пара соединяется, только
+        # когда обе полосы уже нарисованы
+        for src_id, dst_id, text in list(full_bar.get(n, [])):
+            a, dst = anchors.get(src_id), anchors.get(dst_id)
+            if not (a and dst and a[0] == dst[0] == page_no):
+                continue
+            full_bar[n].remove((src_id, dst_id, text))
+            color = bar_color(chain_by[dst_id])
+            x1, y1, rightward = draw_arrow(a, dst, HexColor(color))
+            arrow_label(text, x1 - 3 if rightward else x1 + 3, y1 + 2, color,
+                        align="right" if rightward else "left")
+        if n in chip_at:   # низ листа: чипы + стрелки к полосам этого же листа
+            waiting_section(chip_at[n])
+        foot_note()
     c.save()
     return buf.getvalue()
