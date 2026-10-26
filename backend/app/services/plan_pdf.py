@@ -289,59 +289,62 @@ def build_plan_pdf(
         """Единая подпись шага цепочки — один формат у всех стрелок: и внутри листа, и через границу."""
         return f"шаг {steps.get(src_id, '?')}→{steps.get(dst_id, '?')}"
 
-    def draw_arrow(a, b, color) -> tuple[float, float, bool]:
-        """Та же «ёлочка», что на экране: к копии подходим с её ближней стороны."""
+    def arrow_straight(x0: float, y0: float, x1: float, y1: float, color, dot: bool = True) -> None:
+        """Прямая стрелка «из пункта А в пункт Б»: кружок на старте, линия и
+        остриё вдоль самой линии.
+
+        Ломаную «ёлочку» убрали с бумаги заодно с экраном: на сетке из нескольких
+        причалов она резала чужие строки, и стрелки разных цепочек путались.
+        Прямая коротко читается — начало, конец, направление; остальное дописывает
+        подпись «шаг N→M …». `dot=False` — когда у стрелки нет своей полосы-источника
+        (приход с другого листа), иначе над ней висел бы бесхозный кружок."
+        """
         c.setStrokeColor(color)
         c.setFillColor(color)
         c.setLineWidth(1.2)
+        dx, dy = x1 - x0, y1 - y0
+        ln = math.hypot(dx, dy)
+        if ln < 0.5:  # начало и конец слились — рисовать нечего
+            return
+        ux, uy = dx / ln, dy / ln          # куда смотрит стрелка
+        px, py = -uy, ux                   # перпендикуляр: на него разводим перья
+        if dot:
+            c.circle(x0, y0, 1.6, stroke=0, fill=1)          # «откуда» — как на экране
+        c.line(x0, y0, x1 - ux * 5.5, y1 - uy * 5.5)         # до острия не доезжаем
+        head = c.beginPath()
+        head.moveTo(x1, y1)
+        head.lineTo(x1 - ux * 6.5 + px * 3.0, y1 - uy * 6.5 + py * 3.0)
+        head.lineTo(x1 - ux * 6.5 - px * 3.0, y1 - uy * 6.5 - py * 3.0)
+        head.close()
+        c.drawPath(head, stroke=0, fill=1)
+
+    def draw_arrow(a, b, color) -> tuple[float, float, bool]:
+        """Оригинал → копия: от ближнего торца полосы до ближнего торца копии —
+        та же прямая, что рисует экран."""
         rightward = b[3] >= a[3]
         x0 = a[1] if rightward else a[3]
         x1 = b[3] if rightward else b[1]
-        y0, y1 = a[2], b[2]
-        mid = (x0 + x1) / 2
-        d = 1 if rightward else -1
-        c.line(x0, y0, mid, y0)
-        c.line(mid, y0, mid, y1)
-        c.line(mid, y1, x1 - 3 * d, y1)
-        head = c.beginPath()
-        head.moveTo(x1, y1)
-        head.lineTo(x1 - 5.5 * d, y1 + 3)
-        head.lineTo(x1 - 5.5 * d, y1 - 3)
-        head.close()
-        c.drawPath(head, stroke=0, fill=1)
-        return x1, y1, rightward  # куда ткнули наконечник — туда же ставим и подпись
+        arrow_straight(x0, a[2], x1, b[2], color)
+        return x1, b[2], rightward  # куда ткнули наконечник — туда же ставим и подпись
 
-    def draw_chip_arrow(cr, br, color) -> None:
-        """Стрелка «из буфера»: вверх от верхней грани чипа. Горизонтальная
-        «ёлочка» от края чипа прилипла бы к торцу полосы: чип — треть листа."""
-        c.setStrokeColor(color)
-        c.setFillColor(color)
-        c.setLineWidth(1.2)
+    def draw_chip_arrow(cr, br, color) -> tuple[float, float, bool]:
+        """Стрелка «из Ожидания»: от чипа к полосе — той же прямой, что и остальные.
+
+        Полоса прямо над чипом — целимся в её нижний край; чип сбоку — в ближнему
+        торцу посередине высоты полосы: в обе точки прямая приходит под разумным
+        углом и не идёт вдоль самой полосы. Возвращает острие и направление —
+        подпись ставится к нему, как у всех остальных стрелок.
+        """
         x0 = (cr[1] + cr[2]) / 2
-        y0 = cr[4]
-        by = (br[3] + br[4]) / 2
+        y0 = cr[4]                      # верхняя грань чипа
+        by = (br[3] + br[4]) / 2        # середина полосы по высоте
         if br[1] - 2 <= x0 <= br[2] + 2:
-            # полоса прямо над чипом: стрелка вверх в её нижний край
-            c.line(x0, y0, x0, br[3])
-            head = c.beginPath()
-            head.moveTo(x0, br[3])
-            head.lineTo(x0 - 3, br[3] + 5.5)
-            head.lineTo(x0 + 3, br[3] + 5.5)
-            head.close()
-            c.drawPath(head, stroke=0, fill=1)
-        else:
-            rightward = x0 < br[1]  # чип слева от полосы — заходим в левый торец
-            d = 1 if rightward else -1
-            xe = br[1] if rightward else br[2]
-            c.line(x0, y0, x0, by)
-            c.line(x0, by, xe - 3 * d, by)
-            head = c.beginPath()
-            head.moveTo(xe, by)
-            head.lineTo(xe - 5.5 * d, by + 3)
-            head.lineTo(xe - 5.5 * d, by - 3)
-            head.close()
-            c.drawPath(head, stroke=0, fill=1)
-            c.drawPath(head, stroke=0, fill=1)
+            arrow_straight(x0, y0, x0, br[3], color)
+            return x0, br[3], False     # идёт вверх: подпись кладём справа от острия
+        rightward = x0 < br[1]          # чип слева от полосы — входим в левый торец
+        xe = br[1] if rightward else br[2]
+        arrow_straight(x0, y0, xe, by, color)
+        return xe, by, rightward
 
     def arrow_label(text: str, x: float, y: float, color: str, align: str = "left") -> None:
         """Подпись у наконечника стрелки: цвет стрелки + белая подложка.
@@ -366,17 +369,7 @@ def build_plan_pdf(
         лист 2»). Без этого на бумаге перешвартовка просто исчезала.
         """
         x = (br[1] + br[2]) / 2
-        col = HexColor(color)
-        c.setStrokeColor(col)
-        c.setFillColor(col)
-        c.setLineWidth(1.2)
-        c.line(x, br[3], x, block_bottom + 6)
-        head = c.beginPath()
-        head.moveTo(x, block_bottom + 0.5)
-        head.lineTo(x - 3, block_bottom + 6)
-        head.lineTo(x + 3, block_bottom + 6)
-        head.close()
-        c.drawPath(head, stroke=0, fill=1)
+        arrow_straight(x, br[3], x, block_bottom + 0.5, HexColor(color))
         arrow_label(text, x + 4, block_bottom + 1.5, color)
 
     def draw_entry_arrow(br, field_top: float, color: str, text: str) -> None:
@@ -388,17 +381,11 @@ def build_plan_pdf(
         x = (br[1] + br[2]) / 2
         top = br[4]
         col = HexColor(color)
-        c.setStrokeColor(col)
-        c.setFillColor(col)
-        c.setLineWidth(1.2)
         if field_top - (top + 6) > 2:  # полоса в самом верху поля — хватит и наконечника
-            c.line(x, field_top - 0.5, x, top + 6)
-        head = c.beginPath()
-        head.moveTo(x, top + 0.5)
-        head.lineTo(x - 3, top + 6)
-        head.lineTo(x + 3, top + 6)
-        head.close()
-        c.drawPath(head, stroke=0, fill=1)
+            arrow_straight(x, field_top - 0.5, x, top + 0.5, col, dot=False)
+        else:
+            # полоса прижалась к шапке — рисуем короткий огрызок над ней
+            arrow_straight(x, top + 12, x, top + 0.5, col, dot=False)
         arrow_label(text, x + 4, top + 2, color)
 
     def draw_bar_chip_arrow(br, cr, color: str, text: str) -> None:
@@ -408,28 +395,11 @@ def build_plan_pdf(
         только обратный ход (чип → полоса), и перешвартовка судна в карман
         «Ожидание» на бумаге не оставалась вовсе.
         """
-        x0 = (br[1] + br[2]) / 2
-        y0 = br[3]                   # низ полосы оригинала
-        x1 = (cr[1] + cr[2]) / 2     # входим сверху над центром чипа
-        y1 = cr[4]
-        col = HexColor(color)
-        c.setStrokeColor(col)
-        c.setFillColor(col)
-        c.setLineWidth(1.2)
-        if br[1] - 2 <= x1 <= br[2] + 2:
-            c.line(x1, y0, x1, y1 + 6)   # чип под полосой — просто вниз
-        else:
-            ym = (y0 + y1) / 2
-            c.line(x0, y0, x0, ym)
-            c.line(x0, ym, x1, ym)
-            c.line(x1, ym, x1, y1 + 6)
-        head = c.beginPath()
-        head.moveTo(x1, y1 + 0.5)
-        head.lineTo(x1 - 3, y1 + 6)
-        head.lineTo(x1 + 3, y1 + 6)
-        head.close()
-        c.drawPath(head, stroke=0, fill=1)
-        arrow_label(text, x1 + 4, y1 + 2, color)
+        x0 = (br[1] + br[2]) / 2   # низ полосы оригинала, по центру
+        y0 = br[3]
+        x1 = (cr[1] + cr[2]) / 2   # цель — верхняя грань чипа по его центру
+        arrow_straight(x0, y0, x1, cr[4] + 0.5, HexColor(color))
+        arrow_label(text, x1 + 4, cr[4] + 2, color)
 
     def header_band(y: float) -> None:
         """Шапка листа: заголовок, окно, период."""
@@ -680,9 +650,10 @@ def build_plan_pdf(
             a, b = chip_rect.get(q.moved_from_id), bar_rect.get(q.id)
             if a and b and a[0] == b[0] == page_no:
                 drawn_arrows.add(q.id)
-                draw_chip_arrow(a, b, HexColor(bar_color(q)))
+                tx, ty, rw = draw_chip_arrow(a, b, HexColor(bar_color(q)))
                 arrow_label(step_label(q.moved_from_id, q.id),
-                            (a[1] + a[2]) / 2 + 4, (a[4] + b[3]) / 2, bar_color(q))
+                            tx - 3 if rw else tx + 3, ty + 2, bar_color(q),
+                            align="right" if rw else "left")
         # стрелки «в буфер»: полоса оригинала этого листа → чип копии.
         # Раньше рисовался только обратный ход, и перешвартовка судна в
         # «Ожидание» на бумаге не оставалась вовсе.

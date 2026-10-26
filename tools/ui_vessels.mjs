@@ -687,8 +687,7 @@ const arrowRows = () =>
       opacity: Number(getComputedStyle(g).opacity),
       text: g.querySelector("text")?.textContent ?? "",
       circle: !!g.querySelector("circle"),
-      round: (g.querySelector("path")?.getAttribute("d") ?? "").includes("Q"),
-      bend: g.dataset.arrowBend === "1",
+      d: (g.querySelector("path")?.getAttribute("d") ?? "").trim(),
     })),
   );
 
@@ -711,11 +710,11 @@ const arrowRows = () =>
     "подпись собрана как в PDF: «шаг N→M · причал · дд.мм чч:мм»",
   );
   ok(rows.length > 0 && rows.every((r) => r.circle), "у каждой стрелки есть кружок «откуда» (r=3)");
-  // прямая стрела «в одну линию» гнуться не обязана, а вот в ломаной каждый
-  // угол обязан быть скруглён — иначе полотно выглядит «проводом»
-  const bent = rows.filter((r) => r.bend);
-  ok(bent.length > 0 && bent.every((r) => r.round),
-     `углы ломаных путей скруглены: ${bent.filter((r) => r.round).length} из ${bent.length}`);
+  // стрелка — прямая «из А в Б»: ровно две точки, без углов и промежуточных звеньев
+  const crooked = rows.filter((r) => !/^M [-\d.]+ [-\d.]+ L [-\d.]+ [-\d.]+$/.test(r.d));
+  ok(rows.length > 0 && crooked.length === 0,
+     `стрелки — прямые отрезки «из А в Б»: ${rows.length - crooked.length} из ${rows.length}` +
+       (crooked.length ? `, с углами остались id ${crooked.map((r) => r.id).join(", ")}` : ""));
   const legend = (await page.textContent("[data-arrows-legend]")) || "";
   ok(legend.includes("шаг N→M") && legend.includes("кружок"),
      `подсказка внизу объясняет стрелки: «${(legend.match(/Стрелка перешвартовки[^]*?фон/) || ["—"])[0]}…»`);

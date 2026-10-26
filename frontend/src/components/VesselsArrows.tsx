@@ -25,8 +25,6 @@ export type ArrowView = {
   tipY: number;
   /** куда смотрит стрелка по горизонтали — от этого зависит, какой стороной класть подпись */
   rightward: boolean;
-  /** есть ли у пути углы: полосы на одной строке — прямая, её скруглять нечего */
-  bent?: boolean;
   color: string;
   /** «шаг 1→2 · РП-6 · 02.11 12:00»; у призрака пустая — ей ещё некуда вести */
   caption: string;
@@ -97,7 +95,6 @@ export function VesselsArrows({
             opacity={ar.draft ? 0.65 : tone.opacity}
             data-arrow={ar.id}
             data-arrow-tone={ar.draft ? "draft" : (ar.tone ?? "base")}
-            data-arrow-bend={ar.bent === false ? "0" : "1"}
           >
             <path
               d={ar.d}
