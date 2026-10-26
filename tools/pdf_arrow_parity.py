@@ -138,9 +138,20 @@ def main() -> int:
         frm = date.fromisoformat(d1)
         lo, hi = frm + timedelta(days=day1), frm + timedelta(days=day2)
 
+        by_id = {p["id"]: p for p in rows}
+        # «Ожидание» — очередь на конец кадра: чип, чьё плановое перемещение
+        # уже началось в напечатанные сутки, с листа снимается вместе со своими
+        # стрелками (ровно так же поступает рисовальщик)
+        moved_from = {p["moved_from_id"]: p for p in rows
+                      if p.get("moved_from_id") and not p.get("committed")}
+        stale = {p["id"] for p in rows
+                 if p["berth_id"] in park
+                 and (nxt := moved_from.get(p["id"])) is not None
+                 and date.fromisoformat(nxt["starts_at"][:10]) <= hi}
+
         def printed(p: dict) -> bool:
-            if p["berth_id"] in park:  # чип «Ожидания» печатается всегда
-                return True
+            if p["berth_id"] in park:  # чип «Ожидания», если он ещё ждёт
+                return p["id"] not in stale
             return (date.fromisoformat(p["starts_at"][:10]) <= hi
                     and date.fromisoformat(p["ends_at"][:10]) >= lo)
 
@@ -148,8 +159,6 @@ def main() -> int:
         if berths:
             sel = closure(rows, {int(x) for x in berths.split(",")} | park)
             on_paper &= {p["id"] for p in rows if p["berth_id"] in sel}
-
-        by_id = {p["id"]: p for p in rows}
 
         def on_berth(pid: int) -> bool:
             """Напечатанная ПОЛОСА связи. Карман «Ожидание» не считается: его
@@ -159,7 +168,8 @@ def main() -> int:
             return pid in on_paper and by_id[pid]["berth_id"] not in park
 
         want = {pair for src_id, dst_id, pair in links(rows, step)
-                if on_berth(src_id) or on_berth(dst_id)}
+                if src_id not in stale and dst_id not in stale
+                and (on_berth(src_id) or on_berth(dst_id))}
         got, sheets = pdf_pairs(_get(
             f"{API}/api/vessels/plan.pdf?from={d1}&to={d2}&day_from={day1}&day_to={day2}"
             + (f"&berth_ids={berths}" if berths else ""), token))

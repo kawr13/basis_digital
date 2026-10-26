@@ -399,7 +399,21 @@ def build_plan_pdf(
     CELL_H_MIN = 3.5             # ниже подпись судна в полосе не читается
     # «Ожидание» — не причал: отдельный список ждущих судов внизу листа, в три
     # колонки; размеры чипов — общие переменные, их же читает waiting_section
+    # «Ожидание» — очередь, а не список навсегда: судно ждёт причал ровно до
+    # того момента, как начнётся его плановое перемещение. Кадр решает, кто в
+    # списке: если печатаемые сутки захватили (или перешагнули) начало той
+    # постановки, куда перемещение ведёт, судно свой причал уже получило — и на
+    # этом листе оно не ждёт. Чип уходит из списка, а вместе с ним и обе
+    # стрелки: тыкать огрызком в не напечатанный карман смысла нет — его не
+    # напечатали не потому, что он за краем кадра, а потому что очередь уже
+    # неактуальна.
+    win_end = origin + timedelta(days=day_to + 1)  # последние сутки кадра (не включая)
+    moved_from = {p.moved_from_id: p for p in chain_rows
+                  if p.moved_from_id and not p.committed}
     waiting = sorted(by_berth.get(park.id, []), key=lambda p: p.vessel) if park else []
+    stale = {p.id for p in waiting
+             if (nxt := moved_from.get(p.id)) is not None and nxt.starts_at < win_end}
+    waiting = [p for p in waiting if p.id not in stale]
     chip_rows = math.ceil(len(waiting) / 3)
     chip_h, chip_gap = 16, 4
     waiting_need = 14 + chip_rows * (chip_h + chip_gap) if waiting else 0
@@ -487,7 +501,7 @@ def build_plan_pdf(
     # номера для подписей «шаг N→M» — по постановкам периода, а не по тем, что в листе
     steps = _chain_steps(chain_rows)
     berth_name = {b.id: b.code for b in db.query(Berth).all()}  # шифр в подпись «→ РП-6 · лист 2»
-    chips = {p.id for p in chain_rows if p.berth_id == park_id}
+    chips = {p.id for p in chain_rows if p.berth_id == park_id} - stale
     # как подписать конец связи: «Ожидание» — не причал, поэтому словом
     code_of = {
         p.id: ("Ожидание" if p.berth_id == park_id else berth_name.get(p.berth_id, "?"))
@@ -499,15 +513,17 @@ def build_plan_pdf(
     printed: dict[int, set[int]] = {}
     for p in placements:
         if p.berth_id == park_id:
-            printed[p.id] = set(chip_pages)
+            printed[p.id] = set() if p.id in stale else set(chip_pages)
         elif _bar_clip(p, origin, day_from, day_to):
             pg = berth_page.get(p.berth_id)
             if pg is not None:
                 printed[p.id] = {pg}
-    # связи те же, что рисует экран: без состояния «перешвартовка состоялась»
-    # и без копии, у которой в периоде не осталось оригинала
+    # связи те же, что рисует экран: без состояния «перешвартовка состоялась»,
+    # без копии, у которой в периоде не осталось оригинала, и без планового
+    # перемещения, которое в напечатанные сутки уже успело состояться
     links = [(p.moved_from_id, p.id) for p in chain_rows
-             if not p.committed and p.moved_from_id and p.moved_from_id in chain_by]
+             if not p.committed and p.moved_from_id and p.moved_from_id in chain_by
+             and p.id not in stale and p.moved_from_id not in stale]
 
     # чем рисовать: огрызок — у своей полосы сразу, целую стрелку «полоса → полоса»
     # — когда обе полосы уже на листе, всё чиповое — внизу листа, где сами чипы.

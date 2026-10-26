@@ -898,11 +898,12 @@ def test_plan_pdf_reberthing_across_sheets(client, admin_hdr):
                 moved_from_id=b2, at_other_terminal=True)
         mk(bids[2], "ШАГ ЧЕТЫРЕ", "2028-01-16T00:00:00", "2028-01-18T12:00:00", moved_from_id=c3)
 
-        pages = _pdf_page_texts(_plan_pdf(client, admin_hdr, bids, "2028-01-01", "2028-01-31"))
+        # Кадр обрывается на 14.01: перемещение из кармана (16.01) в него не
+        # попало, поэтому «ШАГ ТРИ» по-прежнему ждёт и обязан быть на бумаге.
+        pages = _pdf_page_texts(_plan_pdf(client, admin_hdr, bids, "2028-01-01", "2028-01-14"))
         assert len(pages) > 1, f"причалы обязаны не влезть в один лист, а их {len(pages)}"
         p1 = _page_of(pages, "ШАГ ОДИН")     # лист оригинала (АРВ-1)
         p6 = _page_of(pages, "ШАГ ДВА")      # лист копии (АРВ-6) — другой лист
-        p3 = _page_of(pages, "ШАГ ЧЕТЫРЕ")   # лист полосы после «Ожидания» (АРВ-3)
         assert p1 != p6, "причалы цепочки должны разъехаться по листам — иначе тест ни о чём"
         # лист начала: стрелка уходит в нижний край блока и знает номер листа цели
         assert f"шаг 1→2 → АРВ-6 · лист {p6 + 1}" in pages[p1], pages[p1][:400]
@@ -910,12 +911,15 @@ def test_plan_pdf_reberthing_across_sheets(client, admin_hdr):
         assert f"шаг 1→2 от АРВ-1 · лист {p1 + 1}" in pages[p6], pages[p6][:400]
         # чип «Ожидания» печатается внизу листа, но линией к нему ничего не
         # соединяют: связь «полоса ↔ чип» — два огрызка, и у полосы на листе
-        # цели остаётся свой, с подписью «→ Ожидание» / «от Ожидание»
+        # цели остаётся свой, с подписью «→ Ожидание»
+        assert "Ожидание — ждут череди" in pages[p6], "судно не получило причал — оно в списке"
         assert "шаг 2→3 → Ожидание" in pages[p6], "огрызок полоса → чип не рисуется вовсе"
-        assert "шаг 3→4 от Ожидание" in pages[p3], "огрызок чип → полоса не рисуется вовсе"
         # вся цепочка подписана шагами — на резаном по причалам листу иначе не свести
-        for tag in ("шаг 1→2", "шаг 2→3", "шаг 3→4"):
+        for tag in ("шаг 1→2", "шаг 2→3"):
             assert any(tag in t for t in pages), f"у цепочки потерялась подпись {tag}"
+        # АРВ-3 в кадр не попал, а его оригинал — чип: стрелки в не напечатанное
+        # ожидание не чертят (см. «чип без второй половины огрызка не получает»)
+        assert not any("шаг 3→4" in t for t in pages), pages[p6][:400]
     finally:
         for pid in made:
             client.delete(f"/api/vessels/placements/{pid}", headers=admin_hdr)
@@ -1067,6 +1071,52 @@ def test_plan_pdf_arrow_label_jumps_over_the_bar_it_hits(client, admin_hdr):
         _drop(client, admin_hdr, made, bids)
 
 
+def test_plan_pdf_moved_vessel_leaves_waiting_list(client, admin_hdr):
+    """Окно, захватившее плановое перемещение, снимает судно с очереди.
+
+    Кадр пользователя: он сдвинул окно на конец стоянки, и под причалами всё
+    ещё висел чип «ждёт РП-1» с двумя стрелками — хотя перемещение на РП-1 уже
+    началось и соответствующая полоса на листе была. «Ожидание» — это очередь
+    на конец печатаемых суток: получил причал — вышел из списка, вместе с обеими
+    своими стрелками.
+    """
+    _clear_reberthings(client, admin_hdr)
+    a_b = _own_berth(client, admin_hdr, "ОЧР-1", 100)
+    b_b = _own_berth(client, admin_hdr, "ОЧР-2", 100)
+    park = next(x["id"] for x in client.get("/api/vessels/berths", headers=admin_hdr).json()
+                if x["code"] == "ОЖИДАНИЕ")
+    made: list[int] = []
+
+    def mk(berth_id, start, end, **kw):
+        r = client.post("/api/vessels/placements", json={
+            "berth_id": berth_id, "vessel": "ПЕРЕХОД", "length_m": 60, "offset_m": 0,
+            "starts_at": start, "ends_at": end, **kw}, headers=admin_hdr)
+        assert r.status_code == 201, r.text
+        made.append(r.json()["id"])
+        return r.json()["id"]
+
+    try:
+        first = mk(a_b, "2032-03-01T00:00:00", "2032-03-03T12:00:00")
+        wait = mk(park, "2032-03-04T00:00:00", "2032-03-05T12:00:00",
+                  moved_from_id=first, at_other_terminal=True)
+        mk(b_b, "2032-03-06T00:00:00", "2032-03-09T12:00:00", moved_from_id=wait)
+
+        # окно до перемещения — судно ждёт: чип и обе его стрелки на бумаге
+        early = " ".join(_pdf_page_texts(_plan_pdf(
+            client, admin_hdr, [a_b, b_b], "2032-03-01", "2032-03-05")))
+        assert "Ожидание — ждут череди" in early, early[:400]
+        assert "шаг 1→2 → Ожидание" in early and "ПЕРЕХОД" in early, early[:400]
+
+        # окно после начала перемещения — судно свой причал уже получило
+        late = " ".join(_pdf_page_texts(_plan_pdf(
+            client, admin_hdr, [a_b, b_b], "2032-03-08", "2032-03-12")))
+        assert "ПЕРЕХОД" in late, "сама полоса никуда не делась — проверка не пустая"
+        assert "Ожидание" not in late, f"судно получилo причал и всё ещё в списке: {late[:400]}"
+        assert "шаг" not in late, f"перемещение состоялось, а стрелка осталась: {late[:400]}"
+    finally:
+        _drop(client, admin_hdr, made, [a_b, b_b])
+
+
 def test_plan_pdf_typical_window_fits_one_sheet(client, admin_hdr):
     """Типовое окно плана — шесть причалов и 19 суток — обязано влезть в один лист.
 
@@ -1098,6 +1148,9 @@ def test_plan_pdf_typical_window_fits_one_sheet(client, admin_hdr):
         d4 = mk(bids[2], "ТЕСН ЧЕТЫРЕ", "2031-05-12T00:00:00", "2031-05-14T12:00:00",
                 moved_from_id=c3)
         mk(bids[1], "ТЕСН ПЯТЬ", "2031-05-15T00:00:00", "2031-05-17T12:00:00", moved_from_id=d4)
+        # и судно, которому причал пока не нашли: оно обязано остаться в списке
+        mk(park_id, "ТЕСН ЖДЁТ", "2031-05-03T00:00:00", "2031-05-18T12:00:00",
+           at_other_terminal=True)
 
         pages = _pdf_page_texts(_plan_pdf(client, admin_hdr, bids, "2031-05-01", "2031-05-19"))
         assert len(pages) == 1, f"шесть причалов должны влезть в один лист, а их {len(pages)}"
@@ -1105,8 +1158,14 @@ def test_plan_pdf_typical_window_fits_one_sheet(client, admin_hdr):
         assert "План постановки судов" in text and "Пунктир" in text
         assert text.count("причал / метры") == 1, "шапка суток должна быть одна на лист"
         assert "Ожидание — ждут череди" in text, "чипов «Ожидания» не стало"
-        for tag in ("шаг 1→2", "шаг 2→3", "шаг 3→4", "шаг 4→5"):
+        assert "ТЕСН ЖДЁТ" in text, "судно без перемещения обязано ждать на листе"
+        # «ТЕСН ТРИ» из кармана ушёл в кадре (его перемещение — 12.05), значит к
+        # концу окна он уже не ждёт: ни чипа, ни обеих его стрелок на бумаге нет
+        assert "ТЕСН ТРИ" not in text, "состоявшееся перемещение не должно ждать очереди"
+        for tag in ("шаг 1→2", "шаг 4→5"):
             assert tag in text, f"на листе не осталось подписи {tag}: {text[:300]}"
+        for tag in ("шаг 2→3", "шаг 3→4"):
+            assert tag not in text, f"перемещение состоялось, а стрелка {tag} всё ещё на листе"
         # план на одном листе — значит ни одна стрелка не имеет права смотреть «за лист»
         # (сама сноска слова «лист N» и «вне кадра» упоминает всегда — ищем огрызки)
         assert "· лист" not in text and "· вне кадра" not in text, text[:400]
