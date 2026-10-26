@@ -756,14 +756,45 @@ def _clear_reberthings(client, hdr) -> None:
             assert client.delete(f"/api/vessels/placements/{p['id']}", headers=hdr).status_code == 204
 
 
-def _plan_pdf(client, hdr, berth_ids, period_from: str, period_to: str) -> bytes:
-    """Скачать PDF всего периода кадра; кадр = все сутки периода."""
+def _plan_pdf(client, hdr, berth_ids, period_from: str, period_to: str,
+              day_from: int = 0, day_to: int | None = None) -> bytes:
+    """Скачать PDF кадра: по умолчанию — все сутки периода, иначе [day_from, day_to]."""
+    if day_to is None:
+        day_to = (date.fromisoformat(period_to) - date.fromisoformat(period_from)).days
     r = client.get("/api/vessels/plan.pdf", params={
-        "from": period_from, "to": period_to, "day_from": 0,
-        "day_to": (date.fromisoformat(period_to) - date.fromisoformat(period_from)).days,
+        "from": period_from, "to": period_to, "day_from": day_from,
+        "day_to": day_to,
         "berth_ids": ",".join(str(i) for i in berth_ids)}, headers=hdr)
     assert r.status_code == 200, r.text
     return r.content
+
+
+def _chain(client, hdr, berth_ids, start: str, *, gap_days: int = 4) -> list[int]:
+    """Цепочка перешвартовок «по одному причалу»: id постановок в порядке шагов."""
+    made: list[int] = []
+    src: int | None = None
+    for i, bid in enumerate(berth_ids):
+        day = date.fromisoformat(start) + timedelta(days=i * gap_days)
+        body = {
+            "berth_id": bid, "vessel": f"ЦЕПОЧКА {i + 1}", "length_m": 60, "offset_m": 0,
+            "starts_at": f"{day.isoformat()}T00:00:00",
+            "ends_at": f"{(day + timedelta(days=2)).isoformat()}T12:00:00",
+        }
+        if src:
+            body["moved_from_id"] = src
+        r = client.post("/api/vessels/placements", json=body, headers=hdr)
+        assert r.status_code == 201, r.text
+        made.append(r.json()["id"])
+        src = r.json()["id"]
+    return made
+
+
+def _drop(client, hdr, placement_ids, berth_ids) -> None:
+    """Убрать за тестом: чужие стрелки меняют и замыкание фильтра, и пагинацию."""
+    for pid in placement_ids:
+        client.delete(f"/api/vessels/placements/{pid}", headers=hdr)
+    for bid in berth_ids:
+        client.delete(f"/api/vessels/berths/{bid}", headers=hdr)
 
 
 def _pdf_page_texts(content: bytes) -> list[str]:
@@ -871,6 +902,123 @@ def test_plan_pdf_bar_to_waiting_chip(client, admin_hdr):
         for pid in made:
             client.delete(f"/api/vessels/placements/{pid}", headers=admin_hdr)
         client.delete(f"/api/vessels/berths/{own}", headers=admin_hdr)
+
+
+def test_plan_pdf_step_numbers_survive_the_filter(client, admin_hdr):
+    """Номера шагов на бумаге — те же, что на экране, при любом фильтре причалов.
+
+    Экран нумерует цепочку целиком, а лист печатает то, что в кадре. Если номера
+    считать по тому, что влезло в лист, копия без оригинала становится корнем, и
+    там, где экран пишет «шаг 3→4», бумага пишет «шаг 2→3». Номер — опознавательный
+    знак стрелки: по нему распечатку сводят с экраном и между листами.
+    """
+    import re
+
+    _clear_reberthings(client, admin_hdr)
+    bids = [_own_berth(client, admin_hdr, f"НОМ-{i}") for i in range(1, 5)]
+    made: list[int] = []
+    try:
+        made = _chain(client, admin_hdr, bids, "2030-06-02")
+        # просим только хвостовой причал: без замыкания в лист попал бы он один
+        pages = _pdf_page_texts(
+            _plan_pdf(client, admin_hdr, bids[-1:], "2030-06-01", "2030-06-30"))
+        pairs = {tuple(map(int, m)) for m in re.findall(r"шаг\s*(\d+)→(\d+)", " ".join(pages))}
+        assert pairs == {(1, 2), (2, 3), (3, 4)}, f"цепочка перенумеровалась: {sorted(pairs)}"
+    finally:
+        _drop(client, admin_hdr, made, bids)
+
+
+def test_plan_pdf_berth_filter_closes_the_whole_chain(client, admin_hdr):
+    """Фильтр причалов обязан замыкаться вдоль цепочки в обе стороны и до упора.
+
+    Просили один причал из середины цепочки из четырёх: лист печатает все четыре,
+    иначе половина связи повисает без второй — при однопроходном замыкании причал
+    самого дальнего оригинала терялся.
+    """
+    _clear_reberthings(client, admin_hdr)
+    bids = [_own_berth(client, admin_hdr, f"ЗАМ-{i}") for i in range(1, 5)]
+    made: list[int] = []
+    try:
+        made = _chain(client, admin_hdr, bids, "2030-09-02")
+        text = " ".join(_pdf_page_texts(
+            _plan_pdf(client, admin_hdr, [bids[1]], "2030-09-01", "2030-09-30")))
+        for i in range(1, 5):
+            assert f"ЗАМ-{i}" in text, f"причал ЗАМ-{i} не попал в лист: {text[:300]}"
+    finally:
+        _drop(client, admin_hdr, made, bids)
+
+
+def test_plan_pdf_copy_outside_frame_stays_on_paper(client, admin_hdr):
+    """Копия, уехавшая за напечатанные сутки, обязана оставить на бумаге след.
+
+    Кадр — первые сутки периода: полоса копии в лист не попала, и раньше стрелка
+    исчезала молча, хотя оригинал на листе стоял. Теперь от полосы идёт огрызок
+    к нижнему краю блока с подписью «→ причал · вне кадра».
+    """
+    _clear_reberthings(client, admin_hdr)
+    a = _own_berth(client, admin_hdr, "ВНЕ-1", 100)
+    b = _own_berth(client, admin_hdr, "ВНЕ-2", 100)
+    made: list[int] = []
+    try:
+        made = _chain(client, admin_hdr, [a, b], "2030-07-02", gap_days=5)
+        pages = _pdf_page_texts(_plan_pdf(
+            client, admin_hdr, [a, b], "2030-07-01", "2030-07-30", day_from=0, day_to=3))
+        assert "ЦЕПОЧКА 1" in pages[0], "оригинал должен быть на листе"
+        assert "ЦЕПОЧКА 2" not in " ".join(pages), "копия вне кадра не печатается"
+        assert "шаг 1→2 → ВНЕ-2 · вне кадра" in pages[0], pages[0][:400]
+    finally:
+        _drop(client, admin_hdr, made, [a, b])
+
+
+def test_plan_pdf_original_outside_frame_stays_on_paper(client, admin_hdr):
+    """Оригинал до кадра — не повод терять стрелку: на листе цели она обязана быть.
+
+    Парная половина предыдущего случая: судно стоит полосу, а пришла оно из
+    постановки, которая в напечатанные сутки не попала. Огрызок входит в полосу
+    со стороны шапки с подписью «от причал · вне кадра».
+    """
+    _clear_reberthings(client, admin_hdr)
+    a = _own_berth(client, admin_hdr, "ВНЕ-3", 100)
+    b = _own_berth(client, admin_hdr, "ВНЕ-4", 100)
+    made: list[int] = []
+    try:
+        made = _chain(client, admin_hdr, [a, b], "2030-08-02", gap_days=4)
+        pages = _pdf_page_texts(_plan_pdf(
+            client, admin_hdr, [a, b], "2030-08-01", "2030-08-30", day_from=4, day_to=7))
+        assert "ЦЕПОЧКА 2" in pages[0], "копия должна быть на листе"
+        assert "шаг 1→2 от ВНЕ-3 · вне кадра" in pages[0], pages[0][:400]
+    finally:
+        _drop(client, admin_hdr, made, [a, b])
+
+
+def test_arrow_plan_picks_the_stub_for_every_combination():
+    """`_arrow_plan` крыт без рендера: вид огрызка зависит только от того, что напечатано."""
+    from app.services.plan_pdf import _arrow_plan
+
+    links = [(1, 2), (3, 4), (5, 6), (7, 8), (9, 10), (11, 12), (13, 14), (15, 16)]
+    printed = {1: {0}, 2: {1}, 3: {0}, 6: {0}, 7: {0}, 8: {0}, 9: {0, 1}, 12: {1}, 15: {0}, 16: {0}}
+    chips = {8, 9, 12, 15, 16}  # «Ожидание»: эти концы рисуются чипом, а не полосой
+    code_of = {i: ("Ожидание" if i in chips else f"РП-{i}") for i in range(1, 17)}
+    steps = {i: i for i in range(1, 17)}
+    plan = _arrow_plan(links, printed, chips, code_of, steps)
+
+    # половины на разных листах — огрызки с обеих сторон, номера одни и те же
+    assert ("exit", 0, 1, 2, "шаг 1→2 → РП-2 · лист 2") in plan
+    assert ("entry", 1, 1, 2, "шаг 1→2 от РП-1 · лист 1") in plan
+    # второй конец не напечатан вовсе — «вне кадра», а не «лист N»
+    assert ("exit", 0, 3, 4, "шаг 3→4 → РП-4 · вне кадра") in plan
+    assert ("entry", 0, 5, 6, "шаг 5→6 от РП-5 · вне кадра") in plan
+    # обе половины на одном листе — стрелка целиком, без огрызков
+    assert [d for d in plan if d[2] == 7] == [("bar2chip", 0, 7, 8, "шаг 7→8")]
+    # чип напечатан на двух листах, копия — ни на одном: огрызок на каждом из них
+    stubs = [d for d in plan if d[2] == 9]
+    assert [d[0] for d in stubs] == ["chip-exit", "chip-exit"] and [d[1] for d in stubs] == [0, 1]
+    assert stubs[0][4] == "шаг 9→10 → РП-10 · вне кадра"
+    assert ("chip-entry", 1, 11, 12, "шаг 11→12 от РП-11 · вне кадра") in plan
+    # чип → чип на одном листе: одна стрелка, а не два огрызка
+    assert [d for d in plan if d[2] == 15] == [("chip2chip", 0, 15, 16, "шаг 15→16")]
+    # ни один конец не напечатан — на бумаге рисовать нечего
+    assert not [d for d in plan if 13 in (d[2], d[3]) or 14 in (d[2], d[3])]
 
 
 def test_plan_pdf_layout_coordinates_frozen(client, admin_hdr):
