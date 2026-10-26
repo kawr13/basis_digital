@@ -139,15 +139,17 @@ def main() -> int:
         lo, hi = frm + timedelta(days=day1), frm + timedelta(days=day2)
 
         by_id = {p["id"]: p for p in rows}
-        # «Ожидание» — очередь на конец кадра: чип, чьё плановое перемещение
-        # уже началось в напечатанные сутки, с листа снимается вместе со своими
-        # стрелками (ровно так же поступает рисовальщик)
+        # «Ожидание» — очередь на ПЕРВЫЕ сутки кадра: чип, чьё плановое
+        # перемещение началось раньше первого напечатанного дня, с листа
+        # снимается вместе со своими стрелками (ровно так же рисовальщик).
+        # Последними сутками руководиться нельзя — так лист терял бы всю
+        # перешвартовку, когда цепочка целиком лежит внутри кадра.
         moved_from = {p["moved_from_id"]: p for p in rows
                       if p.get("moved_from_id") and not p.get("committed")}
         stale = {p["id"] for p in rows
                  if p["berth_id"] in park
                  and (nxt := moved_from.get(p["id"])) is not None
-                 and date.fromisoformat(nxt["starts_at"][:10]) <= hi}
+                 and date.fromisoformat(nxt["starts_at"][:10]) < lo}
 
         def printed(p: dict) -> bool:
             if p["berth_id"] in park:  # чип «Ожидания», если он ещё ждёт
