@@ -1224,13 +1224,41 @@ def test_plan_pdf_original_outside_frame_stays_on_paper(client, admin_hdr):
         _drop(client, admin_hdr, made, [a, b])
 
 
+def test_plan_pdf_chip_alone_in_frame_draws_no_arrows(client, admin_hdr):
+    """Если от связи в кадре осталась одна чип-половина — стрелок быть не должно.
+
+    Кадр пользователя: он сдвинул сетку так, что полос цепочки не стало видно,
+    а под причалами по-прежнему висели два огрызка «· вне кадра» — стрелки, у
+    которых оба конца не напечатаны. Смотреть им некуда: карман «Ожидание»
+    печатают на каждом листе независимо от кадра, поэтому сам по себе чип
+    поводом нарисовать стрелку не считается.
+    """
+    _clear_reberthings(client, admin_hdr)
+    a = _own_berth(client, admin_hdr, "ЧН-1", 100)
+    b = _own_berth(client, admin_hdr, "ЧН-2", 100)
+    park = next(x["id"] for x in client.get("/api/vessels/berths", headers=admin_hdr).json()
+                if x["code"] == "ОЖИДАНИЕ")
+    made: list[int] = []
+    try:
+        # полоса → карман → полоса; кадр — одни сутки между первой и третьей
+        made = _chain(client, admin_hdr, [a, park, b], "2030-09-02", gap_days=4)
+        pages = _pdf_page_texts(_plan_pdf(
+            client, admin_hdr, [a, b], "2030-09-01", "2030-09-30", day_from=4, day_to=4))
+        text = " ".join(pages)
+        assert "ЦЕПОЧКА 2" in text, "сам чип печатается — проверка не должна быть пустой"
+        assert "ЦЕПОЧКА 1" not in text and "ЦЕПОЧКА 3" not in text, "полосы вне кадра"
+        assert "шаг" not in text, f"у чипа без второй половины стрелок быть не может: {text[:400]}"
+    finally:
+        _drop(client, admin_hdr, made, [a, b])
+
+
 def test_arrow_plan_picks_the_stub_for_every_combination():
     """`_arrow_plan` крыт без рендера: вид огрызка зависит только от того, что напечатано."""
     from app.services.plan_pdf import _arrow_plan
 
     links = [(1, 2), (3, 4), (5, 6), (7, 8), (9, 10), (11, 12), (13, 14), (15, 16), (17, 18)]
-    printed = {1: {0}, 2: {1}, 3: {0}, 6: {0}, 7: {0}, 8: {0}, 9: {0, 1}, 12: {1}, 15: {0},
-               16: {0}, 17: {0}, 18: {0}}
+    printed = {1: {0}, 2: {1}, 3: {0}, 6: {0}, 7: {0}, 8: {0}, 9: {0, 1}, 11: {0}, 12: {1},
+               15: {0}, 16: {0}, 17: {0}, 18: {0}}
     chips = {8, 9, 12, 15, 16, 17}  # «Ожидание»: эти концы рисуются чипом, а не полосой
     code_of = {i: ("Ожидание" if i in chips else f"РП-{i}") for i in range(1, 19)}
     steps = {i: i for i in range(1, 19)}
@@ -1249,11 +1277,16 @@ def test_arrow_plan_picks_the_stub_for_every_combination():
         ("exit", 0, 7, 8, "шаг 7→8 → Ожидание"),
         ("chip-entry", 0, 7, 8, "шаг 7→8 от РП-7"),
     ]
-    # чип напечатан на двух листах, копия — ни на одном: огрызок на каждом из них
-    stubs = [d for d in plan if d[2] == 9]
-    assert [d[0] for d in stubs] == ["chip-exit", "chip-exit"] and [d[1] for d in stubs] == [0, 1]
-    assert stubs[0][4] == "шаг 9→10 → РП-10 · вне кадра"
-    assert ("chip-entry", 1, 11, 12, "шаг 11→12 от РП-11 · вне кадра") in plan
+    # чип напечатан на двух листах, копия — ни на одном: огрызка нет ни на
+    # одном. Карман «Ожидание» печатают всегда, поэтому стрелка чипа в
+    # не напечатанное место смотрела бы в пустоту под причалами
+    assert [d for d in plan if d[2] == 9] == []
+    # но если вторая половина связи всё же на бумаге (на другом листе) —
+    # огрызок у чипа нужен, и он говорит, где искать половину
+    assert [d for d in plan if d[2] == 11] == [
+        ("exit", 0, 11, 12, "шаг 11→12 → Ожидание · лист 2"),
+        ("chip-entry", 1, 11, 12, "шаг 11→12 от РП-11 · лист 1"),
+    ]
     # чип → чип на одном листе: одна стрелка, а не два огрызка
     assert [d for d in plan if d[2] == 15] == [("chip2chip", 0, 15, 16, "шаг 15→16")]
     # чип и его полоса на одном листе — тот же разворот, только наоборот:

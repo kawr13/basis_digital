@@ -149,8 +149,17 @@ def main() -> int:
             sel = closure(rows, {int(x) for x in berths.split(",")} | park)
             on_paper &= {p["id"] for p in rows if p["berth_id"] in sel}
 
+        by_id = {p["id"]: p for p in rows}
+
+        def on_berth(pid: int) -> bool:
+            """Напечатанная ПОЛОСА связи. Карман «Ожидание» не считается: его
+            чипы печатают на каждом листе независимо от кадра, и стрелка от
+            чипа в не напечатанное место смотрит в пустоту — её требуют
+            только тогда, когда в кадре есть хотя бы одна полоса связи."""
+            return pid in on_paper and by_id[pid]["berth_id"] not in park
+
         want = {pair for src_id, dst_id, pair in links(rows, step)
-                if src_id in on_paper or dst_id in on_paper}
+                if on_berth(src_id) or on_berth(dst_id)}
         got, sheets = pdf_pairs(_get(
             f"{API}/api/vessels/plan.pdf?from={d1}&to={d2}&day_from={day1}&day_to={day2}"
             + (f"&berth_ids={berths}" if berths else ""), token))
