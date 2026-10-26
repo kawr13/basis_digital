@@ -811,8 +811,13 @@ def _pdf_page_texts(content: bytes) -> list[str]:
     return [p.extract_text() or "" for p in PdfReader(io.BytesIO(content)).pages]
 
 
-def _pdf_label_positions(content: bytes) -> dict[str, tuple[int, float, float]]:
-    """Координаты подписей полос в PDF: (лист, x, y) — по ним видно, куда встали полосы."""
+def _pdf_label_positions(content: bytes, prefix: str = "ЛОЖЕНИЕ") -> dict[str, tuple[int, float, float]]:
+    """Координаты подписей в PDF: (лист, x, y) — по ним видно, куда встали полосы.
+
+    Префикс — по какому слову собирать подписи: у теста про огрызки это «шаг», у
+    теста про геометрию листа — шифр полосы. Координаты берутся из текстовой
+    матрицы самого PDF, то есть проверяется факт расстановки, а не намерение.
+    """
     import io
 
     from pypdf import PdfReader
@@ -820,10 +825,36 @@ def _pdf_label_positions(content: bytes) -> dict[str, tuple[int, float, float]]:
     for n, page in enumerate(PdfReader(io.BytesIO(content)).pages):
         def cb(text, cm, tm, fd, fs, n=n):
             t = text.strip()
-            if t.startswith("ЛОЖЕНИЕ"):
+            if t.startswith(prefix):
                 found[t] = (n, round(tm[4], 1), round(tm[5], 1))
         page.extract_text(visitor_text=cb)
     return found
+
+
+def _pdf_strokes(content: bytes) -> list[tuple[int, float, float, float, float]]:
+    """Отрезки, напечатанные в PDF: (лист, x0, y0, x1, y1) — куда по листу ходят линии.
+
+    Reportlab пишет каждую линию как «x0 y0 m x1 y1 l S», поэтому достаточно
+    пройти по операторному потоку и собрать пары m→l: стороны прямоугольников
+    (`re`) и скруглённые углы с кружками (кривые Безье) в такие отрезки не
+    попадают, а настоящие линии — попадают. Нужны они затем, что подпись
+    подписью, а линия через шесть блоков причалов — это испорченный лист.
+    """
+    import io
+    import re
+
+    from pypdf import PdfReader
+    segs: list[tuple[int, float, float, float, float]] = []
+    for n, page in enumerate(PdfReader(io.BytesIO(content)).pages):
+        data = page.get_contents().get_data().decode("latin-1")
+        cur: tuple[float, float] | None = None
+        for m in re.finditer(r"(-?[\d.]+) (-?[\d.]+) (m|l)\b", data):
+            x, y = float(m.group(1)), float(m.group(2))
+            if m.group(3) == "m":
+                cur = (x, y)
+            elif cur is not None:
+                segs.append((n, cur[0], cur[1], x, y))
+    return segs
 
 
 def _page_of(pages: list[str], needle: str) -> int:
@@ -877,10 +908,11 @@ def test_plan_pdf_reberthing_across_sheets(client, admin_hdr):
         assert f"шаг 1→2 → АРВ-6 · лист {p6 + 1}" in pages[p1], pages[p1][:400]
         # лист цели: стрелка входит в полосу со стороны шапки и знает номер начала
         assert f"шаг 1→2 от АРВ-1 · лист {p1 + 1}" in pages[p6], pages[p6][:400]
-        # чип «Ожидания» печатается внизу каждого листа, поэтому связи с ним
-        # рисуются целиком — на листе своей полосы, без огрызков
-        assert "шаг 2→3" in pages[p6], "стрелка полоса → чип не рисуется вовсе"
-        assert "шаг 3→4" in pages[p3], "стрелка чип → полоса не рисуется вовсе"
+        # чип «Ожидания» печатается внизу листа, но линией к нему ничего не
+        # соединяют: связь «полоса ↔ чип» — два огрызка, и у полосы на листе
+        # цели остаётся свой, с подписью «→ Ожидание» / «от Ожидание»
+        assert "шаг 2→3 → Ожидание" in pages[p6], "огрызок полоса → чип не рисуется вовсе"
+        assert "шаг 3→4 от Ожидание" in pages[p3], "огрызок чип → полоса не рисуется вовсе"
         # вся цепочка подписана шагами — на резаном по причалам листу иначе не свести
         for tag in ("шаг 1→2", "шаг 2→3", "шаг 3→4"):
             assert any(tag in t for t in pages), f"у цепочки потерялась подпись {tag}"
@@ -896,7 +928,9 @@ def test_plan_pdf_bar_to_waiting_chip(client, admin_hdr):
 
     Раньше рисовалась только обратная стрелка (чип → полоса), и постановка
     судна в карман на распечатке выглядела исчезновением. Теперь направление
-    как на экране — от оригинала к копии, с подписью шага.
+    как на экране — от оригинала к копии, но не линией через весь лист, а
+    огрызком у каждого конца: у полосы — вниз к краю её блока, у чипа — вверх
+    от его верхней грани. Оба подписаны одним «шаг N→M».
     """
     _clear_reberthings(client, admin_hdr)
     own = _own_berth(client, admin_hdr, "ЧИП-1", 100)
@@ -919,11 +953,118 @@ def test_plan_pdf_bar_to_waiting_chip(client, admin_hdr):
         pages = _pdf_page_texts(_plan_pdf(client, admin_hdr, [own], "2029-02-01", "2029-02-07"))
         assert len(pages) == 1
         assert "ПОСЕЛИНЕЦ" in pages[0], "чип не напечатан"
-        assert "шаг 1→2" in pages[0], "стрелка полоса → чип с подписью шага не появилась"
+        assert "шаг 1→2 → Ожидание" in pages[0], "огрызок полосы в чип не появился"
+        assert "шаг 1→2 от ЧИП-1" in pages[0], "огрызок чипа от причала не появился"
     finally:
         for pid in made:
             client.delete(f"/api/vessels/placements/{pid}", headers=admin_hdr)
         client.delete(f"/api/vessels/berths/{own}", headers=admin_hdr)
+
+
+def test_plan_pdf_bar_and_its_waiting_chip_are_tied_by_two_stubs(client, admin_hdr):
+    """Полоса и её чип «Ожидания» на одном листе связаны ДВУМЯ огрызками.
+
+    Кадр, из-за которого правка и началась: полоса стоит в блоке причала, а её
+    копия лежит в чипе «Ожидания» внизу того же листа. Одна линия «полоса → чип»
+    шла от полосы вниз через все блоки причалов и читалась не как «судно ушло
+    ждать», а как перечёркнутый план. Теперь у связи два огрызка: у полосы — вниз
+    к нижнему краю ЕЁ блока («шаг N→M → Ожидание»), у чипа — вверх от его верхней
+    грани («шаг N→M от причал»). Проверяется не одними подписями: координаты
+    огрызков обязаны лежать в своих блоках, а между блоком причала и карманом не
+    имеет права проходить хоть один напечатанный отрезок.
+    """
+    _clear_reberthings(client, admin_hdr)
+    bids = [_own_berth(client, admin_hdr, f"ОГРЫ-{i}", 100) for i in range(1, 4)]
+    made: list[int] = []
+    try:
+        park_id = next(b["id"] for b in client.get("/api/vessels/berths", headers=admin_hdr).json()
+                       if b["code"] == "ОЖИДАНИЕ")
+        src = client.post("/api/vessels/placements", json={
+            "berth_id": bids[0], "vessel": "УХОДИТ", "length_m": 60, "offset_m": 0,
+            "starts_at": "2033-03-02T00:00:00", "ends_at": "2033-03-03T12:00:00"},
+            headers=admin_hdr).json()["id"]
+        made.append(src)
+        chip = client.post("/api/vessels/placements", json={
+            "berth_id": park_id, "vessel": "ЖДЁТ", "length_m": 60, "offset_m": 0,
+            "starts_at": "2033-03-05T00:00:00", "ends_at": "2033-03-06T12:00:00",
+            "moved_from_id": src}, headers=admin_hdr)
+        assert chip.status_code == 201, chip.text
+        made.append(chip.json()["id"])
+
+        content = _plan_pdf(client, admin_hdr, bids, "2033-03-01", "2033-03-07")
+        pages = _pdf_page_texts(content)
+        assert len(pages) == 1, f"три причала по 100 м должны влезть в один лист: {len(pages)}"
+        text = pages[0]
+        assert "ЖДЁТ" in text, "чип не напечатан"
+        assert "шаг 1→2 → Ожидание" in text, "у полосы не осталось огрызка в чип"
+        assert "шаг 1→2 от ОГРЫ-1" in text, "у чипа не осталось огрызка от причала"
+
+        pos = _pdf_label_positions(content, "шаг 1→2")
+        bar_stub = pos["шаг 1→2 → Ожидание"]
+        chip_stub = pos["шаг 1→2 от ОГРЫ-1"]
+        ship = _pdf_label_positions(content, "УХОДИТ")["УХОДИТ"]
+        chip_txt = _pdf_label_positions(content, "ЖДЁТ")["ЖДЁТ"]
+        assert bar_stub[0] == chip_stub[0] == 0, "огрызки уехали с листа своей полосы"
+        # огрызок полосы — под своей полосой, огрызок чипа — над своим чипом,
+        # и оба остались в своих блоках, а не встретились посередине листа
+        assert bar_stub[2] < ship[2], "огрызок полосы встал не под полосой"
+        assert chip_stub[2] > chip_txt[2], "огрызок чипа встал не над чипом"
+        assert bar_stub[2] > chip_stub[2], "огрызок полосы оказался ниже кармана"
+
+        # ни одна линия не пересекает блоки причалов: между нижним краем блока
+        # полосы (это и есть уровень её огрызка) и верхней гранью чипа не должно
+        # быть ни одного отрезка — ровно та линия, что летала сюда раньше
+        chip_top = chip_txt[2] + 6.5  # baseline подписи чипа → его верхняя грань
+        across = [s for s in _pdf_strokes(content)
+                  if s[0] == 0 and max(s[2], s[4]) > bar_stub[2] + 3
+                  and min(s[2], s[4]) < chip_top + 2]
+        assert not across, f"через блоки причалов летит линия: {across}"
+    finally:
+        _drop(client, admin_hdr, made, bids)
+
+
+def test_plan_pdf_arrow_label_jumps_over_the_bar_it_hits(client, admin_hdr):
+    """Подпись стрелки не имеет права ложиться на полосу, в которую уперлась.
+
+    Тот же кадр: подпись «шаг 2→3» легла поверх «2 400 т · 74 м» того же судна и
+    читалась с трудом — у полосы-цели слева от наконечника не осталось места до
+    края поля шкалы. Правило: места нет — подпись идёт над верхней гранью полосы.
+    Проверка парная: там, где место слева есть, подпись обязана остаться у
+    наконечника, иначе правило превратилось бы в «всегда рисуй сверху».
+    """
+    _clear_reberthings(client, admin_hdr)
+    bids = [_own_berth(client, admin_hdr, f"МЕСТО-{i}", 100) for i in range(1, 3)]
+    made: list[int] = []
+    try:
+        src = client.post("/api/vessels/placements", json={
+            "berth_id": bids[0], "vessel": "ОРИГИНАЛ", "length_m": 60, "offset_m": 0,
+            "starts_at": "2034-04-01T00:00:00", "ends_at": "2034-04-10T12:00:00"},
+            headers=admin_hdr).json()["id"]
+        copy = client.post("/api/vessels/placements", json={
+            "berth_id": bids[1], "vessel": "КОПИЯ", "length_m": 60, "offset_m": 0,
+            "starts_at": "2034-04-05T00:00:00", "ends_at": "2034-04-08T12:00:00",
+            "moved_from_id": src}, headers=admin_hdr)
+        assert copy.status_code == 201, copy.text
+        made = [src, copy.json()["id"]]
+
+        # кадр с самого начала периода: до левого края поля у копии место есть,
+        # и подпись обязана остаться у наконечника — ниже своей подписи судна
+        wide_pdf = _plan_pdf(client, admin_hdr, bids, "2034-04-01", "2034-04-30")
+        wide = _pdf_label_positions(wide_pdf, "шаг 1→2")["шаг 1→2"]
+        ship = _pdf_label_positions(wide_pdf, "КОПИЯ")["КОПИЯ"]
+        assert wide[2] < ship[2], "подпись прыгнула над полосой там, где места хватало"
+
+        # кадр, который начинается с постановки копии: её левый торец — это левый
+        # край поля, слева от наконечника места нет вовсе, и подпись уходит НАД
+        tight = _plan_pdf(client, admin_hdr, bids, "2034-04-01", "2034-04-30",
+                          day_from=4, day_to=29)
+        pos = _pdf_label_positions(tight, "шаг 1→2")["шаг 1→2"]
+        ship2 = _pdf_label_positions(tight, "КОПИЯ")["КОПИЯ"]
+        assert pos[2] > ship2[2], "подпись легла на полосу вместо места над ней"
+        field_left = (8 + 34) * 72 / 25.4  # поле листа + колонка причала
+        assert pos[1] >= field_left - 0.5, "подпись вылезла за левый край поля шкалы"
+    finally:
+        _drop(client, admin_hdr, made, bids)
 
 
 def test_plan_pdf_typical_window_fits_one_sheet(client, admin_hdr):
@@ -1087,11 +1228,12 @@ def test_arrow_plan_picks_the_stub_for_every_combination():
     """`_arrow_plan` крыт без рендера: вид огрызка зависит только от того, что напечатано."""
     from app.services.plan_pdf import _arrow_plan
 
-    links = [(1, 2), (3, 4), (5, 6), (7, 8), (9, 10), (11, 12), (13, 14), (15, 16)]
-    printed = {1: {0}, 2: {1}, 3: {0}, 6: {0}, 7: {0}, 8: {0}, 9: {0, 1}, 12: {1}, 15: {0}, 16: {0}}
-    chips = {8, 9, 12, 15, 16}  # «Ожидание»: эти концы рисуются чипом, а не полосой
-    code_of = {i: ("Ожидание" if i in chips else f"РП-{i}") for i in range(1, 17)}
-    steps = {i: i for i in range(1, 17)}
+    links = [(1, 2), (3, 4), (5, 6), (7, 8), (9, 10), (11, 12), (13, 14), (15, 16), (17, 18)]
+    printed = {1: {0}, 2: {1}, 3: {0}, 6: {0}, 7: {0}, 8: {0}, 9: {0, 1}, 12: {1}, 15: {0},
+               16: {0}, 17: {0}, 18: {0}}
+    chips = {8, 9, 12, 15, 16, 17}  # «Ожидание»: эти концы рисуются чипом, а не полосой
+    code_of = {i: ("Ожидание" if i in chips else f"РП-{i}") for i in range(1, 19)}
+    steps = {i: i for i in range(1, 19)}
     plan = _arrow_plan(links, printed, chips, code_of, steps)
 
     # половины на разных листах — огрызки с обеих сторон, номера одни и те же
@@ -1100,8 +1242,13 @@ def test_arrow_plan_picks_the_stub_for_every_combination():
     # второй конец не напечатан вовсе — «вне кадра», а не «лист N»
     assert ("exit", 0, 3, 4, "шаг 3→4 → РП-4 · вне кадра") in plan
     assert ("entry", 0, 5, 6, "шаг 5→6 от РП-5 · вне кадра") in plan
-    # обе половины на одном листе — стрелка целиком, без огрызков
-    assert [d for d in plan if d[2] == 7] == [("bar2chip", 0, 7, 8, "шаг 7→8")]
+    # полоса и её чип на одном листе — ДВА огрызка, а не одна линия через план:
+    # у полосы — вниз к краю её блока («→ Ожидание»), у чипа — вверх от его
+    # верхней грани («от РП-7»); целой линии «полоса ↔ чип» не бывает ни при чём
+    assert [d for d in plan if d[2] == 7] == [
+        ("exit", 0, 7, 8, "шаг 7→8 → Ожидание"),
+        ("chip-entry", 0, 7, 8, "шаг 7→8 от РП-7"),
+    ]
     # чип напечатан на двух листах, копия — ни на одном: огрызок на каждом из них
     stubs = [d for d in plan if d[2] == 9]
     assert [d[0] for d in stubs] == ["chip-exit", "chip-exit"] and [d[1] for d in stubs] == [0, 1]
@@ -1109,6 +1256,12 @@ def test_arrow_plan_picks_the_stub_for_every_combination():
     assert ("chip-entry", 1, 11, 12, "шаг 11→12 от РП-11 · вне кадра") in plan
     # чип → чип на одном листе: одна стрелка, а не два огрызка
     assert [d for d in plan if d[2] == 15] == [("chip2chip", 0, 15, 16, "шаг 15→16")]
+    # чип и его полоса на одном листе — тот же разворот, только наоборот:
+    # огрызок чипа смотрит вверх на причал, у полосы он приходит снизу
+    assert [d for d in plan if d[2] == 17] == [
+        ("chip-exit", 0, 17, 18, "шаг 17→18 → РП-18"),
+        ("entry-below", 0, 17, 18, "шаг 17→18 от Ожидание"),
+    ]
     # ни один конец не напечатан — на бумаге рисовать нечего
     assert not [d for d in plan if 13 in (d[2], d[3]) or 14 in (d[2], d[3])]
 

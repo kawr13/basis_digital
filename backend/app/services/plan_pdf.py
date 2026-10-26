@@ -28,6 +28,18 @@
 («шаг N→M от РП-3 · лист 1»), у чипа «Ожидания» огрызок растёт вверх от его
 верхней грани.
 
+Правило листа: ни одна линия не имеет права пересекать больше одного блока
+причала — зачёркнутый сверху донизу лист не читается вовсе. Строже всего оно
+выполнено там, где его нарушить легче всего: карман «Ожидания» лежит под всеми
+причалами, и одна линия в него перечёркивала весь лист. Поэтому связь «полоса ↔
+чип „Ожидания“» — всегда ДВА коротких огрызка, даже когда оба конца напечатаны
+на одном листе: у полосы — вниз к нижнему краю ЕЁ блока с подписью «шаг N→M →
+Ожидание», у чипа — вверх от его верхней грани с подписью «шаг N→M от РП-6».
+Полоса ↔ полоса остаётся прямой: оба её конца напечатаны, и читается она как
+есть. Подпись стрелки, которая упирается в полосу, не имеет права ложиться на
+саму полосу — если слева от наконечника до края поля места не хватает, подпись
+уходит над её верхней гранью.
+
 Проверка прав та же, что у JSON-плана: без права `view` файл не отдаём.
 """
 from __future__ import annotations
@@ -226,9 +238,19 @@ def _arrow_plan(
 
     `links` — связи «оригинал → копия», у которых ещё есть стрелка; `printed[id]`
     — листы, на которых напечатан конец связи (полоса или чип); нет ключа — на
-    бумаге конца нет. Виды `bar2bar`/`chip2bar`/`bar2chip`/`chip2chip` — целая
-    стрелка, обе половины которой напечатаны на одном листе; `exit`/`entry` —
-    огрызок у полосы; `chip-exit`/`chip-entry` — огрызок у чипа.
+    бумаге конца нет. Виды `bar2bar` и `chip2chip` — целая стрелка, обе половины
+    которой напечатаны на одном листе; `exit` — огрызок полосы, уходящий вниз в
+    край её блока, `entry` — входящий в полосу со стороны шапки, `entry-below` —
+    входящий в полосу снизу, из чипа «Ожидания» этого же листа; `chip-exit`/
+    `chip-entry` — огрызок у чипа, растущий вверх от его верхней грани.
+
+    Целой линии `bar ↔ chip` не бывает ни при каком раскладе: чип лежит в самом
+    низу листа, под всеми причалами, и такая линия перерезала бы план. Вместо
+    неё — два огрызка, по одному у каждого конца, и каждый подписан тем же
+    «шаг N→M»: огрызок полосы смотрит на чип («→ Ожидание»), огрызок чипа — на
+    причал («от РП-6»). У огрызков, уехавших на другой лист, к подписи
+    добавляется «· лист N» (или «· вне кадра»), как и раньше.
+
     """
     def label(src_id: int, dst_id: int) -> str:
         """Единая подпись шага: один формат у всех стрелок и на всех листах."""
@@ -242,20 +264,36 @@ def _arrow_plan(
     for src_id, dst_id in links:
         src_pages, dst_pages = printed.get(src_id, set()), printed.get(dst_id, set())
         both = sorted(src_pages & dst_pages)
+        src_chip, dst_chip = src_id in chips, dst_id in chips
         if both:
-            # обе половины на одном листе — рисуем стрелку целиком, огрызки не нужны
-            kind = ("chip2chip" if src_id in chips and dst_id in chips
-                    else "chip2bar" if src_id in chips
-                    else "bar2chip" if dst_id in chips else "bar2bar")
-            out += [(kind, pg, src_id, dst_id, label(src_id, dst_id)) for pg in both]
+            if src_chip != dst_chip:
+                # один конец — чип «Ожидания». Линия от него к полосе идёт через
+                # все блоки причалов этого листа и читается как перечёркнутый
+                # план, а не как «судно ушло ждать». Связь рисуется двумя
+                # огрызками: каждый остаётся внутри своего блока.
+                for pg in both:
+                    if src_chip:  # «Ожидание» → полоса: огрызок чипа уходит вверх
+                        out.append(("chip-exit", pg, src_id, dst_id,
+                                    f"{label(src_id, dst_id)} → {code_of.get(dst_id, '?')}"))
+                        out.append(("entry-below", pg, src_id, dst_id,
+                                    f"{label(src_id, dst_id)} от {code_of.get(src_id, '?')}"))
+                    else:  # полоса → «Ожидание»: огрызок полосы идёт вниз
+                        out.append(("exit", pg, src_id, dst_id,
+                                    f"{label(src_id, dst_id)} → {code_of.get(dst_id, '?')}"))
+                        out.append(("chip-entry", pg, src_id, dst_id,
+                                    f"{label(src_id, dst_id)} от {code_of.get(src_id, '?')}"))
+                continue
+            # обе половины — полосы (или оба чипа) на одном листе: стрелка целиком
+            out += [("chip2chip" if src_chip else "bar2bar", pg, src_id, dst_id,
+                     label(src_id, dst_id)) for pg in both]
             continue
         if src_pages:  # оригинал напечатан, копия — нет: огрызок «уходит»
-            kind = "chip-exit" if src_id in chips else "exit"
+            kind = "chip-exit" if src_chip else "exit"
             out += [(kind, pg, src_id, dst_id,
                      f"{label(src_id, dst_id)} → {code_of.get(dst_id, '?')} · {elsewhere(dst_pages)}")
                     for pg in sorted(src_pages)]
         if dst_pages:  # копия напечатана, оригинал — нет: огрызок «приходит»
-            kind = "chip-entry" if dst_id in chips else "entry"
+            kind = "chip-entry" if dst_chip else "entry"
             out += [(kind, pg, src_id, dst_id,
                      f"{label(src_id, dst_id)} от {code_of.get(src_id, '?')} · {elsewhere(src_pages)}")
                     for pg in sorted(dst_pages)]
@@ -455,12 +493,12 @@ def build_plan_pdf(
              if not p.committed and p.moved_from_id and p.moved_from_id in chain_by]
 
     # чем рисовать: огрызок — у своей полосы сразу, целую стрелку «полоса → полоса»
-    # — когда обе полосы уже на листе, всё чиповое — внизу листа, где сами чипы
+    # — когда обе полосы уже на листе, всё чиповое — внизу листа, где сами чипы.
     stub_bar: dict[int, list[tuple[str, int, int, str]]] = {}
     full_bar: dict[int, list[tuple[int, int, str]]] = {}
     chip_items: dict[int, list[tuple[str, int, int, str]]] = {}
     for kind, pg, src_id, dst_id, text in _arrow_plan(links, printed, chips, code_of, steps):
-        if kind in ("exit", "entry"):
+        if kind in ("exit", "entry", "entry-below"):
             stub_bar.setdefault(src_id if kind == "exit" else dst_id, []).append(
                 (kind, src_id, dst_id, text))
         elif kind == "bar2bar":
@@ -506,25 +544,6 @@ def build_plan_pdf(
         arrow_straight(x0, a[2], x1, b[2], color)
         return x1, b[2], rightward  # куда ткнули наконечник — туда же ставим и подпись
 
-    def draw_chip_arrow(cr, br, color) -> tuple[float, float, bool]:
-        """Стрелка «из Ожидания»: от чипа к полосе — той же прямой, что и остальные.
-
-        Полоса прямо над чипом — целимся в её нижний край; чип сбоку — в ближнему
-        торцу посередине высоты полосы: в обе точки прямая приходит под разумным
-        углом и не идёт вдоль самой полосы. Возвращает острие и направление —
-        подпись ставится к нему, как у всех остальных стрелок.
-        """
-        x0 = (cr[1] + cr[2]) / 2
-        y0 = cr[4]                      # верхняя грань чипа
-        by = (br[3] + br[4]) / 2        # середина полосы по высоте
-        if br[1] - 2 <= x0 <= br[2] + 2:
-            arrow_straight(x0, y0, x0, br[3], color)
-            return x0, br[3], False     # идёт вверх: подпись кладём справа от острия
-        rightward = x0 < br[1]          # чип слева от полосы — входим в левый торец
-        xe = br[1] if rightward else br[2]
-        arrow_straight(x0, y0, xe, by, color)
-        return xe, by, rightward
-
     def arrow_label(text: str, x: float, y: float, color: str, align: str = "left") -> None:
         """Подпись у наконечника стрелки: цвет стрелки + белая подложка.
 
@@ -540,13 +559,42 @@ def build_plan_pdf(
         c.setFillColor(HexColor(color))
         c.drawString(x0, y, text)
 
+    def arrow_label_at_bar(text: str, x: float, y: float, color: str, br,
+                           rightward: bool) -> None:
+        """Подпись стрелки, упирающейся в полосу, — так, чтобы не резать саму полосу.
+
+        Обычное место — у наконечника, со стороны, откуда пришла линия. Но если
+        слева от наконечника до левого края поля шкалы не хватает места под текст,
+        подпись легла бы на полосу и поверх подписи самого судна в ней — именно
+        так «шаг 2→3» в своё время и лёг на «2 400 т · 74 м». Тогда подпись уходит
+        НАД полосой, над её верхней гранью: там чужих подписей не бывает вовсе,
+        и полоса остаётся полосой. `br` — прямоугольник полосы-цели.
+        """
+        w = pdfmetrics.stringWidth(text, f, 5.8)
+        left, right = margin + left_col, page_w_pt - margin
+        if rightward:  # остриё в левый торец копии — текст влево от наконечника
+            if x - 3 - w >= left:
+                arrow_label(text, x - 3, y + 2, color, align="right")
+                return
+        elif x + 3 + w <= right:  # остриё в правый торец — текст вправо
+            arrow_label(text, x + 3, y + 2, color)
+            return
+        elif x - 3 - w >= left:  # справа тесно, но слева место есть
+            arrow_label(text, x - 3, y + 2, color, align="right")
+            return
+        # места по обе стороны наконечника нет: подпись идёт НАД полосой, над её
+        # верхней гранью, — там чужих подписей не бывает в принципе
+        arrow_label(text, min(max(br[1], left), right - w), br[4] + 1.5, color)
+
     def draw_exit_arrow(br, block_bottom: float, color: str, text: str, n: int = 0) -> None:
-        """Стрелка «уходит с листа»: от низа полосы к нижнему краю блока причала.
+        """Огрызок «уходит»: от низа полосы к нижнему краю блока причала.
 
         Блок причала не разрезается между листами, поэтому копия, уехавшая на
         другой лист, оставляет здесь обрывок с подписью, куда именно («→ РП-6 ·
         лист 2» или «→ РП-6 · вне кадра»). Без этого на бумаге перешвартовка
-        просто исчезала. `n` — номер огрызка у этой полосы: у судна может быть
+        просто исчезала. Тем же огрызком рисуется и связь с чипом «Ожидания»
+        этого же листа («шаг 2→3 → Ожидание»): длинную линию в карман себе
+        позволить нельзя. `n` — номер огрызка у этой полосы: у судна может быть
         несколько копий, и их подписи не должны ложиться друг на друга.
         """
         x = (br[1] + br[2]) / 2 + 12 * n
@@ -572,25 +620,30 @@ def build_plan_pdf(
             arrow_straight(x, top + 12, x, top + 0.5, col, dot=False)
         arrow_label(text, x + 4, top + 2 + 8 * n, color)
 
-    def draw_bar_chip_arrow(br, cr, color: str, text: str) -> None:
-        """Стрелка «в Ожидание»: от полосы оригинала вниз к чипу копии.
+    def draw_arrival_arrow(br, block_bottom: float, color: str, text: str, n: int = 0) -> None:
+        """Огрызок «пришло из Ожидания»: снизу, в нижнюю грань полосы.
 
-        Направление — как на экране: от оригинала к копии. Раньше рисовался
-        только обратный ход (чип → полоса), и перешвартовка судна в карман
-        «Ожидание» на бумаге не оставалась вовсе.
+        Парная половина огрызка чипа. Полоса и её чип лежат на одном листе, но
+        соединять их линией нельзя: она прошла бы через все блоки причалов
+        между полосой и карманом. Поэтому у полосы — свой огрызок от нижней
+        грани вниз к краю блока, у чипа — свой, вверх от его верхней грани.
+        Остриё смотрит в полосу: судно сюда пришло. `n` разводит подписи
+        нескольких огрызков одной полосы.
         """
-        x0 = (br[1] + br[2]) / 2   # низ полосы оригинала, по центру
-        y0 = br[3]
-        x1 = (cr[1] + cr[2]) / 2   # цель — верхняя грань чипа по его центру
-        arrow_straight(x0, y0, x1, cr[4] + 0.5, HexColor(color))
-        arrow_label(text, x1 + 4, cr[4] + 2, color)
+        x = (br[1] + br[2]) / 2 + 12 * n
+        arrow_straight(x, block_bottom + 0.5, x, br[3] + 0.5, HexColor(color), dot=False)
+        arrow_label(text, x + 4, block_bottom + 1.5 + 8 * n, color)
 
-    def draw_chip_stub(cr, color: str, text: str, first_row: bool, n: int = 0) -> None:
-        """Огрызок «лист N» / «вне кадра» у чипа: вверх от его верхней грани.
+    def draw_chip_stub(cr, color: str, text: str, first_row: bool, n: int = 0,
+                       arrives: bool = False) -> None:
+        """Огрызок у чипа «Ожидания»: вверх от его верхней грани.
 
         У полосы огрызок уходит в край своего блока, но у чипа блока нет: карман
         лежит в самом низу листа, и единственное направление, где огрызок ещё
-        читается, — вверх, туда же, куда смотрит обычная стрелка из «Ожидания».
+        читается, — вверх. `arrives=True` — чип есть копия связи (судно пришло
+        ждать): остриё смотрит В чип, а хвост торчит вверх, иначе огрызок
+        «прихода» неотличим от огрызка «ухода».
+
         Чипам первой строки огрызок поднимаем через всю строку заголовка, иначе
         подпись легла бы на слово «Ожидание». `n` разводит вверх подписи
         приходящего и уходящего огрызков одного чипа — иначе они сливаются
@@ -598,7 +651,11 @@ def build_plan_pdf(
         """
         x = (cr[1] + cr[2]) / 2 + 12 * n
         tip = cr[4] + (16 if first_row else 10) + 9 * n
-        arrow_straight(x, cr[4], x, tip, HexColor(color))
+        col = HexColor(color)
+        if arrives:  # копия лежит в чипе: остриё в его верхнюю грань, хвост сверху
+            arrow_straight(x, tip, x, cr[4] + 0.5, col, dot=False)
+        else:
+            arrow_straight(x, cr[4], x, tip, col)
         arrow_label(text, x + 4, tip + 1.5, color)
 
     def header_band(y: float) -> None:
@@ -718,16 +775,21 @@ def build_plan_pdf(
                     c.drawString(x + 3, bottom + h - size - 1.2, _clip(p.vessel, w - 4, size))
             anchors[p.id] = (page_no, x + w, bottom + h / 2, x)
             bar_rect[p.id] = (page_no, x, x + w, bottom, bottom + h)
-            # огрызки своей полосы («лист N» / «вне кадра»): рисуем сразу — после
-            # showPage на лист не вернуться, да и край блока знает только этот блок
+            # огрызки своей полосы («лист N» / «вне кадра» / «→ Ожидание»): рисуем
+            # сразу — после showPage на лист не вернуться, да и край блока знает
+            # только этот блок. Огрызки одной стороны полосы разводятся общим
+            # счётчиком: «уходит» и «приходит снизу» живут в одном месте — под полосой.
             bottom_edge = y_top - field_h  # нижний край блока этого причала
-            seen: dict[str, int] = {}  # сколько огрызков этого края уже вышло
+            seen: dict[str, int] = {}  # сколько огрызков этой стороны уже вышло
             for kind, src_id, dst_id, text in stub_bar.get(p.id, []):
-                n = seen.get(kind, 0)
-                seen[kind] = n + 1
+                zone = "above" if kind == "entry" else "below"
+                n = seen.get(zone, 0)
+                seen[zone] = n + 1
                 color = bar_color(chain_by[dst_id])  # цвет стрелки — цвет копии, как на экране
                 if kind == "exit":
                     draw_exit_arrow(bar_rect[p.id], bottom_edge, color, text, n)
+                elif kind == "entry-below":
+                    draw_arrival_arrow(bar_rect[p.id], bottom_edge, color, text, n)
                 else:
                     draw_entry_arrow(bar_rect[p.id], y_top, color, text, n)
         # целые стрелки «полоса → полоса» рисуются после всех блоков листа —
@@ -808,24 +870,14 @@ def build_plan_pdf(
                 c.setFont(f, 5)
                 c.drawString(x + 3, cy - 12.5, _clip(sub, chip_w - 6, 5))
             chip_rect[p.id] = (page_no, x, x + chip_w, cy - chip_h, cy)
-        # всё, что рисует чип: стрелки к полосам этого листа и огрызки «лист N» /
-        # «вне кадра». Дескрипторы те же, что и для полос, — решает `_arrow_plan`
+        # всё, что рисует чип: огрызки вверх от его верхней грани — и «лист N»/
+        # «вне кадра», и связь с полосой этого листа. Целой линии «полоса ↔ чип»
+        # на бумаге не бывает: карман лежит под всеми причалами, и линия до него
+        # перерезала бы весь план — вместо неё огрызок у каждого конца связи.
         chip_stub: dict[int, int] = {}  # чип → сколько его огрызков уже нарисовано
         for kind, src_id, dst_id, text in chip_items.get(page_no, []):
             color = bar_color(chain_by[dst_id])  # цвет стрелки — цвет копии, как на экране
-            if kind == "chip2bar":  # из «Ожидания» в полосу этого листа
-                a, b = chip_rect.get(src_id), bar_rect.get(dst_id)
-                if not (a and b and a[0] == b[0] == page_no):
-                    continue
-                tx, ty, rw = draw_chip_arrow(a, b, HexColor(color))
-                arrow_label(text, tx - 3 if rw else tx + 3, ty + 2, color,
-                            align="right" if rw else "left")
-            elif kind == "bar2chip":  # полоса этого листа — в «Ожидание»
-                br, cr = bar_rect.get(src_id), chip_rect.get(dst_id)
-                if not (br and cr and br[0] == cr[0] == page_no):
-                    continue
-                draw_bar_chip_arrow(br, cr, color, text)
-            elif kind == "chip2chip":  # чип → чип: над верхними гранями, чтобы не резать чипы
+            if kind == "chip2chip":  # чип → чип: над верхними гранями, чтобы не резать чипы
                 a, b = chip_rect.get(src_id), chip_rect.get(dst_id)
                 if not (a and b and a[0] == b[0] == page_no):
                     continue
@@ -839,7 +891,8 @@ def build_plan_pdf(
                 key = src_id if kind == "chip-exit" else dst_id
                 n = chip_stub.get(key, 0)   # у чипа может быть два огрызка: откуда и куда
                 chip_stub[key] = n + 1
-                draw_chip_stub(cr, color, text, cr[4] == first_row_top, n)
+                draw_chip_stub(cr, color, text, cr[4] == first_row_top, n,
+                               arrives=(kind == "chip-entry"))
         return y - chip_rows * (chip_h + chip_gap)
 
     # ── второй проход: рисуем ровно то, что посчитал первый ────────────────
@@ -891,8 +944,7 @@ def build_plan_pdf(
             full_bar[n].remove((src_id, dst_id, text))
             color = bar_color(chain_by[dst_id])
             x1, y1, rightward = draw_arrow(a, dst, HexColor(color))
-            arrow_label(text, x1 - 3 if rightward else x1 + 3, y1 + 2, color,
-                        align="right" if rightward else "left")
+            arrow_label_at_bar(text, x1, y1, color, bar_rect[dst_id], rightward)
         if n in chip_at:   # низ листа: чипы + стрелки к полосам этого же листа
             waiting_section(chip_at[n])
         foot_note()
