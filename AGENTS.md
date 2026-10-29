@@ -67,7 +67,8 @@ statcab/
 │   └── nginx.conf           # прод-фронт: SPA + прокси /api → backend
 ├── docker-compose.yml       # db + backend + web
 ├── docs/                    # 01 постановка, 02 архитектура, 03 контракт 1С, 04 постановка судов,
-│                            # 05 статистика порта, 06 деплой на сервер (pack_release.ps1 + compose)
+│                            # 05 статистика порта, 06 деплой на сервер (pack_release.ps1 + compose),
+│                            # 07 Docker на рабочей машине (Windows; tools/docker_setup.ps1, tools/pg_up.ps1)
 └── tools/ui_smoke.mjs       # браузерные смоки (playwright-core), в т.ч. ui_statistics.mjs
 ```
 
