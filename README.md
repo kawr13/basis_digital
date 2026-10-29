@@ -52,6 +52,36 @@ docker compose logs backend | grep администратор
 Кабинет — на `http://localhost:8080`. Дальше ставится за ваш nginx/HTTPS
 (см. `frontend/nginx.conf` как образец: `/api` проксируется в бэкенд, фронт — SPA).
 
+### Выкат на сервер: релизный архив
+
+С рабочей машины (Windows) собирается чистый архив без мусора (`.git`,
+`node_modules`, `.venv`, локальные БД, `.env`):
+
+```powershell
+cd D:\basis\statcab
+powershell -ExecutionPolicy Bypass -File .\pack_release.ps1
+# → release\statcab-<дата-время>.zip (проверенные пути для linux unzip)
+```
+
+На сервере:
+
+```bash
+scp release/statcab-*.zip user@server:/tmp/
+# на сервере:
+mkdir -p /opt/statcab && tar -xf /tmp/statcab-*.zip -C /opt/statcab --strip-components=1
+cd /opt/statcab
+cp .env.example .env
+openssl rand -hex 32   # SECRET_KEY
+openssl rand -hex 16   # POSTGRES_PASSWORD
+# заполнить .env: POSTGRES_PASSWORD, SECRET_KEY, ADMIN_PASSWORD;
+# доступ без HTTPS → COOKIE_SECURE=false
+docker compose up -d --build
+docker compose logs backend | grep администратор   # пароль первого админа
+```
+
+Образ собирается на сервере (локальный Docker для этого не нужен).
+Расчёт ресурсов, обновление, откат и бэкап — `docs/06_деплой_на_сервер.md`.
+
 ## Что уже работает
 
 | Возможность | Статус |
