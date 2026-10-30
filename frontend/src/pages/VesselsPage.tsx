@@ -137,6 +137,13 @@ export default function VesselsPage() {
   const [form, setForm] = useState<Form | null>(null);
   const [formError, setFormError] = useState("");
   const [saved, setSaved] = useState("");
+  // «Судно-шаблон»: выбор прошлой постановки живёт ВНУТРИ окна создания,
+  // а не второй модалкой поверх: Esc у обеих модалок общий, и закрытие
+  // выбора съело бы незаполненную форму.
+  const [tplOpen, setTplOpen] = useState(false);
+  const [tplRows, setTplRows] = useState<Placement[] | null>(null);
+  const [tplQuery, setTplQuery] = useState("");
+  const [tplError, setTplError] = useState("");
   // «⤓ PDF» качает файл с бэкенда, поэтому кнопка обязана показывать, что файл уже летит
   const [pdfBusy, setPdfBusy] = useState(false);
   const [detail, setDetail] = useState<Placement | null>(null);
@@ -448,6 +455,7 @@ export default function VesselsPage() {
 
   const openCreate = () => {
     setFormError("");
+    setTplOpen(false);
     setForm(formFrom(null, berths));
   };
 
@@ -455,6 +463,47 @@ export default function VesselsPage() {
     setFormError("");
     setDetail(null);
     setForm(formFrom(p, berths));
+  };
+
+  // «Судно-шаблон»: та же форма, только данные взяты из прошлой стоянки.
+  // Просмотр за 120 дней назад + текущее окно: одного месяца не хватает —
+  // суда приходят циклами, а «такое же, но с другой датой» обычно ищут
+  // в прошлой навигации. По судну показываем последнюю постановку.
+  const openTemplate = async () => {
+    setTplOpen(true);
+    setTplError("");
+    setTplRows(null);
+    try {
+      const wide = await api.vesselPlan(addDays(from, -120), to);
+      const last = new Map<string, Placement>();
+      for (const p of [...wide.placements].sort((a, b) => (a.starts_at < b.starts_at ? -1 : 1))) {
+        last.set(p.vessel.trim().toLocaleUpperCase("ru-RU"), p);
+      }
+      setTplRows([...last.values()].sort((a, b) => (a.starts_at < b.starts_at ? 1 : -1)));
+    } catch (e) {
+      setTplError(errText(e));
+    }
+  };
+
+  const applyTemplate = (p: Placement) => {
+    setForm((f) => {
+      if (!f) return f;
+      const t = formFrom(p, berths);
+      // Длительность стоянки бережём (навигация грузится циклами), начало
+      // ставим на сегодня: шаблон затем и нужен, чтобы дата была новая.
+      const dur = Math.max(parseLocal(p.ends_at).getTime() - parseLocal(p.starts_at).getTime(), 0);
+      const end = new Date(Date.now() + dur);
+      const endHour = SLOT_HOURS.filter((h) => h >= end.getHours())[0] ?? 18;
+      return {
+        ...t,
+        id: undefined,
+        startDate: ymd(new Date()),
+        startHour: 0,
+        endDate: ymd(end),
+        endHour,
+      };
+    });
+    setTplOpen(false);
   };
 
   const submit = async () => {
@@ -1407,23 +1456,53 @@ export default function VesselsPage() {
 
       {form && (
         <Modal
-          title={form.id ? "Правка постановки" : "Новая постановка"}
-          onClose={() => setForm(null)}
+          title={form.id ? "Правка постановки" : tplOpen ? "Судно-шаблон — выберите прошлую постановку" : "Новая постановка"}
+          onClose={() => {
+            setForm(null);
+            setTplOpen(false);
+          }}
           testId="placement-form"
           footer={
             <div className="space-y-3">
               <FormError text={formError} />
               <div className="flex flex-wrap items-center gap-2">
-                <button className="btn-primary text-sm" onClick={submit} data-admin-action="save-placement">
-                  {form.id ? "Сохранить" : "Поставить судно"}
-                </button>
-                <button className="btn-ghost text-sm" onClick={() => setForm(null)}>
-                  Отмена
-                </button>
+                {tplOpen ? (
+                  <button className="btn-ghost text-sm" onClick={() => setTplOpen(false)} data-admin-action="template-back">
+                    Назад к форме
+                  </button>
+                ) : (
+                  <>
+                    <button className="btn-primary text-sm" onClick={submit} data-admin-action="save-placement">
+                      {form.id ? "Сохранить" : "Поставить судно"}
+                    </button>
+                    <button className="btn-ghost text-sm" onClick={() => setForm(null)}>
+                      Отмена
+                    </button>
+                  </>
+                )}
               </div>
             </div>
           }
         >
+          {tplOpen ? (
+            <TemplatePicker
+              rows={tplRows}
+              query={tplQuery}
+              error={tplError}
+              onQuery={setTplQuery}
+              codeOf={(id) => berths.find((b) => b.id === id)?.code ?? "причал?"}
+              onPick={applyTemplate}
+            />
+          ) : (
+            <>
+          {!form.id && (
+            <div className="mb-3 flex flex-wrap items-center gap-2">
+              <button className="btn-ghost text-xs" onClick={openTemplate} data-admin-action="template-pick">
+                Скопировать из предыдущей постановки…
+              </button>
+              <span className="text-xs text-ink-400">причал, груз, длина и цвет возьмём из прошлой стоянки — дату поставите новую</span>
+            </div>
+          )}
           <div className="grid gap-3 sm:grid-cols-2">
             <Field label="Причал">
               <select
@@ -1560,10 +1639,80 @@ export default function VesselsPage() {
               </div>
             </Field>
           </div>
-
           <Notice text="Два судна мешают друг другу, только если пересекаются и по времени, и по метрам: 100 м причала — это 10 ячеек по 10 м. Кабинет не даст поставить судно так, чтобы оно вылезло за край причала или наехало на уже стоящее, и скажет, какое именно и где именно." />
+            </>
+          )}
         </Modal>
       )}
     </AppShell>
+  );
+}
+
+/**
+ * «Судно-шаблон»: список прошлых постановок, из которого заполняется форма.
+ * По судну — одна строка (последняя стоянка), поиск по названию. Даты здесь
+ * не выбираются — шаблон переносит длительность на сегодня, остальное
+ * правится в форме: плодить два места выбора даты на одном окне незачем.
+ */
+function TemplatePicker({
+  rows,
+  query,
+  error,
+  onQuery,
+  codeOf,
+  onPick,
+}: {
+  rows: Placement[] | null;
+  query: string;
+  error: string;
+  onQuery: (q: string) => void;
+  codeOf: (berthId: number) => string;
+  onPick: (p: Placement) => void;
+}) {
+  const q = query.trim().toLocaleLowerCase("ru-RU");
+  const shown = (rows ?? []).filter((p) => !q || p.vessel.toLocaleLowerCase("ru-RU").includes(q));
+  return (
+    <div className="space-y-3">
+      <FormError text={error} />
+      <input
+        className="field"
+        value={query}
+        onChange={(e) => onQuery(e.target.value)}
+        placeholder="Поиск по названию судна…"
+        autoFocus
+        data-field="template-search"
+      />
+      {rows === null && !error && <p className="text-sm text-ink-300">Загружаем прошлые постановки…</p>}
+      {rows !== null && shown.length === 0 && (
+        <p className="text-sm text-ink-300">
+          {q
+            ? "Ничего не найдено — за последние четыре месяца таких судов у причалов не было."
+            : "Прошлых постановок нет — заполните форму с нуля."}
+        </p>
+      )}
+      <div className="max-h-80 space-y-2 overflow-y-auto pr-1" data-modal="template-list">
+        {shown.map((p) => (
+          <button
+            key={p.id}
+            className="block w-full rounded-lg border border-ink-600 bg-ink-900 px-3 py-2 text-left hover:bg-ink-800/60"
+            onClick={() => onPick(p)}
+            data-admin-action="template-pick-one"
+          >
+            <span className="block text-sm font-semibold text-ink-100">{p.vessel}</span>
+            <span className="block text-xs text-ink-400">
+              {[
+                codeOf(p.berth_id),
+                p.cargo,
+                p.volume,
+                p.length_m ? `${p.length_m} м` : null,
+                `последняя стоянка: ${dmy(ymd(parseLocal(p.starts_at)))}`,
+              ]
+                .filter(Boolean)
+                .join(" · ")}
+            </span>
+          </button>
+        ))}
+      </div>
+    </div>
   );
 }
