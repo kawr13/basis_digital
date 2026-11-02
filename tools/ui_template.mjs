@@ -8,7 +8,8 @@
 import { chromium } from "playwright-core";
 
 const BASE = process.env.BASE || "http://localhost:5173";
-const PASS = process.env.PASS || "Perf-2026-pass";
+const PASS = process.env.PASS || "";
+if (!PASS) { console.error("Нужна переменная PASS (пароль админа кабинета)"); process.exit(2); }
 const problems = [];
 const ok = (cond, msg) => { console.log(`${cond ? "✅" : "❌"} ${msg}`); if (!cond) problems.push(msg); };
 const ymd = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;

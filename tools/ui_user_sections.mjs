@@ -9,7 +9,8 @@ import { chromium } from "playwright-core";
 
 const BASE = process.env.BASE || "http://localhost:5173";
 const API = process.env.API || "http://127.0.0.1:8000";
-const PASS = process.env.PASS || "Perf-2026-pass";
+const PASS = process.env.PASS || "";
+if (!PASS) { console.error("Нужна переменная PASS (пароль админа кабинета)"); process.exit(2); }
 const LOGIN = `sectest${Date.now() % 100000}`;
 const USERPASS = "Sect-Test-2026-x";
 const problems = [];
