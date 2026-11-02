@@ -2,6 +2,10 @@
 
 Права те же, что у метрик: менеджер не получит строк по чужому складу, даже
 если подставит его id в параметр `warehouses`.
+
+Доступ к разделу: те же строки показывает детализация дашборда «Склады 1С»
+(`DrilldownPanel`), поэтому эндпоинты открыты, если человеку доступен хотя бы
+один из двух разделов — `reports` или `warehouses` (см. `services/sections.py`).
 """
 from __future__ import annotations
 
@@ -12,7 +16,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..db import get_db
-from ..deps import current_user
+from ..deps import require_section
 from ..models import User, Warehouse
 from ..services import metrics as q
 from ..services import app_settings
@@ -66,7 +70,7 @@ def processing(
     date_from: date | None = Query(default=None, alias="from"),
     date_to: date | None = Query(default=None, alias="to"),
     warehouses: str | None = Query(default=None),
-    user: User = Depends(current_user),
+    user: User = Depends(require_section("reports", "warehouses")),
     db: Session = Depends(get_db),
 ):
     start, end = _period(date_from, date_to, db)
@@ -84,7 +88,7 @@ def processing_csv(
     date_from: date | None = Query(default=None, alias="from"),
     date_to: date | None = Query(default=None, alias="to"),
     warehouses: str | None = Query(default=None),
-    user: User = Depends(current_user),
+    user: User = Depends(require_section("reports", "warehouses")),
     db: Session = Depends(get_db),
 ):
     start, end = _period(date_from, date_to, db)
@@ -102,7 +106,7 @@ def processing_csv(
 @router.get("/cargo")
 def cargo(
     warehouses: str | None = Query(default=None),
-    user: User = Depends(current_user),
+    user: User = Depends(require_section("reports", "warehouses")),
     db: Session = Depends(get_db),
 ):
     rows = r.cargo_report(db, _scope(db, user, warehouses))
@@ -117,7 +121,7 @@ def cargo(
 @router.get("/cargo.csv")
 def cargo_csv(
     warehouses: str | None = Query(default=None),
-    user: User = Depends(current_user),
+    user: User = Depends(require_section("reports", "warehouses")),
     db: Session = Depends(get_db),
 ):
     rows = r.cargo_report(db, _scope(db, user, warehouses))
@@ -134,7 +138,7 @@ def capacity_trend(
     date_from: date | None = Query(default=None, alias="from"),
     date_to: date | None = Query(default=None, alias="to"),
     warehouses: str | None = Query(default=None),
-    user: User = Depends(current_user),
+    user: User = Depends(require_section("reports", "warehouses")),
     db: Session = Depends(get_db),
 ):
     start, end = _period(date_from, date_to, db)
@@ -147,7 +151,7 @@ def capacity_trend_csv(
     date_from: date | None = Query(default=None, alias="from"),
     date_to: date | None = Query(default=None, alias="to"),
     warehouses: str | None = Query(default=None),
-    user: User = Depends(current_user),
+    user: User = Depends(require_section("reports", "warehouses")),
     db: Session = Depends(get_db),
 ):
     start, end = _period(date_from, date_to, db)
@@ -160,7 +164,8 @@ def capacity_trend_csv(
 
 
 @router.get("/warehouses")
-def report_warehouses(user: User = Depends(current_user), db: Session = Depends(get_db)):
+def report_warehouses(user: User = Depends(require_section("reports", "warehouses")),
+                      db: Session = Depends(get_db)):
     """Список складов для фильтра отчётов (только доступные пользователю)."""
     ids = q.allowed_warehouse_ids(db, user)
     if not ids:

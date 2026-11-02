@@ -8,7 +8,7 @@
 
 | Что | Факт |
 |---|---|
-| `pytest` | 189 тестов в 14 файлах, все зелёные. Самый медленный — 8.8 с, `tests/test_admin_settings.py::test_onec_test_on_bad_http_url_does_not_crash` (ходит в сеть; это п.13 в `TASKS.md`) |
+| `pytest` | 200 тестов в 15 файлах, все зелёные. Самый медленный — 8.8 с, `tests/test_admin_settings.py::test_onec_test_on_bad_http_url_does_not_crash` (ходит в сеть; это п.13 в `TASKS.md`) |
 | Dev-процессы | подняты `:8000` (uvicorn) и `:5173` (vite); `:4173` — мёртвая прод-сборка, её держать нельзя |
 | `backend/.env` | **ВРЕМЕННЫЙ**: база `sqlite:///D:/tmp/browser.db`, `ONE_C_SOURCE=mock`, `SYNC_ENABLED=false`, `COOKIE_SECURE=false`, логин/пароль админа — в этом же файле (в git не попадает). Это конфиг замеров и браузерных смоков, не рабочий |
 | Незакоммиченное | 6 файлов: `backend/app/onec/dispatcher_demo.py` + `backend/tests/test_dispatcher_demo.py` + `tools/seed_dispatcher_demo.py` (готовая фича-генератор демо-отчёта, 11 тестов уже в зелёном прогоне) и мусор `_a.txt`, `_b.txt`, `backend/_patch_settings.py` |
@@ -40,6 +40,7 @@
 |---|---|
 | `chainSteps` (`frontend/src/vessels.ts`) ↔ `_chain_steps` (`app/services/plan_pdf.py`) | на бумаге стрелки сводятся по другим номерам шагов |
 | `rights_for` (`app/services/vessels.py`) ↔ `resolveVesselRights` (`frontend/src/settings.ts`) | кнопки доступны, API отвечает 403 |
+| `section_allowed` (`app/services/sections.py`) ↔ `userSections`/`sectionVisible` (`frontend/src/settings.ts`) | вкладка показана, а маршрут и API её закрыли (403) — или наоборот: раздел скрыли, а он остался кликабельным |
 | `dispatcher_xlsm` координат блоков ↔ `app/onec/dispatcher_demo.py` | генератор пишет в один столбец, разбор читает из другого — импорт молча возвращает пустой блок (ловит `test_dispatcher_demo.py`) |
 | `buildWidgets(...)` — список подробно и список консервативно | новый блок исчезает в одном из режимов |
 | `frontend/nginx.conf` ↔ `deploy/nginx/statcab.vhost.conf` (gzip, `client_max_body_size`) | «у нас на сервере не работает» при внешнем nginx (ловит `test_web_config.py`) |
@@ -79,7 +80,7 @@
 ## Устарело в документах
 
 - `README.md:18` — «12 тестов», `README.md:311` и `AGENTS.md:52` — «110 тестов».
-  Реально 189 (14 файлов).
+  Реально 200 (15 файлов).
 - `AGENTS.md` и `README.md` не упоминают генератор демо-отчёта
   (`app/onec/dispatcher_demo.py`, `tools/seed_dispatcher_demo.py`) — при коммите нужен
   хотя бы пункт в таблице команд.
@@ -107,6 +108,10 @@
   `node_modules/.vite`, иначе браузер отдаёт старый CSS и проверки по скриншотам врут.
   Проверять `getComputedStyle`, а не глазами.
 - Браузерные смоки ходят на `:5173` (`BASE=...`), нужен Chromium: `PW_CHROMIUM=<путь к chrome.exe>`.
+- `tools/ui_admin.mjs` ждёт работающий планировщик: на временном `backend/.env`
+  (`SYNC_ENABLED=false`) две проверки про `sync.interval_minutes` падают сами по себе —
+  это конфиг замеров, а не регрессия (ловится ответом `sync.enabled: false` из
+  `GET /api/admin/settings`).
 - `tools/pdf_arrow_parity.py` требует поднятый бэкенд с цепочкой перешвартовок;
   `tools/plan_pdf_preview.py` смотрит лист без браузера.
 - После смоков чистить dev-базу от `qa*`/`zz*`, `QA-%` и `app_settings` — иначе проверки

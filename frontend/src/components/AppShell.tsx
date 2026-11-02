@@ -3,18 +3,20 @@ import { NavLink } from "react-router-dom";
 import { useAuth } from "../auth";
 import { roleLabel } from "../format";
 import { ageLabel, type Live } from "../live";
-import { hiddenSections, resolveVesselRights, usePublicSettings } from "../settings";
+import { sectionVisible, usePublicSettings } from "../settings";
 
-// `section` — id раздела в настройке ui.hidden_sections: админ может прятать
-// целые разделы для всех, вкладка и маршрут закрываются одновременно.
+// `section` — id раздела: вкладку закрывает пересечение глобальной галки
+// `ui.hidden_sections`, личных вкладок `users.sections` и прав роли
+// (`sectionVisible` в `settings.ts`, на бэкенде — `services/sections.py`).
 const tabs = [
   { to: "/", label: "Индикаторы", end: true, nav: "summary", section: "statistics" },
   { to: "/warehouses", label: "Склады 1С", end: true, nav: "warehouses", section: "warehouses" },
   { to: "/reports", label: "Отчёты", end: false, nav: "reports", section: "reports" },
 ];
 
-// Вкладка постановки судов показывается только тем ролям, которым разрешён
-// просмотр плана (настройка vessels.view_roles) — маршрут закрыт и на бэкенде.
+// Вкладка постановки судов показывается только тем, кому открыт раздел и кто может
+// смотреть план (настройка vessels.view_roles / личное vessel_right) — маршрут
+// закрыт и на бэкенде.
 const VESSELS_TAB = { to: "/vessels", label: "Постановка", end: false, nav: "vessels", section: "vessels" };
 
 // Вкладка администратора видна только роли admin: маршрут /admin всё равно
@@ -44,11 +46,11 @@ export function AppShell({
 }) {
   const { user, logout } = useAuth();
   const settings = usePublicSettings();
-  const canSeeVessels = resolveVesselRights(user, settings).view;
-  const hidden = hiddenSections(settings);
+  // Просмотр плана — то же исключение «раздел + права», что и у маршрута /vessels.
+  const canSeeVessels = sectionVisible(user, settings, "vessels");
   const navTabs = [
-    ...tabs.filter((t) => !hidden.has(t.section)),
-    ...(canSeeVessels && !hidden.has(VESSELS_TAB.section) ? [VESSELS_TAB] : []),
+    ...tabs.filter((t) => sectionVisible(user, settings, t.section)),
+    ...(canSeeVessels ? [VESSELS_TAB] : []),
     // Админка всегда остаётся: спрятать её от админа нельзя (и незачем),
     // иначе настройки, которые её прячут, будет некому вернуть.
     ...(user?.role === "admin" ? [ADMIN_TAB] : []),

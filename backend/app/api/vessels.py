@@ -25,6 +25,7 @@ from ..schemas import (
     BerthOut, BerthUpsert, PlacementIn, PlacementOut, PlacementUpdate,
 )
 from ..services import plan_pdf, vessels as svc
+from ..services import sections as section_svc
 
 router = APIRouter(prefix="/api/vessels", tags=["vessels"])
 
@@ -34,7 +35,15 @@ RIGHT_LABEL = {"view": "смотреть", "edit": "ставить и прави
 
 
 def _allow(db: Session, user: User, right: str, what: str) -> None:
-    """Право считается так: личная настройка пользователя → иначе роли из настроек."""
+    """Право считается так: раздел кабинета → личная настройка пользователя → роли из настроек.
+
+    Сначала «видимость» раздела: глобальная галка `ui.hidden_sections` и личный
+    список вкладок `users.sections` (см. `services/sections.py`). Она закрывает и
+    правку: нельзя ставить суда в план, который человеку скрыли. А уже внутри
+    раздела — `rights_for` (`users.vessel_right`, иначе `vessels.*_roles`).
+    """
+    if not section_svc.section_visible(db, user, "vessels"):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, section_svc.deny(db, user, "vessels"))
     if svc.rights_for(db, user).get(right):
         return
     raise HTTPException(status.HTTP_403_FORBIDDEN, f"{what}: вам нельзя {RIGHT_LABEL[right]}")

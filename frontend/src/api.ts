@@ -18,6 +18,12 @@ export type User = {
   vessel_right?: VesselRight | null;
   /** те же права, но уже посчитанные бэкендом; приходят со входа и /me */
   vessel_rights?: VesselRights;
+  /**
+   * Личные вкладки: null = ограничений нет (наследуется роль), иначе список id
+   * разделов (statistics|warehouses|reports|vessels). Глобальные галки
+   * `ui.hidden_sections` вычитает фронт — см. `userSections()` в `settings.ts`.
+   */
+  sections?: string[] | null;
 };
 
 export type VesselRights = { view: boolean; edit: boolean; delete: boolean };
@@ -389,6 +395,8 @@ export type AdminUserCreate = {
   email?: string | null;
   warehouse_ids: number[];
   vessel_right?: VesselRight | null;
+  /** null = без личных ограничений; пустой список бэкенд отклоняет (400) */
+  sections?: string[] | null;
 };
 
 export type AdminUserPatch = {
@@ -398,6 +406,8 @@ export type AdminUserPatch = {
   password?: string;
   warehouse_ids?: number[];
   vessel_right?: VesselRight | null;
+  /** null снимает личные вкладки (возврат «по роли») */
+  sections?: string[] | null;
 };
 
 export type TempPassword = { login: string; temporary_password: string };

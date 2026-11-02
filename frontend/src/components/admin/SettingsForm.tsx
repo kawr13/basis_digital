@@ -8,18 +8,11 @@
  */
 import { useEffect, useMemo, useState } from "react";
 import type { SettingsEnvelope, SettingsPatch, SettingSpec, SchedulerReport } from "../../api";
+import { SECTION_LABELS } from "../../settings";
 import { BusyNote, Field, FormError, InfoNote, Notice } from "./ui";
 import { schedulerNote } from "./useSettings";
 
 export type SettingsSection = { title: string; keys: string[]; note?: string };
-
-/** Подписи id разделов для чекбоксов (ui.hidden_sections). */
-const SECTION_LABELS: Record<string, string> = {
-  statistics: "Индикаторы",
-  warehouses: "Склады 1С",
-  reports: "Отчёты",
-  vessels: "Постановка",
-};
 
 type DraftValue = string | boolean;
 

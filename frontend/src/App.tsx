@@ -4,7 +4,13 @@ import { useAuth } from "./auth";
 import { ChunkErrorBoundary } from "./components/ChunkErrorBoundary";
 import { PageSkeleton, type SkeletonVariant } from "./components/PageSkeleton";
 import { lazyRoute } from "./lazyRoute";
-import { hiddenSections, resolveVesselRights, usePublicSettings } from "./settings";
+import type { User } from "./api";
+import {
+  SECTION_IDS,
+  sectionVisible,
+  usePublicSettings,
+  type PublicSettings,
+} from "./settings";
 import LoginPage from "./pages/LoginPage";
 
 /**
@@ -36,8 +42,9 @@ function AdminOnly({ children }: { children: React.ReactNode }) {
   return <>{children}</>;
 }
 
-/** Раздел, который админ скрыл для всех (ui.hidden_sections): и вкладка,
- *  и маршрут. Пересылаем на первый видимый раздел, а не «в никуда». */
+/** Маршрут раздела. Раздел закрыт, если он скрыт для всех (`ui.hidden_sections`)
+ *  или снят в личных вкладках `users.sections` — и вкладка, и маршрут сразу.
+ *  Пересылаем на первый видимый раздел, а не «в никуда». */
 const SECTION_PATHS: Record<string, string> = {
   statistics: "/",
   warehouses: "/warehouses",
@@ -45,10 +52,10 @@ const SECTION_PATHS: Record<string, string> = {
   vessels: "/vessels",
 };
 
-function firstVisibleSection(settings: Parameters<typeof hiddenSections>[0]): string {
-  const hidden = hiddenSections(settings);
-  for (const id of ["statistics", "warehouses", "reports", "vessels"]) {
-    if (!hidden.has(id)) return SECTION_PATHS[id];
+/** Первый раздел, который человеку показываем; «постановка» — только со правом смотреть. */
+function firstVisibleSection(user: User | null, settings: PublicSettings | null): string {
+  for (const id of SECTION_IDS) {
+    if (sectionVisible(user, settings, id)) return SECTION_PATHS[id];
   }
   return "/";
 }
@@ -58,20 +65,26 @@ function SectionGuard({ section, children }: { section: string; children: React.
   const settings = usePublicSettings();
   if (booting) return <Boot />;
   if (!user) return <Navigate to="/login" replace />;
-  if (hiddenSections(settings).has(section)) {
-    return <Navigate to={firstVisibleSection(settings)} replace />;
+  if (!sectionVisible(user, settings, section)) {
+    const to = firstVisibleSection(user, settings);
+    // Делать нечего: видно нечего вообще (в личных вкладках осталась одна
+    // «Постановка», а прав на неё нет). Редирект в себя же закрыт — иначе
+    // React Router гонял бы <Navigate> по кругу, а экран остался бы пустым.
+    if (to === SECTION_PATHS[section]) return <>{children}</>;
+    return <Navigate to={to} replace />;
   }
   return <>{children}</>;
 }
 
-/** Просмотр плана постановки судов — по настройке vessels.view_roles (как и на бэкенде). */
+/** Просмотр плана постановки судов — раздел плюс права на него (см. `sectionVisible`). */
 function VesselsGuard({ children }: { children: React.ReactNode }) {
   const { user, booting } = useAuth();
   const settings = usePublicSettings();
   if (booting) return <Boot />;
   if (!user) return <Navigate to="/login" replace />;
-  if (hiddenSections(settings).has("vessels")) return <Navigate to={firstVisibleSection(settings)} replace />;
-  if (!resolveVesselRights(user, settings).view) return <Navigate to={firstVisibleSection(settings)} replace />;
+  if (!sectionVisible(user, settings, "vessels")) {
+    return <Navigate to={firstVisibleSection(user, settings)} replace />;
+  }
   return <>{children}</>;
 }
 

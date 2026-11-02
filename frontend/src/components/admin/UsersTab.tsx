@@ -20,7 +20,7 @@ import {
   type VesselRight,
 } from "../../api";
 import { asOf, roleLabel } from "../../format";
-import { VESSEL_RIGHT_OPTIONS } from "../../settings";
+import { SECTION_LABELS, SECTION_OPTIONS, VESSEL_RIGHT_OPTIONS } from "../../settings";
 import {
   BusyNote,
   ConfirmInline,
@@ -51,6 +51,8 @@ type FormState = {
   warehouse_ids: number[];
   /** "" = по роли; иначе none|view|edit|manage */
   vessel_right: string;
+  /** null = «без личных ограничений (по роли)», иначе id отмеченных вкладок */
+  sections: string[] | null;
 };
 
 const RIGHT_SHORT: Record<string, string> = {
@@ -69,6 +71,7 @@ const EMPTY: FormState = {
   password2: "",
   warehouse_ids: [],
   vessel_right: "",
+  sections: null,
 };
 
 /**
@@ -110,6 +113,8 @@ export function UsersTab() {
   const [temp, setTemp] = useState<TempPassword | null>(null);
   const [copied, setCopied] = useState(false);
   const [confirmId, setConfirmId] = useState<number | null>(null);
+  // подсказка блока «Вкладки»: снять последнюю галку нельзя, пустой набор отклонит бэкенд
+  const [sectionHint, setSectionHint] = useState("");
   // удаление — отдельное подтверждение: оно необратимо и не путается с «отключить»
   const [deleteId, setDeleteId] = useState<number | null>(null);
 
@@ -136,6 +141,10 @@ export function UsersTab() {
   /** Короткая подпись права на постановку судов — для таблицы. */
   const rightShort = (r?: string | null) => (r ? RIGHT_SHORT[r] ?? r : "по роли");
 
+  /** Личные вкладки человека; пусто — «по роли», бейдж в таком случае не рисуем. */
+  const sectionsLabel = (u: AdminUser) =>
+    Array.isArray(u.sections) ? u.sections.map((s) => SECTION_LABELS[s] ?? s).join(", ") : "";
+
   const scopeLabel = (u: AdminUser) => {
     if (u.all_warehouses || u.warehouse_ids.length === 0) return "все склады";
     return u.warehouse_ids.map((id) => codeById.get(id) ?? `#${id}`).join(", ");
@@ -149,6 +158,7 @@ export function UsersTab() {
   // ---------------------------------------------------------------- форма ---
   const openCreate = () => {
     setForm(EMPTY);
+    setSectionHint("");
     setNewPassword("");
     setFormError("");
     setEditing({ mode: "create" });
@@ -164,7 +174,9 @@ export function UsersTab() {
       password2: "",
       warehouse_ids: u.warehouse_ids,
       vessel_right: u.vessel_right ?? "",
+      sections: Array.isArray(u.sections) ? [...u.sections] : null,
     });
+    setSectionHint("");
     setNewPassword("");
     setFormError("");
     setEditing({ mode: "edit", user: u });
@@ -177,6 +189,33 @@ export function UsersTab() {
         ? f.warehouse_ids.filter((x) => x !== id)
         : [...f.warehouse_ids, id],
     }));
+
+  /**
+   * Личные вкладки: `null` — «без ограничений (по роли)», иначе список.
+   * Последнюю галку не снимаем: учётка без вкладок — это локаут, и бэкенд
+   * такой набор отклоняет (400), поэтому он отклоняется здесь и сразу с
+   * подсказкой, а не после нажатия «Сохранить».
+   */
+  const toggleSection = (id: string) => {
+    const own = form.sections ?? [];
+    if (!own.includes(id)) {
+      setSectionHint("");
+      setForm({ ...form, sections: [...own, id] });
+      return;
+    }
+    if (own.length === 1) {
+      setSectionHint("Нельзя снять последнюю вкладку: хотя бы одна обязана остаться доступной.");
+      return;
+    }
+    setSectionHint("");
+    setForm({ ...form, sections: own.filter((x) => x !== id) });
+  };
+
+  /** Чекбокс «без личных ограничений»: включили — галки прячутся, сняли — показываем все. */
+  const toggleInherit = (inherit: boolean) => {
+    setSectionHint("");
+    setForm({ ...form, sections: inherit ? null : SECTION_OPTIONS.map((o) => o.id) });
+  };
 
   const submit = async () => {
     setFormError("");
@@ -207,6 +246,7 @@ export function UsersTab() {
           email: email || null,
           warehouse_ids: form.warehouse_ids,
           vessel_right: (form.vessel_right || null) as VesselRight | null,
+          sections: form.sections,
         };
         const created = await api.adminCreateUser(body);
         setUsers((list) => [...list.filter((u) => u.id !== created.id), created].sort((a, b) => a.login.localeCompare(b.login, "ru")));
@@ -217,6 +257,7 @@ export function UsersTab() {
           role: form.role,
           warehouse_ids: form.warehouse_ids,
           vessel_right: (form.vessel_right || null) as VesselRight | null,
+          sections: form.sections,
         };
         if (newPassword) {
           const problem = passwordProblem(newPassword);
@@ -372,6 +413,7 @@ export function UsersTab() {
               <Th>Роль</Th>
               <Th>Склады</Th>
               <Th>Постановка</Th>
+              <Th>Вкладки</Th>
               <Th>Последний вход</Th>
               <Th>Статус</Th>
               <Th>Действия</Th>
@@ -388,6 +430,23 @@ export function UsersTab() {
                   <td className="py-2 pr-3 text-ink-300">{scopeLabel(u)}</td>
                   <td className="py-2 pr-3 text-ink-300" data-vessel-right={u.vessel_right ?? "role"}>
                     {rightShort(u.vessel_right)}
+                  </td>
+                  {/* override личных вкладок виден сразу: человек видит не «странность
+                      интерфейса», а то, что ему оставили далеко не всё */}
+                  <td
+                    className="py-2 pr-3 text-ink-300"
+                    data-sections={Array.isArray(u.sections) ? u.sections.join(",") : "role"}
+                  >
+                    {sectionsLabel(u) ? (
+                      <span
+                        className="chip border border-accent/40 bg-accent/10 text-accent"
+                        title="личные вкладки: остальные разделы закрыты и вкладкой, и маршрутом"
+                      >
+                        свои вкладки: {sectionsLabel(u)}
+                      </span>
+                    ) : (
+                      "по роли"
+                    )}
                   </td>
                   <td className="py-2 pr-3 num text-ink-300">{asOf(u.last_login_at)}</td>
                   <td className="py-2 pr-3">{statusChip(s)}</td>
@@ -439,7 +498,7 @@ export function UsersTab() {
                 </tr>
               );
             })}
-            {!users.length && !loading && <EmptyRow cols={7} text="Учётных записей нет" />}
+            {!users.length && !loading && <EmptyRow cols={9} text="Учётных записей нет" />}
           </tbody>
         </table>
         {loading && <div className="mt-2">
@@ -451,6 +510,10 @@ export function UsersTab() {
         Пустой список доступных складов = доступ ко всем складам (так работает роль
         «Топ-менеджмент»). Отключение мягкое: учётка остаётся в базе и в журнале, но вход
         запрещён, а живые сессии отзываются.
+      </p>
+      <p className="mt-1 text-[11px] leading-relaxed text-ink-300">
+        «Свои вкладки» — личное ограничение: оно только убирает разделы, но не возвращает
+        то, что скрыто для всех (`ui.hidden_sections`) или закрыто ролью.
       </p>
 
       {editing && (
@@ -604,6 +667,51 @@ export function UsersTab() {
               </div>
               <p className="mt-1 text-[11px] text-ink-300">
                 Ничего не отмечено — доступ ко <b>всем складам</b> (как у топ-менеджмента).
+              </p>
+            </div>
+
+            {/* Личные вкладки. Галки только убирают разделы: пересечение с
+                глобальной настройкой ui.hidden_sections и правами роли считает
+                бэкенд, фронт — ровно так же (userSections в settings.ts), чтобы
+                показанная вкладка не превращалась в 403. */}
+            <div className="sm:col-span-2" data-sections-block>
+              <div className="panel-title mb-1">Вкладки</div>
+              <label className="chip cursor-pointer border border-ink-600 bg-ink-800 text-ink-300">
+                <input
+                  type="checkbox"
+                  className="mr-1 h-3 w-3 accent-[#1668a8]"
+                  checked={form.sections === null}
+                  onChange={(e) => toggleInherit(e.target.checked)}
+                  data-field="sections-inherit"
+                />
+                без личных ограничений (по роли и настройкам кабинета)
+              </label>
+              {form.sections !== null && (
+                <div className="mt-2 flex flex-wrap gap-1.5">
+                  {SECTION_OPTIONS.map((o) => (
+                    <label
+                      key={o.id}
+                      className={`chip cursor-pointer border ${
+                        form.sections?.includes(o.id)
+                          ? "border-accent/50 bg-accent/10 text-accent"
+                          : "border-ink-600 bg-ink-800 text-ink-300"
+                      }`}
+                    >
+                      <input
+                        type="checkbox"
+                        className="mr-1 h-3 w-3 accent-[#1668a8]"
+                        checked={form.sections?.includes(o.id) ?? false}
+                        onChange={() => toggleSection(o.id)}
+                        data-section={o.id}
+                      />
+                      {o.label}
+                    </label>
+                  ))}
+                </div>
+              )}
+              <p className={`mt-1 text-[11px] ${sectionHint ? "text-warn" : "text-ink-300"}`}>
+                {sectionHint ||
+                  "Скрытый для всех раздел не вернёт даже галка здесь: личные вкладки только убирают доступ."}
               </p>
             </div>
           </div>

@@ -13,6 +13,7 @@ from ..models import (
 )
 from ..schemas import AuditOut, UserCreate, UserOut, UserUpdate
 from ..security import hash_password, password_is_strong, random_password
+from ..services import sections as section_svc
 from ..services.vessels import VESSEL_RIGHTS, rights_for
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
@@ -25,6 +26,7 @@ def _out(u: User, db: Session) -> UserOut:
         id=u.id, login=u.login, full_name=u.full_name, role=u.role.value, email=u.email,
         all_warehouses=u.all_warehouses, warehouse_ids=u.warehouse_ids, last_login_at=u.last_login_at,
         vessel_right=u.vessel_right, vessel_rights=rights_for(db, u),
+        sections=section_svc.parse(u.sections),
     )
 
 
@@ -45,6 +47,7 @@ def create_user(payload: UserCreate, db: Session = Depends(get_db), _: User = De
     user = User(
         login=login, full_name=payload.full_name.strip(), email=payload.email,
         role=Role(payload.role), password_hash=hash_password(payload.password),
+        sections=_sections_value(payload.sections),
     )
     _set_vessel_right(user, payload.vessel_right)
     db.add(user)
@@ -71,6 +74,12 @@ def update_user(user_id: int, payload: UserUpdate, db: Session = Depends(get_db)
         if before != user.vessel_right:
             db.add(AuditLog(user_id=actor.id, login=actor.login, action="admin.vessel_right",
                             detail=f"{user.login}: {before or 'по роли'} → {user.vessel_right or 'по роли'}"))
+    if "sections" in payload.model_fields_set:
+        was = user.sections
+        user.sections = _sections_value(payload.sections)
+        if was != user.sections:
+            db.add(AuditLog(user_id=actor.id, login=actor.login, action="admin.user_sections",
+                            detail=f"{user.login}: {was or 'по роли'} → {user.sections or 'по роли'}"))
     if payload.role:
         if user.id == actor.id and payload.role != Role.ADMIN.value:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "Нельзя снять роль со себя")
@@ -201,6 +210,14 @@ def _set_vessel_right(user: User, raw: str | None) -> None:
             "Право на постановку судов: допустимо " + ", ".join(VESSEL_RIGHTS) + " или пусто",
         )
     user.vessel_right = value
+
+
+def _sections_value(raw: list[str] | None) -> str | None:
+    """Личные вкладки: проверить и сложить в значение колонки (см. services/sections.py)."""
+    try:
+        return section_svc.normalize(raw)
+    except section_svc.BadSections as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
 
 
 def _set_scopes(db: Session, user: User, warehouse_ids: list[int]) -> None:

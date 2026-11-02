@@ -121,6 +121,53 @@ export function resolveVesselRights(
   };
 }
 
+/** Разделы кабинета («вкладки»). id — те же, что в `ui.hidden_sections` и `users.sections`. */
+export const SECTION_IDS = ["statistics", "warehouses", "reports", "vessels"] as const;
+
+/** Подписи разделов: одни на весь фронт — галки настроек, галки пользователя и шапка. */
+export const SECTION_LABELS: Record<string, string> = {
+  statistics: "Индикаторы",
+  warehouses: "Склады 1С",
+  reports: "Отчёты",
+  vessels: "Постановка",
+};
+
+export const SECTION_OPTIONS = SECTION_IDS.map((id) => ({ id, label: SECTION_LABELS[id] }));
+
+type UserWithSections = { sections?: string[] | null };
+
+/**
+ * Что человек увидит в шапке: «не скрыто для всех» ∩ личный список `users.sections`
+ * (null = личных ограничений нет). Пересечение, а не «последнее выигрывает»: так же
+ * считает бэкенд (`app/services/sections.py`), поэтому показанная вкладка не
+ * превращается в 403, а снятая галка не оставляет маршрута, который «ещё работает».
+ *
+ * Правил роли здесь нет намеренно: они есть только у «Постановки» и живут в
+ * `resolveVesselRights` — за одним исключением «раздел + права» стоит `sectionVisible`.
+ */
+export function userSections(
+  user: UserWithSections | null,
+  settings: PublicSettings | null,
+): Set<string> {
+  const hidden = hiddenSections(settings);
+  const own = user?.sections;
+  const personal = Array.isArray(own) ? new Set(own.map(String)) : null;
+  return new Set(
+    SECTION_IDS.filter((id) => !hidden.has(id) && (personal ? personal.has(id) : true)),
+  );
+}
+
+/** Раздел доступен: личный список и глобальные галки плюс права того, что в разделе (постановка). */
+export function sectionVisible(
+  user: (UserWithSections & UserWithRights) | null,
+  settings: PublicSettings | null,
+  section: string,
+): boolean {
+  if (!userSections(user, settings).has(section)) return false;
+  if (section === "vessels") return resolveVesselRights(user, settings).view;
+  return true;
+}
+
 export const VESSEL_RIGHT_OPTIONS: { value: string; label: string }[] = [
   { value: "", label: "по роли (как в настройках)" },
   { value: "none", label: "нет доступа" },

@@ -37,6 +37,8 @@ class UserOut(BaseModel):
     last_login_at: datetime | None = None
     # право на «Постановку судов»: пусто = по роли, иначе none|view|edit|manage
     vessel_right: str | None = None
+    # личные вкладки: null = ограничений нет (наследуется роль), иначе список id
+    sections: list[str] | None = None
     # посчитанные права: фронт прячет вкладку и кнопку по ним, не дожидаясь
     # /api/settings/public — иначе запрещённая вкладка успевает мигнуть
     vessel_rights: VesselRightsOut = VesselRightsOut(view=False, edit=False, delete=False)
@@ -65,6 +67,8 @@ class UserCreate(BaseModel):
     warehouse_ids: list[int] = []
     # "" / null = по роли; иначе none | view | edit | manage
     vessel_right: str | None = None
+    # null = личных ограничений нет; пустой список запрещён — это локаут
+    sections: list[str] | None = None
 
 
 class UserUpdate(BaseModel):
@@ -74,6 +78,8 @@ class UserUpdate(BaseModel):
     password: str | None = Field(default=None, min_length=8, max_length=128)
     warehouse_ids: list[int] | None = None
     vessel_right: str | None = None
+    # null снимает личные вкладки (возврат «по роли»); пустой список — 400
+    sections: list[str] | None = None
 
 
 # --------------------------------------------------------------- metrics ----

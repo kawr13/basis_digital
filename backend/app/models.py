@@ -52,6 +52,12 @@ class User(Base):
     # none | view | edit | manage. Диспетчеру можно дать постановку, не трогая его роль.
     vessel_right: Mapped[str | None] = mapped_column(String(16), nullable=True)
 
+    # Личные вкладки кабинета — id разделов через запятую (см. services/sections.py):
+    # statistics,warehouses,reports,vessels. NULL = личных ограничений нет, человек
+    # наследует роль и глобальную настройку ui.hidden_sections. Пустым список быть
+    # не может: учётка без вкладок — это гарантированный локаут.
+    sections: Mapped[str | None] = mapped_column(String(128), nullable=True)
+
     failed_attempts: Mapped[int] = mapped_column(Integer, default=0)
     locked_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

@@ -26,6 +26,7 @@ from ..deps import client_ip, current_user
 from ..models import AuditLog, RefreshToken, User, UserWarehouseScope, utcnow
 from ..schemas import ChangePasswordRequest, LoginRequest, TokensOut, UserOut
 from ..services import app_settings
+from ..services import sections as section_svc
 from ..services.vessels import rights_for as svc_rights
 from ..security import (
     create_access_token, hash_refresh, new_refresh_token, password_is_strong, verify_password,
@@ -60,6 +61,7 @@ def _user_out(user: User, db: Session) -> UserOut:
         email=user.email, all_warehouses=user.all_warehouses,
         warehouse_ids=user.warehouse_ids, last_login_at=user.last_login_at,
         vessel_right=user.vessel_right, vessel_rights=svc_rights(db, user),
+        sections=section_svc.parse(user.sections),
     )
 
 

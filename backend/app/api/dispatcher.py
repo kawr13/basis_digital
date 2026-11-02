@@ -2,7 +2,9 @@
 
 Права. Витрина диспетчера — портовая: склады в ней не измерение (в отличие от
 остатков 1С), поэтому фильтр по складам здесь применять нечего. Доступ — любой
-авторизованный пользователь; админские действия (импорт файла) вынесены в
+авторизованный пользователь, которому открыт раздел `statistics` (глобальная
+gалка `ui.hidden_sections` и личные вкладки `users.sections`, см.
+`services/sections.py`); админские действия (импорт файла) вынесены в
 `admin_router` и закрыты ролью admin.
 
 Импорт. Пока 1С не отдаёт отчёт по HTTP, файл `Отчет диспетчера.xlsm` загружает
@@ -33,7 +35,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..db import get_db
-from ..deps import current_user, require_roles
+from ..deps import require_roles, require_section
 from ..models import (
     FactDispatcherShift, FactRailOperation, FactTruckOperation,
     FactVesselOperation, Role, User,
@@ -196,7 +198,8 @@ def _meta(db: Session) -> dict:
 
 
 @router.get("/meta")
-def meta(request: Request, user: User = Depends(current_user), db: Session = Depends(get_db)):
+def meta(request: Request, user: User = Depends(require_section("statistics")),
+         db: Session = Depends(get_db)):
     """Справоч страницы: границы данных, смены, источники. Тоже из кэша."""
     # Настройки периода входят в ключ кэша: версия данных от них не сдвигается,
     # а `max_period_days` фронт читает отсюда — после сохранения в админке панель
@@ -210,7 +213,7 @@ def overview(request: Request,
              date_from: date | None = Query(default=None, alias="from"),
              date_to: date | None = Query(default=None, alias="to"),
              shift: str | None = Query(default=None, pattern="^(all|08-20|20-08)$"),
-             user: User = Depends(current_user), db: Session = Depends(get_db)):
+             user: User = Depends(require_section("statistics")), db: Session = Depends(get_db)):
     start, end = _period(db, date_from, date_to)          # 400 — до обращения к кэшу
     only_shift = None if shift in (None, "all") else shift
 
@@ -231,7 +234,7 @@ def overview(request: Request,
 @router.get("/day")
 def day(day_: date = Query(alias="date"),
         shift: str | None = Query(default=None, pattern="^(all|08-20|20-08)$"),
-        user: User = Depends(current_user), db: Session = Depends(get_db)):
+        user: User = Depends(require_section("statistics")), db: Session = Depends(get_db)):
     return svc.day_detail(db, day_, None if shift in (None, "all") else shift)
 
 
@@ -245,7 +248,7 @@ def rows_view(request: Request,
               key: str | None = Query(default=None, max_length=120),
               limit: int = Query(default=ROWS_LIMIT_DEFAULT, ge=1, le=ROWS_LIMIT_MAX),
               offset: int = Query(default=0, ge=0),
-              user: User = Depends(current_user), db: Session = Depends(get_db)):
+              user: User = Depends(require_section("statistics")), db: Session = Depends(get_db)):
     """Строки витрины, из которых собран график: клик по бару = таблица цифр.
 
     Ответ — страница: `rows` — срез `limit`/`offset`, `total` — сколько строк
@@ -280,7 +283,8 @@ def rows_csv(date_from: date | None = Query(default=None, alias="from"),
              kind: str = Query(..., pattern="^(vessel|berth|cargo|rail_cargo|truck_cargo|"
                                             "station|rail_move|platform)$"),
              key: str | None = Query(default=None, max_length=120),
-             user: User = Depends(current_user), db: Session = Depends(get_db)) -> Response:
+            user: User = Depends(require_section("statistics")),
+            db: Session = Depends(get_db)) -> Response:
     """Выгрузка строк дриллдауна: `;`, десятичная запятая, BOM — как в отчётах.
 
     Лимита здесь нет намеренно: экран отдаёт страницу (до `ROWS_LIMIT_MAX`
