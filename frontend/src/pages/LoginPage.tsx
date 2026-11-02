@@ -34,14 +34,14 @@ export default function LoginPage() {
               ширину панели (657px при высоте 28px), и знак выглядит размазанным
               где-то посередине. */}
           <img src="/logo-light.svg" alt="БазисПорт" width={230} height={35} className="h-7 w-auto self-start" />
-          {/* Продукт — Basis.Indicators, ровно по середине высоты панели (абсолютно:
+          {/* Продукт — Basis.Digital, ровно по середине высоты панели (абсолютно:
               flex-отступы съели бы половину на логотип и строку внизу). Раскрашен как
               сам знак: белое первое слово, голубое второе. Голубой взят из знака
               (#26AAE1), а не из темы, — иначе «как лого» не получается. На navy даёт
               4.7:1, то есть AA даже для мелкого текста. */}
           <h1 className="absolute left-12 right-12 top-1/2 -translate-y-1/2 text-5xl leading-tight font-semibold max-w-md">
             <span className="text-white">Basis</span>
-            <span className="text-[#26AAE1]">.Indicators</span>
+            <span className="text-[#26AAE1]">.Digital</span>
           </h1>
           <p className="text-xs text-white/60 max-w-sm">
             Доступ выдаёт администратор кабинета. Вопросы по учёткам — служба поддержки.

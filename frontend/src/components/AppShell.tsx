@@ -8,7 +8,7 @@ import { hiddenSections, resolveVesselRights, usePublicSettings } from "../setti
 // `section` — id раздела в настройке ui.hidden_sections: админ может прятать
 // целые разделы для всех, вкладка и маршрут закрываются одновременно.
 const tabs = [
-  { to: "/", label: "Статистика", end: true, nav: "summary", section: "statistics" },
+  { to: "/", label: "Индикаторы", end: true, nav: "summary", section: "statistics" },
   { to: "/warehouses", label: "Склады 1С", end: true, nav: "warehouses", section: "warehouses" },
   { to: "/reports", label: "Отчёты", end: false, nav: "reports", section: "reports" },
 ];
@@ -95,7 +95,7 @@ export function AppShell({
                 className="h-8 w-auto shrink-0"
               />
               <span className="hidden sm:block pl-3 border-l border-white/25 text-[11px] tracking-[0.18em] text-white/75">
-                Basis.Indicators
+                Basis.Digital
               </span>
             </div>
 

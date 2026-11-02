@@ -84,7 +84,7 @@ SPEC: dict[str, Spec] = {
     "ui.hidden_sections": Spec("str_list", [],
                                choices=("statistics", "warehouses", "reports", "vessels"),
                                label="Какие разделы не показывать",
-                               hint="Скрытые для всех разделы в шапке: Статистика, Склады 1С, "
+                               hint="Скрытые для всех разделы в шапке: Индикаторы, Склады 1С, "
                                      "Отчёты, Постановка. Хотя бы один раздел должен остаться видимым"),
     "thresholds.capacity_warn": Spec("int", 85, minimum=50, maximum=100,
                                      label="Порог «внимание», % загрузки склада"),

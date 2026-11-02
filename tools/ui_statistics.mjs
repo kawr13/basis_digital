@@ -1,5 +1,5 @@
 /**
- * Браузерная проверка страницы «Статистика» (отчёт диспетчера).
+ * Браузерная проверка страницы «Индикаторы» (отчёт диспетчера).
  *
  * Проверяет, что страница собрана из реальных данных витрины: период по
  * умолчанию берётся от последней даты данных, графики не пустые, клик по
@@ -44,8 +44,8 @@ await page.waitForSelector("section[data-widget]", { timeout: 15000 });
 await page.waitForTimeout(900);
 
 const url = page.url();
-ok(/\/$/.test(new URL(url).pathname), `«Статистика» — главная страница (${url})`);
-ok(!!(await page.$('nav >> text=Статистика')), "вкладка «Статистика» в шапке");
+ok(/\/$/.test(new URL(url).pathname), `«Индикаторы» — главная страница (${url})`);
+ok(!!(await page.$('nav >> text=Индикаторы')), "вкладка «Индикаторы» в шапке");
 ok(!!(await page.$('nav >> text=Склады 1С')), "витрина складов 1С уехала на свою вкладку");
 
 // ---- период по умолчанию ---------------------------------------------------
@@ -255,7 +255,7 @@ ok(rows.length >= 4, `импорт по пути отработал: ${rows.join
 
 // ---- скриншоты -------------------------------------------------------------
 if (SHOTS) {
-  await page.click("nav >> text=Статистика");
+  await page.click("nav >> text=Индикаторы");
   await page.waitForSelector("[data-stats-toolbar]", { timeout: 10000 });
   await page.waitForTimeout(900);
   await page.screenshot({ path: "shot_stats_top.png" });

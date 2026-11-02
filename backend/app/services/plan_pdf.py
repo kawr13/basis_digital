@@ -494,7 +494,7 @@ def build_plan_pdf(
     buf = io.BytesIO()
     c = pdfcanvas.Canvas(buf, pagesize=(page_w_pt, page_h_pt))
     c.setTitle("План постановки судов")
-    c.setAuthor("Basis.Indicators")
+    c.setAuthor("Basis.Digital")
     page_no = 0  # текущий лист (с нуля); на бумаге подписывается «лист N» с единицы
     anchors: dict[int, tuple[int, float, float, float]] = {}  # id -> (лист, право, центр, лево)
     bar_rect: dict[int, tuple[int, float, float, float, float]] = {}  # (лист, x0, x1, низ, верх)

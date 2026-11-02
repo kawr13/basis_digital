@@ -60,8 +60,8 @@ ok(Math.abs(titleMid - panelMid) <= 6,
 
 // раскраска «как логотип»: белое первое слово, голубое второе (#26AAE1 из знака)
 const white = geo.spans.find((s) => s.text === "Basis");
-const blue = geo.spans.find((s) => s.text === ".Indicators");
-ok(!!white && !!blue, "заголовок разбит на Basis и .Indicators");
+const blue = geo.spans.find((s) => s.text === ".Digital");
+ok(!!white && !!blue, "заголовок разбит на Basis и .Digital");
 ok(white?.color === "rgb(255, 255, 255)", `«Basis» белый (${white?.color})`);
 ok(blue?.color === "rgb(38, 170, 225)", `«${blue?.text}» голубым знака ${blue?.color}`);
 

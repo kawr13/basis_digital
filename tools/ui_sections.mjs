@@ -38,7 +38,7 @@ await page.click("text=Настройки");
 await page.waitForSelector('input[data-setting="ui.hidden_sections"]', { timeout: 10000 });
 const labels = await page.$$eval('input[data-setting="ui.hidden_sections"]', (els) =>
   els.map((e) => e.closest("label")?.textContent?.trim()));
-ok(labels.join(",") === "Статистика,Склады 1С,Отчёты,Постановка",
+ok(labels.join(",") === "Индикаторы,Склады 1С,Отчёты,Постановка",
    `в форме четыре раздела: ${labels.join(", ")}`);
 
 // идемпотентность: если прошлый прогон прервался на середине, галки могли
@@ -52,7 +52,7 @@ await page.waitForTimeout(1200);
 await page.goto(`${BASE}/`, { waitUntil: "networkidle" });
 await page.waitForTimeout(900);
 const before = await navTabs();
-ok(before.includes("Статистика") && before.includes("Склады 1С") && before.includes("Постановка"),
+ok(before.includes("Индикаторы") && before.includes("Склады 1С") && before.includes("Постановка"),
    `все разделы видимы по умолчанию: ${before.join(", ")}`);
 
 // ---- прячем «Склады 1С» и «Постановку» --------------------------------------
@@ -66,7 +66,7 @@ await page.waitForTimeout(1500);
 const hidden = await navTabs();
 ok(!hidden.includes("Склады 1С") && !hidden.includes("Постановка"),
    `скрытые разделы исчезли из шапки без перезагрузки: ${hidden.join(", ")}`);
-ok(hidden.includes("Статистика") && hidden.includes("Администрирование"),
+ok(hidden.includes("Индикаторы") && hidden.includes("Администрирование"),
    "остальные разделы на месте");
 
 // прямой адрес скрытого раздела ведёт на первый видимый
@@ -102,7 +102,7 @@ for (const c of ["statistics", "warehouses", "reports", "vessels"]) await page.u
 await page.click('[data-admin-action="save-settings"]');
 await page.waitForTimeout(1500);
 const final = await navTabs();
-ok(final.includes("Статистика") && final.includes("Склады 1С") && final.includes("Отчёты") && final.includes("Постановка"),
+ok(final.includes("Индикаторы") && final.includes("Склады 1С") && final.includes("Отчёты") && final.includes("Постановка"),
    `после сброса все разделы видимы: ${final.join(", ")}`);
 
 if (failures.length) {

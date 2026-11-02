@@ -1,5 +1,5 @@
 /**
- * Импорт «Отчёта диспетчера» в витрину страницы «Статистика».
+ * Импорт «Отчёта диспетчера» в витрину страницы «Индикаторы».
  *
  * Временный способ загрузки: файл .xlsm с диска машины, где работает сервер,
  * или загрузка из браузера. Когда 1С начнёт отдавать тот же срез по HTTP,
@@ -82,7 +82,7 @@ export function DispatcherImport() {
   return (
     <section className="panel p-4" data-dispatcher-panel>
       <div className="flex flex-wrap items-baseline justify-between gap-2">
-        <h2 className="panel-title">Отчёт диспетчера (страница «Статистика»)</h2>
+        <h2 className="panel-title">Отчёт диспетчера (страница «Индикаторы»)</h2>
         <div className="flex flex-wrap items-center gap-2">
           <button className="btn-ghost text-xs" onClick={load} data-admin-action="dispatcher-reload">
             Обновить статус
