@@ -52,7 +52,22 @@ docker compose logs backend | grep администратор
 Кабинет — на `http://localhost:8080`. Дальше ставится за ваш nginx/HTTPS
 (см. `frontend/nginx.conf` как образец: `/api` проксируется в бэкенд, фронт — SPA).
 
-### Выкат на сервер: релизный архив
+### Выкат на сервер
+
+Нужен Docker Engine + compose plugin. **Одна команда** — секреты генерируются
+сами, `.env` не создаётся:
+
+```bash
+git clone https://github.com/kawr13/basis_digital.git
+cd basis_digital
+./deploy.sh          # выведет адрес, логин admin и пароль
+```
+
+Подробности, ключи `--https`/`--port` и ручная дорожка через `export` —
+[DEPLOY.md](DEPLOY.md). Образ собирается на сервере (локальный Docker не нужен).
+
+<details>
+<summary>Офлайн-сервер без доступа к GitHub: релизный архив</summary>
 
 С рабочей машины (Windows) собирается чистый архив без мусора (`.git`,
 `node_modules`, `.venv`, локальные БД, `.env`):
@@ -63,24 +78,12 @@ powershell -ExecutionPolicy Bypass -File .\pack_release.ps1
 # → release\statcab-<дата-время>.zip (проверенные пути для linux unzip)
 ```
 
-На сервере:
+На сервере распаковать и запустить `./deploy.sh` (или вручную:
+`export POSTGRES_PASSWORD=… SECRET_KEY=… ADMIN_PASSWORD=… COOKIE_SECURE=false`
+и `docker compose up -d --build`).
 
-```bash
-scp release/statcab-*.zip user@server:/tmp/
-# на сервере:
-mkdir -p /opt/statcab && tar -xf /tmp/statcab-*.zip -C /opt/statcab --strip-components=1
-cd /opt/statcab
-cp .env.example .env
-openssl rand -hex 32   # SECRET_KEY
-openssl rand -hex 16   # POSTGRES_PASSWORD
-# заполнить .env: POSTGRES_PASSWORD, SECRET_KEY, ADMIN_PASSWORD;
-# доступ без HTTPS → COOKIE_SECURE=false
-docker compose up -d --build
-docker compose logs backend | grep администратор   # пароль первого админа
-```
+</details>
 
-Образ собирается на сервере (локальный Docker для этого не нужен).
-**Вариант без `.env` вообще** — переменные из окружения оболочки: [DEPLOY.md](DEPLOY.md).
 Расчёт ресурсов, обновление, откат и бэкап — `docs/06_деплой_на_сервер.md`.
 
 ## Что уже работает

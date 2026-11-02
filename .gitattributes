@@ -3,3 +3,6 @@
 *.jpg binary
 *.ico binary
 *.ttf binary
+
+# Shell-скрипты на сервере: только LF, иначе bad interpreter
+*.sh text eol=lf
