@@ -1531,7 +1531,7 @@ export default function VesselsPage() {
                 step={5}
                 value={form.length_m}
                 onChange={(e) => setForm({ ...form, length_m: e.target.value })}
-                placeholder="60"
+                placeholder="Введите длину"
                 data-field="length-m"
               />
             </Field>
@@ -1544,6 +1544,7 @@ export default function VesselsPage() {
                   step={10}
                   value={form.offset_m}
                   onChange={(e) => setForm({ ...form, offset_m: e.target.value })}
+                  placeholder="Введите место"
                   data-field="offset-m"
                 />
                 <button className="btn-ghost text-xs whitespace-nowrap" onClick={findFree} data-admin-action="find-free">
@@ -1555,13 +1556,13 @@ export default function VesselsPage() {
               ) : null}
             </Field>
             <Field label="Судно">
-              <input className="field" value={form.vessel} onChange={(e) => setForm({ ...form, vessel: e.target.value })} data-field="vessel" placeholder="CROWN SAPPHIRE" />
+              <input className="field" value={form.vessel} onChange={(e) => setForm({ ...form, vessel: e.target.value })} data-field="vessel" placeholder="Введите название судна" />
             </Field>
             <Field label="Объём / тоннаж" hint="как в плане: 5 500 или (100+40) + 4 000">
-              <input className="field" value={form.volume} onChange={(e) => setForm({ ...form, volume: e.target.value })} data-field="volume" />
+              <input className="field" value={form.volume} onChange={(e) => setForm({ ...form, volume: e.target.value })} data-field="volume" placeholder="Введите объём или тоннаж" />
             </Field>
             <Field label="Груз" hint="БШ, БАНАНЫ-ПАЛЛЕТ, МЛК (БКК)…">
-              <input className="field" value={form.cargo} onChange={(e) => setForm({ ...form, cargo: e.target.value })} data-field="cargo" list="cargo-list" />
+              <input className="field" value={form.cargo} onChange={(e) => setForm({ ...form, cargo: e.target.value })} data-field="cargo" list="cargo-list" placeholder="Введите или выберите груз" />
               <datalist id="cargo-list">
                 {["БШ", "БАНАНЫ-ПАЛЛЕТ", "МЛК (БКК)", "сборник", "ГИДРОКАРБ", "НИТРАТ", "СЕЛИТРА"].map((c) => (
                   <option key={c} value={c} />
@@ -1605,7 +1606,7 @@ export default function VesselsPage() {
               </div>
             </Field>
             <Field label="Примечание">
-              <input className="field" value={form.note} onChange={(e) => setForm({ ...form, note: e.target.value })} data-field="note" placeholder="(КМП-ЮМФ)" />
+              <input className="field" value={form.note} onChange={(e) => setForm({ ...form, note: e.target.value })} data-field="note" placeholder="Введите примечание" />
             </Field>
             <Field label="Где судно сейчас" hint="красная рамка на плане">
               <label className="flex items-center gap-2 text-sm" data-field="at-other-terminal">

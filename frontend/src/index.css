@@ -93,14 +93,26 @@
     @apply font-num tabular-nums;
   }
   .field {
-    @apply w-full rounded-md px-3 py-2.5 text-ink-100 placeholder-ink-400 outline-none transition
+    /* Подсказка в поле — ink-500 (2.6:1 на белом): у каждого поля есть своя
+       подпись сверху, поэтому placeholder — уточнение, а не подпись, и не должен
+       спорить с уже введённым значением (ink-100). */
+    @apply w-full rounded-md px-3 py-2.5 text-ink-100 placeholder-ink-500 outline-none transition
       focus:border-accent focus:ring-1 focus:ring-accent/30;
     background-color: #ffffff;
     border: 1px solid #cfd8e6; /* ink-600 */
   }
+  /* Подсказка в числовых полях: .num — моноширинный шрифт, а у кириллицы в нём
+     широкие глитфы, из-за чего placeholder расползается («В в е д и т е   д л и н у»).
+     Само значение остаётся моноширинным (разряды чисел в столбце), подсказке
+     возвращаем шрифт интерфейса. */
+  .field.num::placeholder,
+  .field-mini::placeholder {
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    letter-spacing: normal;
+  }
   /* те же поля, но компактные — поля в панели фильтров */
   .field-mini {
-    @apply rounded px-2 py-1 text-xs num text-ink-100 outline-none transition
+    @apply rounded px-2 py-1 text-xs num text-ink-100 placeholder-ink-500 outline-none transition
       focus:border-accent focus:ring-1 focus:ring-accent/30;
     background-color: #ffffff;
     border: 1px solid #cfd8e6; /* ink-600 */
