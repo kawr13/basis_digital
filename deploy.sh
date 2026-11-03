@@ -9,8 +9,10 @@
 #   ./deploy.sh --with deploy/nginx/docker-compose.host-nginx.yml
 #                                  # overlay (TLS на хостовом nginx, Caddy и т.п.);
 #                                  # запоминается и применяется при каждом запуске
-#   ./deploy.sh --fix-db-password  # пароль в секретах ≠ пароль в томе pgdata:
-#                                  #   привести пароль в базе к файлу секретов
+#   ./deploy.sh --fix-db-password  # то же самое в лоб: согласовать пароль в базе
+#                                  #   с секретом (обычно не нужно — ./deploy.sh
+#                                  #   делает это сам)
+#   ./deploy.sh --no-auto-fix      # найти расхождение пароля, но не менять его
 #   ./deploy.sh --show-password    # показать пароль администратора
 #   ./deploy.sh --check            # только проверки, ничего не пересобирать
 #   ./deploy.sh --help
@@ -35,10 +37,14 @@
 #    публиковал 0.0.0.0:8080 рядом с HTTPS.
 #
 # 4. ДО сборки проверяется, что POSTGRES_PASSWORD из секрета действительно подходит
-#    к тому pgdata — через TCP и scram, то есть ровно так, как будет подключаться
-#    бэкенд (хелсчек `pg_isready` тут не индикатор: для него «сервер ответил» уже
-#    равно «healthy», даже если аутентификация не прошла). Не подошёл — стоп с
-#    объяснением, а не 502 в проде.
+#    к тому pgdata — по IP контейнера базы, то есть из той же подсети и по тому же
+#    scram, что и приложение. К 127.0.0.1 внутри контейнера pg_hba часто пускает по
+#    trust, и проверка на этом пути врёт (так и получили ложное «ок» при мёртвом
+#    бэкенде). Рядом прогоняется заведомо неверный пароль: пустит и с ним — значит
+#    путь trust, и скрипт честно скажет, что проверить не может, а не соврёт «ок».
+#    Расхождение чинится автоматически ALTER USER-ом (том с данными не трогается);
+#    --no-auto-fix отключает починку. Хелсчек `pg_isready` индикатором не является:
+#    для него «сервер ответил» уже равно «healthy», даже если аутентификация не прошла.
 #
 # 5. Рядом ищутся тома pgdata из ДРУГИХ папок проекта. Имя compose-проекта = имя
 #    папки, поэтому запуск из соседней директории поднимает пустую базу и выглядит
@@ -47,13 +53,21 @@
 # 6. После запуска ждёт зелёного /healthz через nginx (то есть проверяется вся
 #    цепочка web → backend → PostgreSQL), а не просто «контейнеры в Up».
 #
+# 7. Сверяет POSTGRES_PASSWORD внутри работающего контейнера backend с секретом:
+#    compose считает контейнер актуальным, пока не изменилось описание сервиса, а
+#    переменная из --env-file в нём могла остаться от прошлой жизни. Расхождение —
+#    пересоздаём контейнер, а не подгоняем пароль базы под него.
+#
 # .env в репозитории не появляется никогда: файл секретов лежит вне репозитория.
 #
 set -euo pipefail
 
 cd "$(dirname "$0")"
 
-usage() { sed -n '3,45p' "$0" | sed 's/^#\{1,1\} \{0,1\}//'; }
+# справка — шапка этого файла. Одна проверка if/else обязательна: два отдельных
+# правила со /^#/ не годятся, потому что sub() меняет $0, и второе правило видит
+# уже не комментарий и выходит на второй же строке
+usage() { awk 'NR>1 { if (/^#/) { sub(/^# ?/, ""); print } else exit }' "$0"; }
 
 say()  { printf '%s\n' "$*"; }
 warn() { printf '%s\n' "$*" >&2; }
@@ -61,7 +75,8 @@ die()  { printf '✖ %s\n' "$*" >&2; exit 1; }
 
 # --- флаги -------------------------------------------------------------------
 ACTION="deploy"
-FIX_DB_PASSWORD=0
+FORCE_DB_FIX=0
+AUTO_FIX=1
 SHOW_PASSWORD=0
 HTTPS_FLAG=""       # пусто = не указано; 1 = --https; 0 = --http
 PORT_FLAG=""
@@ -75,7 +90,8 @@ while [ $# -gt 0 ]; do
     --port=*)       PORT_FLAG="${1#*=}"; shift;;
     --with)         OVERRIDE_FLAGS="$OVERRIDE_FLAGS,${2:?--with требует путь к compose-файлу}"; shift 2;;
     --with=*)       OVERRIDE_FLAGS="$OVERRIDE_FLAGS,${1#*=}"; shift;;
-    --fix-db-password) FIX_DB_PASSWORD=1; shift;;
+    --fix-db-password) FORCE_DB_FIX=1; shift;;
+    --no-auto-fix)      AUTO_FIX=0; shift;;
     --show-password)   SHOW_PASSWORD=1; shift;;
     --check)           ACTION="check"; shift;;
     -h|--help)      usage; exit 0;;
@@ -241,54 +257,99 @@ start_db() {
   die "PostgreSQL не принимает соединения (см. лог выше)"
 }
 
-# Проверка идёт по TCP (127.0.0.1): только этот путь проходит через scram из
-# pg_hba.conf. Через unix-сокет образ пускает по trust, и проверка бы врала.
-db_password_ok() {
-  compose exec -T -e PGPASSWORD="$PG_PW" -e PGUSER="$PG_USER" -e PGDATABASE="$PG_DB" \
-    db psql -w -h 127.0.0.1 -tAc 'select 1' >/dev/null 2>&1
+# Проверка идёт по IP контейнера базы, а не к 127.0.0.1: к localhost pg_hba.conf
+# часто пускает по trust, и «пароль подходит» на trust — ложь (именно так и
+# получили ложное «ок» при мёртвом бэкенде). Приложение приходит из другой подсети,
+# для него работает scram — тот же путь проверяем и мы.
+db_target_host() {
+  local h
+  h="$(compose exec -T db hostname -i 2>/dev/null | awk '{print $1}' || true)"
+  DB_HOST="${h:-127.0.0.1}"
 }
 
-db_password_fix() {
-  say "▶ Привожу пароль $PG_USER в базе к значению из $SECRET_FILE …"
-  if ! compose exec -T -e PGUSER="$PG_USER" db psql -w -U "$PG_USER" -d "$PG_DB" \
-        -c "ALTER USER \"$PG_USER\" WITH PASSWORD '$PG_PW';" </dev/null; then
-    die "Не удалось сменить пароль через unix-сокет (local в pg_hba.conf не trust).
-   Варианты: 1) найти старый deploy.env и взять POSTGRES_PASSWORD оттуда;
-             2) временно поставить local trust в pg_hba.conf, выполнить
-                ALTER USER, вернуть scram-sha-256."
-  fi
+psql_try() {   # $1 — пароль; 0 = пустило
+  compose exec -T -e PGPASSWORD="$1" -e PGUSER="$PG_USER" -e PGDATABASE="$PG_DB" \
+    db psql -w -h "$DB_HOST" -tAc 'select 1' >/dev/null 2>&1
 }
 
-check_db_password() {
+db_password_ok() { psql_try "$PG_PW"; }
+
+# Негативный контроль: пускает и с заведомо неверным паролем — значит путь идёт по
+# trust и проверять тут нечего. Вместо «ок» скажем прямо, что проверка невозможна.
+db_check_meaningful() { ! psql_try "nope-$RANDOM-$RANDOM"; }
+
+# Основной путь починки: local-сокет в официальном образе обычно trust → пускает без
+# пароля, и мы ставим в базе тот пароль, что лежит в секрете. Данные не трогаются.
+db_fix_via_socket() {
+  compose exec -T -e PGUSER="$PG_USER" db psql -w -U "$PG_USER" -d "$PG_DB" \
+    -c "ALTER USER \"$PG_USER\" WITH PASSWORD '$PG_PW';" </dev/null >/dev/null 2>&1
+}
+
+# Запасной путь: local тоже под паролем. Временно ставим свою строку trust в начало
+# pg_hba, меняем пароль, конфиг возвращаем — обратный ход безусловен, иначе
+# оставим сервер с trust.
+db_fix_via_pghba() {
+  local conf rc=1
+  conf="$(compose exec -T -e PGUSER="$PG_USER" db psql -w -tAc 'show hba_file' 2>/dev/null | tr -d '\r\n' || true)"
+  case "$conf" in /*) : ;; *) conf="/var/lib/postgresql/data/pg_hba.conf";; esac
+  say "▶ local в pg_hba.conf под паролем — временно включаю trust, меняю пароль, возвращаю конфиг…"
+  compose exec -T db sh -c "cp -p '$conf' '$conf.deploybak' && { printf 'local all all trust\n'; cat '$conf'; } > '$conf.tmp' && mv '$conf.tmp' '$conf'" || return 1
+  compose exec -T db sh -c 'kill -HUP 1' >/dev/null 2>&1 || true
+  sleep 2
+  if db_fix_via_socket; then rc=0; fi
+  compose exec -T db sh -c "mv -f '$conf.deploybak' '$conf'; kill -HUP 1" >/dev/null 2>&1
+  sleep 1
+  return $rc
+}
+
+# Пароль в томе и в секрете обязаны совпадать. Расхождение чинится само: PostgreSQL
+# применяет POSTGRES_PASSWORD только к пустому тому, а том уже с данными, поэтому
+# единственный безопасный ход — ALTER USER (том не трогается, данные не трогает).
+ensure_db_password() {
   if ! db_running; then
     if [ "$ACTION" = "check" ]; then
-      say "▶ PostgreSQL сейчас не запущен — проверку пароля пропускаю (запустишь — проверим)"
+      say "▶ PostgreSQL сейчас не запущен — проверку пароля пропускаю"
       return 0
     fi
     start_db
   fi
-  if db_password_ok; then
-    say "▶ PostgreSQL: пароль из секрета подходит"
+  db_target_host
+  if [ "$FORCE_DB_FIX" != 1 ] && db_password_ok; then
+    if db_check_meaningful; then
+      say "▶ PostgreSQL: пароль из секрета подходит"
+    else
+      warn "⚠ pg_hba.conf пускает по trust — проверить пароль снаружи невозможно."
+      warn "  Если бэкенд упадёт с «password authentication failed» — разбор в DEPLOY.md, §7."
+    fi
     return 0
   fi
-  if [ "$FIX_DB_PASSWORD" != 1 ]; then
-    warn "Пароль PostgreSQL в $SECRET_FILE НЕ совпадает с паролем в инициализированном томе."
-    warn "Так бывает, когда секреты пересоздали (другой пользователь, другой сервер,"
-    warn "удалённый файл), а том с данными остался старым. Данные целы — они в томе."
-    warn ""
-    warn "Вариант 1 — найти старый файл секретов (нужен тот, что старше) и взять пароль из него:"
-    warn "    find / -name deploy.env -not -path '/proc/*' 2>/dev/null -exec ls -la {} \\;"
-    warn "    затем: secret-файл → POSTGRES_PASSWORD=… и повторить ./deploy.sh"
-    warn "Вариант 2 — привести пароль в базе к текущему секрету (данные не трогаются):"
-    warn "    ./deploy.sh --fix-db-password"
-    die "Изменения не применены"
+  if [ "$ACTION" = "check" ]; then
+    warn "⚠ Пароль в томе pgdata НЕ совпадает со значением в $SECRET_FILE."
+    warn "  Обычный ./deploy.sh приведёт его в порядок сам (ALTER USER), данные не тронет."
+    return 1
   fi
-  db_password_fix
-  db_password_ok || die "После ALTER USER пароль всё равно не подошёл — смотри docker compose logs db"
-  say "✔ Пароль в базе приведён к значению из $SECRET_FILE"
+  warn "Пароль PostgreSQL в томе не совпадает со значением в $SECRET_FILE — привожу к секрету."
+  warn "Так бывает, когда секреты пересоздали (другой пользователь, другой сервер,"
+  warn "удалённый файл), а том с данными остался старым. Данные целы: меняется только"
+  warn "пароль учётки, том никто не трогает."
+  if [ "$AUTO_FIX" = 1 ] || [ "$FORCE_DB_FIX" = 1 ]; then
+    # || true на вызове обязателен: внутри этих функций есть заведомо падающие
+    # команды (psql без пароля, когда local под паролем), а set -e иначе убивает
+    # скрипт на полуслове — и pg_hba.conf остался бы с временным trust
+    db_fix_via_socket || db_fix_via_pghba || true
+    if db_password_ok; then
+      say "✔ Пароль в базе приведён к значению из $SECRET_FILE"
+      return 0
+    fi
+  fi
+  die "Не удалось согласовать пароль PostgreSQL с $SECRET_FILE (данные в томе не тронуты).
+   1) можно взять POSTGRES_PASSWORD из старого deploy.env:
+      find / -name deploy.env -not -path '/proc/*' 2>/dev/null -exec ls -la {} \;
+      — и повторить ./deploy.sh;
+   2) или посмотреть, что отвечает база: docker compose logs db"
 }
 
-check_db_password
+ensure_db_password
 
 if [ "$ACTION" = "check" ]; then
   say "✔ Проверки пройдены. Порт: $WEB_PORT, HTTPS: $HTTPS, overlay: ${OVERRIDES:-нет}"
@@ -302,6 +363,18 @@ export WEB_PORT COOKIE_SECURE
 # CORS_ORIGINS не ставим: фронт и API на одном адресе (nginx проксирует /api/),
 # запросы однопоточные по origin — CORS в проде не участвует.
 compose up -d --build
+
+# env внутри работающего контейнера мог достаться от прошлой жизни: compose считает
+# контейнер актуальным, пока не изменилось описание сервиса. Сравниваем пароль,
+# который реально внутри, с секретом, и при расхождении пересоздаём контейнер.
+BACKEND_ID="$(compose ps -q backend 2>/dev/null || true)"
+if [ -n "$BACKEND_ID" ]; then
+  BACKEND_PW="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$BACKEND_ID" 2>/dev/null | sed -n 's/^POSTGRES_PASSWORD=//p' | head -n 1 || true)"
+  if [ -n "$BACKEND_PW" ] && [ "$BACKEND_PW" != "$PG_PW" ]; then
+    say "▶ В работающем контейнере backend другой POSTGRES_PASSWORD — пересоздаю…"
+    compose up -d --force-recreate backend
+  fi
+fi
 
 # --- 7. Ждём живой кабинет, а не «контейнеры в Up» ---------------------------
 probe() {
