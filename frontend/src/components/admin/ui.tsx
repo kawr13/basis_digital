@@ -16,11 +16,18 @@
  */
 import { useEffect } from "react";
 import { createPortal } from "react-dom";
+import { isAbortError } from "../../api";
 
 export type Tone = "ok" | "warn" | "crit" | "muted";
 
-/** Текст ошибки из ApiError/Error: у валидации бэкенда он и так по-русски. */
+/**
+ * Текст ошибки из ApiError/Error: у валидации бэкенда он и так по-русски.
+ * Отмена запроса (TASKS2.md п.24) — не ошибка: `DOMException instanceof
+ * Error` истинно и несёт служебное «signal is aborted without reason»,
+ * поэтому возвращаем пустую строку — плашка ошибки на отмену молчит.
+ */
 export function errText(e: unknown, fallback = "Операция не удалась"): string {
+  if (isAbortError(e)) return "";
   return e instanceof Error && e.message ? e.message : fallback;
 }
 

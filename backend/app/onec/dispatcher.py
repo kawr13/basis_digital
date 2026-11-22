@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Any, Iterable
 
-from sqlalchemy import select
+from sqlalchemy import delete, insert, select, tuple_
 from sqlalchemy.orm import Session
 
 from ..models import (
@@ -25,6 +25,13 @@ from ..models import (
 )
 
 SHIFTS = ("08-20", "20-08")
+
+BULK_CHUNK = 500
+
+# Детали смены: при повторном импорте переукладываются целиком (см. `apply_snapshot`).
+_DETAIL_MODELS = (FactVesselOperation, FactRailOperation, FactTruckOperation,
+                  FactVesselArrival, FactRailArrival, FactRailDeparture,
+                  FactRailDelivery, FactPlatformBalance)
 
 
 # --------------------------------------------------------------------- записи ----
@@ -191,14 +198,15 @@ class DispatcherSnapshot:
 
 # ------------------------------------------------------------------- запись ----
 
-def _upsert(db: Session, model, keys: dict, values: dict) -> None:
-    """Одна строка по ключу: нет — вставить, есть — обновить значениями."""
-    row = db.scalar(select(model).filter_by(**keys))
-    if row is None:
-        db.add(model(**keys, **values))
-    else:
-        for name, value in values.items():
-            setattr(row, name, value)
+def _bulk_insert(db: Session, model, rows: list[dict]) -> None:
+    """Пачка вставок: один round-trip на 500 строк вместо поштучного `db.add`.
+
+    Core-вставка не кладёт объекты в identity map — детали смены до коммита
+    никто не читает ORM-объектами, а `_purge_empty_shifts` выбирает их SELECT-ом
+    и в той же транзакции видит уже вставленные строки.
+    """
+    for i in range(0, len(rows), BULK_CHUNK):
+        db.execute(insert(model), rows[i:i + BULK_CHUNK])
 
 
 def _shift_values(rec: ShiftRec, source: str) -> tuple[dict, dict]:
@@ -241,108 +249,120 @@ def apply_snapshot(db: Session, snapshot: DispatcherSnapshot, *, purge_empty: bo
     """
     counts = {"shift": 0, "vessel": 0, "rail": 0, "truck": 0, "arrival": 0,
               "rail_arrival": 0, "rail_out": 0, "rail_in": 0, "platform": 0}
+    shifts = snapshot.shifts
+    src = snapshot.source
 
-    for rec in snapshot.shifts:
-        src = snapshot.source
+    # Шапки смен: один SELECT на все сутки среза вместо SELECT на каждый лист.
+    # Дубликат смены внутри среза обновляет ту же pending-вставку — повторного
+    # листа на одни сутки быть не может, но источник это умеет.
+    dates = {rec.report_date for rec in shifts}
+    known: dict[tuple, FactDispatcherShift] = {}
+    if dates:
+        known = {(r.report_date, r.shift): r for r in db.scalars(
+            select(FactDispatcherShift).where(FactDispatcherShift.report_date.in_(dates)))}
+    new_shifts: dict[tuple, dict] = {}
+    for rec in shifts:
         keys, values = _shift_values(rec, src)
-        _upsert(db, FactDispatcherShift, keys, values)
+        row = known.get((rec.report_date, rec.shift))
+        if row is not None:
+            for name, value in values.items():
+                setattr(row, name, value)
+        elif (rec.report_date, rec.shift) in new_shifts:
+            new_shifts[(rec.report_date, rec.shift)].update(values)
+        else:
+            new_shifts[(rec.report_date, rec.shift)] = {**keys, **values}
         counts["shift"] += 1
+    _bulk_insert(db, FactDispatcherShift, list(new_shifts.values()))
 
-        # Детали смены чистим целиком и кладём заново: в листе строки могут
-        # «съехать» (судно ушло, добавился подрядчик), а ключ «груз» не уникален.
+    # Детали смены чистим целиком и кладём заново: в листе строки могут
+    # «съехать» (судно ушло, добавился подрядчик), а ключ «груз» не уникален.
+    # По одному DELETE на таблицу для всех пар (сутки, смена) среза — вместо
+    # SELECT + DELETE на каждую строку; чужие смены фильтр tuple_ не трогает.
+    if shifts:
+        pairs = list({(rec.report_date, rec.shift) for rec in shifts})
+        for model in _DETAIL_MODELS:
+            db.execute(delete(model).where(
+                tuple_(model.report_date, model.shift).in_(pairs)))
+
+    rows: dict[type, list[dict]] = {model: [] for model in _DETAIL_MODELS}
+    for rec in shifts:
         day, shift = rec.report_date, rec.shift
-        for model in (FactVesselOperation, FactRailOperation, FactTruckOperation,
-                      FactVesselArrival, FactRailArrival, FactRailDeparture,
-                      FactRailDelivery, FactPlatformBalance):
-            for row in db.scalars(select(model).where(
-                model.report_date == day, model.shift == shift  # type: ignore[attr-defined]
-            )):
-                db.delete(row)
-        db.flush()
-
-        # Детали смены — обычные вставки: уникального ключа у строки листа нет
-        # (одно судно на двух причалах, один груз двумя строками), а строки смены
-        # мы только что удалили.
         for v in rec.vessels:
-            db.add(FactVesselOperation(
-                report_date=day, shift=shift, berth=v.berth[:32],
-                vessel=v.vessel[:128], cargo_group=v.cargo_group[:64],
-                plan_unload_t=v.plan_unload_t, plan_load_t=v.plan_load_t,
-                plan_total_t=v.plan_total_t, plan_shift_t=v.plan_shift_t,
-                fact_shift_t=v.fact_shift_t, on_board_t=v.on_board_t,
-                remaining_t=v.remaining_t, productivity_tph=v.productivity_tph,
-                moves=v.moves, shift_hours=v.shift_hours,
-                downtime_hours=v.downtime_hours, machine_hours=v.machine_hours,
-                plan_finish_at=v.plan_finish_at, berthed_at=v.berthed_at,
-                started_at=v.started_at, note=v.note, source=src,
-            ))
-            counts["vessel"] += 1
-
+            rows[FactVesselOperation].append({
+                "report_date": day, "shift": shift, "berth": v.berth[:32],
+                "vessel": v.vessel[:128], "cargo_group": v.cargo_group[:64],
+                "plan_unload_t": v.plan_unload_t, "plan_load_t": v.plan_load_t,
+                "plan_total_t": v.plan_total_t, "plan_shift_t": v.plan_shift_t,
+                "fact_shift_t": v.fact_shift_t, "on_board_t": v.on_board_t,
+                "remaining_t": v.remaining_t, "productivity_tph": v.productivity_tph,
+                "moves": v.moves, "shift_hours": v.shift_hours,
+                "downtime_hours": v.downtime_hours, "machine_hours": v.machine_hours,
+                "plan_finish_at": v.plan_finish_at, "berthed_at": v.berthed_at,
+                "started_at": v.started_at, "note": v.note, "source": src,
+            })
         for r in rec.rails:
-            db.add(FactRailOperation(
-                report_date=day, shift=shift, cargo_group=r.cargo_group[:64],
-                station_start=r.station_start, port_start_loaded=r.port_start_loaded,
-                port_start_empty=r.port_start_empty, processed=r.processed,
-                port_end_loaded=r.port_end_loaded, port_end_empty=r.port_end_empty,
-                source=src,
-            ))
-            counts["rail"] += 1
-
+            rows[FactRailOperation].append({
+                "report_date": day, "shift": shift, "cargo_group": r.cargo_group[:64],
+                "station_start": r.station_start, "port_start_loaded": r.port_start_loaded,
+                "port_start_empty": r.port_start_empty, "processed": r.processed,
+                "port_end_loaded": r.port_end_loaded, "port_end_empty": r.port_end_empty,
+                "source": src,
+            })
         for t in rec.trucks:
-            db.add(FactTruckOperation(
-                report_date=day, shift=shift, cargo_group=t.cargo_group[:64],
-                imp_unload=t.imp_unload, exp_unload=t.exp_unload, imp_load=t.imp_load,
-                exp_load=t.exp_load, direct_vessel=t.direct_vessel, total=t.total,
-                source=src,
-            ))
-            counts["truck"] += 1
-
+            rows[FactTruckOperation].append({
+                "report_date": day, "shift": shift, "cargo_group": t.cargo_group[:64],
+                "imp_unload": t.imp_unload, "exp_unload": t.exp_unload, "imp_load": t.imp_load,
+                "exp_load": t.exp_load, "direct_vessel": t.direct_vessel, "total": t.total,
+                "source": src,
+            })
         for a in rec.arrivals:
-            db.add(FactVesselArrival(
-                report_date=day, shift=shift, vessel=a.vessel[:128], eta=a.eta,
-                berth=a.berth[:32], work_kind=a.work_kind[:32],
-                cargo_group=a.cargo_group[:64], plan_t=a.plan_t,
-                plan_raw=a.plan_raw[:64], agent=a.agent[:64], source=src,
-            ))
-            counts["arrival"] += 1
-
+            rows[FactVesselArrival].append({
+                "report_date": day, "shift": shift, "vessel": a.vessel[:128], "eta": a.eta,
+                "berth": a.berth[:32], "work_kind": a.work_kind[:32],
+                "cargo_group": a.cargo_group[:64], "plan_t": a.plan_t,
+                "plan_raw": a.plan_raw[:64], "agent": a.agent[:64], "source": src,
+            })
         for r in rec.rail_arrivals:
-            db.add(FactRailArrival(
-                report_date=day, shift=shift, station=r.station[:64],
-                cargo_group=r.cargo_group[:64], train_index=r.train_index[:64],
-                cars=r.cars, work_kind=r.work_kind[:16], wagon_type=r.wagon_type[:32],
-                note=r.note[:128], source=src,
-            ))
-            counts["rail_arrival"] += 1
-
+            rows[FactRailArrival].append({
+                "report_date": day, "shift": shift, "station": r.station[:64],
+                "cargo_group": r.cargo_group[:64], "train_index": r.train_index[:64],
+                "cars": r.cars, "work_kind": r.work_kind[:16], "wagon_type": r.wagon_type[:32],
+                "note": r.note[:128], "source": src,
+            })
         for r in rec.rail_out:
-            db.add(FactRailDeparture(
-                report_date=day, shift=shift, row_no=r.row_no, move_date=r.move_date,
-                plan_time=r.plan_time[:8], semi_wagons=r.semi_wagons, covered=r.covered,
-                flatcars=r.flatcars, total=r.total, accepted_by=r.accepted_by[:64],
-                fact_cars=r.fact_cars, fact_date=r.fact_date, fact_time=r.fact_time[:8],
-                source=src,
-            ))
-            counts["rail_out"] += 1
-
+            rows[FactRailDeparture].append({
+                "report_date": day, "shift": shift, "row_no": r.row_no, "move_date": r.move_date,
+                "plan_time": r.plan_time[:8], "semi_wagons": r.semi_wagons, "covered": r.covered,
+                "flatcars": r.flatcars, "total": r.total, "accepted_by": r.accepted_by[:64],
+                "fact_cars": r.fact_cars, "fact_date": r.fact_date, "fact_time": r.fact_time[:8],
+                "source": src,
+            })
         for r in rec.rail_in:
-            db.add(FactRailDelivery(
-                report_date=day, shift=shift, row_no=r.row_no, move_date=r.move_date,
-                plan_time=r.plan_time[:8], settle_time=r.settle_time[:8],
-                load_semi=r.load_semi, load_covered=r.load_covered, load_flat=r.load_flat,
-                empty_semi=r.empty_semi, empty_covered=r.empty_covered,
-                empty_flat=r.empty_flat, total=r.total, source=src,
-            ))
-            counts["rail_in"] += 1
-
+            rows[FactRailDelivery].append({
+                "report_date": day, "shift": shift, "row_no": r.row_no, "move_date": r.move_date,
+                "plan_time": r.plan_time[:8], "settle_time": r.settle_time[:8],
+                "load_semi": r.load_semi, "load_covered": r.load_covered, "load_flat": r.load_flat,
+                "empty_semi": r.empty_semi, "empty_covered": r.empty_covered,
+                "empty_flat": r.empty_flat, "total": r.total, "source": src,
+            })
         for pl in rec.platforms:
-            db.add(FactPlatformBalance(
-                report_date=day, shift=shift, owner=pl.owner[:64],
-                total_cars=pl.total_cars, remaining=pl.remaining,
-                terminal=pl.terminal, sent=pl.sent,
-                arrived_loaded=pl.arrived_loaded, source=src,
-            ))
-            counts["platform"] += 1
+            rows[FactPlatformBalance].append({
+                "report_date": day, "shift": shift, "owner": pl.owner[:64],
+                "total_cars": pl.total_cars, "remaining": pl.remaining,
+                "terminal": pl.terminal, "sent": pl.sent,
+                "arrived_loaded": pl.arrived_loaded, "source": src,
+            })
+
+    counts["vessel"] = len(rows[FactVesselOperation])
+    counts["rail"] = len(rows[FactRailOperation])
+    counts["truck"] = len(rows[FactTruckOperation])
+    counts["arrival"] = len(rows[FactVesselArrival])
+    counts["rail_arrival"] = len(rows[FactRailArrival])
+    counts["rail_out"] = len(rows[FactRailDeparture])
+    counts["rail_in"] = len(rows[FactRailDelivery])
+    counts["platform"] = len(rows[FactPlatformBalance])
+    for model, items in rows.items():
+        _bulk_insert(db, model, items)
 
     if purge_empty:
         _purge_empty_shifts(db)

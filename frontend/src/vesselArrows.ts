@@ -74,7 +74,7 @@ export function arrowLabel(
   text: string,
   geom: ArrowGeom,
   canvasW: number,
-  fontSize = 10.5,
+  fontSize = 11,
 ): ArrowLabel {
   const width = text.length * fontSize * 0.58;
   const w = canvasW > 0 ? canvasW : Number.MAX_SAFE_INTEGER;

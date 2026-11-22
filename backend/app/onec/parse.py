@@ -7,6 +7,8 @@
 Поля здесь, а не в Pydantic-схемах, потому что контракт намеренно «плоский» и
 терпимый к отсутствующим полям: 1С отдаёт готовые строки, а кабинет приводит
 типы и не падает от пустых значений (см. docs/03_контракт_1с.md).
+Одна битая строка не роняет срез: её пропускаем и кладём в warnings; форма
+ответа или больше половины битых строк раздела — уже сломанный контракт, ошибка.
 """
 from __future__ import annotations
 
@@ -45,8 +47,50 @@ def _text(value: Any, default: str = "") -> str:
     return str(value).strip() if value not in (None, "") else default
 
 
+# Индивидуальных предупреждений на раздел: один мусорный ответ 1С не должен
+# раздувать журнал синхронизации, сверх лимита — одна свёрнутая строка.
+_MAX_SECTION_WARNINGS = 50
+_MAX_WARNING_LEN = 160
+
+
+class _SectionWarn:
+    """Сборщик предупреждений раздела: префикс, номер строки, лимит, свёртка."""
+
+    def __init__(self, label: str, sink: list[str] | None) -> None:
+        self.label = label
+        # Список не передан — собираем в локальный и выбрасываем: вызывающий код
+        # вне parse.py не обязан знать про warnings.
+        self._sink: list[str] = [] if sink is None else sink
+        self._emitted = 0
+        self._overflow = 0
+
+    def add(self, row_no: int, reason: str) -> None:
+        msg = f"{self.label}, строка {row_no}: {reason}"
+        if len(msg) > _MAX_WARNING_LEN:
+            msg = msg[:_MAX_WARNING_LEN - 1] + "…"
+        if self._emitted < _MAX_SECTION_WARNINGS:
+            self._sink.append(msg)
+            self._emitted += 1
+        else:
+            self._overflow += 1
+
+    def finish(self, skipped: int, total: int) -> None:
+        # Больше половины битых — это не «потерялись пара строк», а «1С отдала
+        # мусор»: лучше сорвать синхронизацию, чем молча положить половину витрины.
+        if skipped * 2 > total:
+            raise ValueError(
+                f"{self.label}: пропущено {skipped} из {total} строк — "
+                "битых больше половины, раздел отвергнут"
+            )
+        if self._overflow:
+            self._sink.append(f"{self.label}: …и ещё {self._overflow} таких же")
+
+
 def _rows(items: Any) -> list[dict]:
-    """Разрешаем и `items`, и именованный массив, и просто список строк."""
+    """Разрешаем и `items`, и именованный массив, и просто список строк.
+    Форма ответа строгая: не список или строка-не-объект означают, что 1С
+    нарушила контракт (это ошибка синхронизации), в отличие от отдельных битых строк.
+    """
     if items is None:
         return []
     if isinstance(items, dict):                      # {"items": [...]}
@@ -61,12 +105,15 @@ def _rows(items: Any) -> list[dict]:
     return rows
 
 
-def parse_warehouses(items: Any) -> list[WarehouseRec]:
+def parse_warehouses(items: Any, warnings: list[str] | None = None) -> list[WarehouseRec]:
+    sec = _SectionWarn("склады (warehouses)", warnings)
+    rows = _rows(items)
     out: list[WarehouseRec] = []
-    for row in _rows(items):
+    for row_no, row in enumerate(rows, start=1):
         code = _text(row.get("code") or row.get("warehouse_code"))
         if not code:
-            raise ValueError("у склада нет кода")
+            sec.add(row_no, "нет code")
+            continue
         out.append(WarehouseRec(
             code=code,
             name=_text(row.get("name"), code),
@@ -74,15 +121,19 @@ def parse_warehouses(items: Any) -> list[WarehouseRec]:
             capacity=_num(row.get("capacity")),
             unit=_text(row.get("unit"), "т"),
         ))
+    sec.finish(len(rows) - len(out), len(rows))
     return out
 
 
-def parse_cargo(items: Any) -> list[CargoRec]:
+def parse_cargo(items: Any, warnings: list[str] | None = None) -> list[CargoRec]:
+    sec = _SectionWarn("остатки (balance)", warnings)
+    rows = _rows(items)
     out: list[CargoRec] = []
-    for row in _rows(items):
+    for row_no, row in enumerate(rows, start=1):
         code = _text(row.get("warehouse_code") or row.get("code"))
         if not code:
-            raise ValueError("в строке остатков нет warehouse_code")
+            sec.add(row_no, "нет warehouse_code")
+            continue
         out.append(CargoRec(
             warehouse_code=code,
             cargo_group=_text(row.get("cargo_group"), "Без группы"),
@@ -91,37 +142,47 @@ def parse_cargo(items: Any) -> list[CargoRec]:
             overdue_weight_t=_num(row.get("overdue_weight_t")),
             avg_age_days=_num(row.get("avg_age_days")),
         ))
+    sec.finish(len(rows) - len(out), len(rows))
     return out
 
 
-def parse_capacity(items: Any) -> list[CapacityRec]:
+def parse_capacity(items: Any, warnings: list[str] | None = None) -> list[CapacityRec]:
+    sec = _SectionWarn("ёмкость (capacity)", warnings)
+    rows = _rows(items)
     out: list[CapacityRec] = []
-    for row in _rows(items):
+    for row_no, row in enumerate(rows, start=1):
         code = _text(row.get("warehouse_code") or row.get("code"))
         if not code:
-            raise ValueError("в строке ёмкости нет warehouse_code")
+            sec.add(row_no, "нет warehouse_code")
+            continue
         out.append(CapacityRec(
             warehouse_code=code,
             used=_num(row.get("used")),
             capacity=_num(row.get("capacity")),
             unit=_text(row.get("unit"), "т"),
         ))
+    sec.finish(len(rows) - len(out), len(rows))
     return out
 
 
-def parse_dynamics(items: Any) -> list[DynamicsRec]:
+def parse_dynamics(items: Any, warnings: list[str] | None = None) -> list[DynamicsRec]:
+    sec = _SectionWarn("динамика (dynamics)", warnings)
+    rows = _rows(items)
     out: list[DynamicsRec] = []
-    for row in _rows(items):
+    for row_no, row in enumerate(rows, start=1):
         code = _text(row.get("warehouse_code") or row.get("code"))
-        raw_date = row.get("date") or row.get("bucket_date")
         if not code:
-            raise ValueError("в строке динамики нет warehouse_code")
+            sec.add(row_no, "нет warehouse_code")
+            continue
+        raw_date = row.get("date") or row.get("bucket_date")
         if not raw_date:
-            raise ValueError("в строке динамики нет date")
+            sec.add(row_no, "нет date")
+            continue
         try:
             bucket = date.fromisoformat(str(raw_date).strip()[:10])
-        except ValueError as exc:
-            raise ValueError(f"в строке динамики дата не YYYY-MM-DD: {raw_date}") from exc
+        except ValueError:
+            sec.add(row_no, f"дата не YYYY-MM-DD: {raw_date}")
+            continue
         out.append(DynamicsRec(
             warehouse_code=code,
             bucket_date=bucket,
@@ -131,18 +192,24 @@ def parse_dynamics(items: Any) -> list[DynamicsRec]:
             docs_count=int(_num(row.get("docs_count"))),
             avg_dwell_hours=_num(row.get("avg_dwell_hours")),
         ))
+    sec.finish(len(rows) - len(out), len(rows))
     return out
 
 
 def snapshot_from_payload(data: Any) -> Snapshot:
-    """Срез из тела push-запроса (тот же контракт, что отдаёт HTTP-сервис)."""
+    """Срез из тела push-запроса (тот же контракт, что отдаёт HTTP-сервис).
+
+    Битые строки не роняют срез: они пропускаются, а причины собираются в
+    Snapshot.warnings.
+    """
     if not isinstance(data, dict):
         raise ValueError("ожидался JSON-объект со срезом")
 
-    warehouses = parse_warehouses(data.get("warehouses", data.get("items")))
-    cargo = parse_cargo(data.get("balance", data.get("cargo")))
-    capacity = parse_capacity(data.get("capacity"))
-    dynamics = parse_dynamics(data.get("dynamics"))
+    warnings: list[str] = []
+    warehouses = parse_warehouses(data.get("warehouses", data.get("items")), warnings)
+    cargo = parse_cargo(data.get("balance", data.get("cargo")), warnings)
+    capacity = parse_capacity(data.get("capacity"), warnings)
+    dynamics = parse_dynamics(data.get("dynamics"), warnings)
 
     if not (warehouses or cargo or capacity or dynamics):
         raise ValueError("пустой срез: ни одной строки в warehouses/balance/capacity/dynamics")
@@ -153,4 +220,5 @@ def snapshot_from_payload(data: Any) -> Snapshot:
         cargo=cargo,
         capacity=capacity,
         dynamics=dynamics,
+        warnings=warnings,
     )

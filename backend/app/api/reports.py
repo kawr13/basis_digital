@@ -32,6 +32,28 @@ def _period(date_from: date | None, date_to: date | None, db: Session):
                           default_days=app_settings.get(db, "reports.default_days"))
 
 
+def _check_capacity_trend_period(start: date, end: date) -> None:
+    """TASKS2.md п.34: период «Загрузки складов» не длиннее CAPACITY_TREND_MAX_DAYS.
+
+    Тот же приём, что у страницы статистики (`api/dispatcher.py::_check_period_length`):
+    слишком длинный период — 400, а не молчаливая обрезка хвоста, — пользователю
+    видно, что тренд неполный. Проверку делают и JSON-, и CSV-ручка до похода в
+    базу, чтобы выгрузка не была хитрее экрана.
+    """
+    days = (end - start).days + 1
+    if days <= r.CAPACITY_TREND_MAX_DAYS:
+        return
+    raise HTTPException(
+        400,
+        f"Период {days} суток длиннее разрешённого для отчёта «Загрузка складов»: "
+        f"максимум {r.CAPACITY_TREND_MAX_DAYS} суток. Выберите пресет (7/14/30/90 "
+        "суток) или более короткий промежуток: ответ строится по снимкам каждого "
+        "склада на каждые сутки. Если отчёт сам открывается таким периодом — "
+        "администратору стоит уменьшить «Период отчёта по умолчанию, суток» "
+        "в настройках.",
+    )
+
+
 def _scope(db: Session, user: User, warehouses: str | None) -> list[int]:
     """Разрешённые склады пользователя ∩ то, что он попросил."""
     allowed = set(q.allowed_warehouse_ids(db, user))
@@ -142,6 +164,7 @@ def capacity_trend(
     db: Session = Depends(get_db),
 ):
     start, end = _period(date_from, date_to, db)
+    _check_capacity_trend_period(start, end)
     rows = r.capacity_trend(db, _scope(db, user, warehouses), start, end)
     return {"period": {"from": start, "to": end}, "rows": rows}
 
@@ -155,6 +178,7 @@ def capacity_trend_csv(
     db: Session = Depends(get_db),
 ):
     start, end = _period(date_from, date_to, db)
+    _check_capacity_trend_period(start, end)
     rows = r.capacity_trend(db, _scope(db, user, warehouses), start, end)
     return _to_csv(
         ["Срез", "Код склада", "Склад", "Занято", "Ёмкость", "Загрузка, %", "Единица"],

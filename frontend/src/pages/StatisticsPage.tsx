@@ -1,6 +1,7 @@
 import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState, useTransition } from "react";
 import {
   api,
+  isAbortError,
   type DispatcherMeta,
   type DispatcherOverview,
   type DispatcherRowKind,
@@ -58,6 +59,73 @@ const SHIFTS = [
   { v: "08-20", label: "День 08–20" },
   { v: "20-08", label: "Ночь 20–08" },
 ];
+
+/**
+ * Константные пропсы графиков (TASKS2.md п.30): `React.memo` сравнивает пропсы
+ * по ссылке, поэтому свежий литерал `[...]` внутри `render` обнуляет мемоизацию.
+ * Несущие данные пропсы страницы держит стабильными `buildWidgets`, эти ряды
+ * не зависят от данных и вынесены сюда — один раз на всё приложение.
+ */
+const THROUGHPUT_SERIES: BarSeries[] = [
+  { key: "throughput", label: "факт, т" },
+  { key: "plan", label: "план смены, т", color: CHART.plan, line: true },
+  { key: "calls", label: "судозаходов", color: CHART.sky, line: true, right: true },
+];
+const CUMULATIVE_SERIES: BarSeries[] = [{ key: "sum", label: "нарастающим итогом, т", line: true, color: CHART.navy }];
+const PARETO_SERIES: BarSeries[] = [
+  { key: "tons", label: "тоннаж, т" },
+  { key: "cum", label: "накопленная доля, %", color: CHART.amber, line: true, right: true },
+];
+const PERSONNEL_SERIES: BarSeries[] = [
+  { key: "crew", label: "основная бригада" },
+  { key: "day_off", label: "вышедшие в выходной" },
+  { key: "contractors", label: "подрядчики" },
+  { key: "rate", label: "явка, %", color: CHART.amber, line: true, right: true, digits: 1 },
+];
+const ABSENCE_SERIES: BarSeries[] = [
+  { key: "sick", label: "больничный", color: CHART.crit },
+  { key: "vacation", label: "отпуск", color: CHART.amber },
+  { key: "other", label: "прогул / МОБ / учеба / донор", color: CHART.plan },
+];
+const EQUIPMENT_SERIES: BarSeries[] = [
+  { key: "ok", label: "исправно", color: CHART.ok },
+  { key: "repair", label: "в ремонте", color: CHART.warn },
+  { key: "availability", label: "готовность, %", color: CHART.accent, line: true, right: true, digits: 1 },
+];
+const RAIL_DAY_SERIES: BarSeries[] = [
+  { key: "rail", label: "вагонов обработано" },
+  { key: "trucks", label: "автомашин", color: CHART.sky, line: true },
+];
+const TRUCK_OPS: BarSeries[] = [
+  { key: "imp_unload", label: "принял / выгрузка, импорт" },
+  { key: "exp_unload", label: "растарка / выгрузка, экспорт" },
+  { key: "imp_load", label: "затарка / погрузка, импорт" },
+  { key: "exp_load", label: "затарка / погрузка, экспорт" },
+  { key: "direct", label: "с судна в машину" },
+];
+const RAIL_MOVES_SERIES: BarSeries[] = [
+  { key: "in", label: "поставлено в порт" },
+  { key: "out", label: "выведено из порта", color: CHART.amber },
+];
+const WAGON_MIX_SERIES: BarSeries[] = [
+  { key: "in", label: "поставлено" },
+  { key: "out", label: "выведено", color: CHART.amber },
+];
+const WEEKDAY_BARS_SERIES: BarSeries[] = [{ key: "tons", label: "средний грузопоток, т" }];
+const RADAR_AXES = [
+  { key: "tons", label: "тоннаж" },
+  { key: "calls", label: "судозаходы" },
+  { key: "tph", label: "темп т/ч" },
+  { key: "plan", label: "план %" },
+  { key: "calm", label: "без потерь" },
+];
+/** Пороги «шайб» [внимание, критично]; массивы постоянны — иначе memo(GaugeChart) не сработает. */
+const TH_PLAN: [number, number] = [80, 100];
+const TH_CREW: [number, number] = [75, 90];
+const TH_DOWN: [number, number] = [25, 35];
+const TH_RS: [number, number] = [70, 85];
+/** Формат теплокарты: то же `nf`, но одна ссылка на колбэк (memo, TASKS2.md п.30). */
+const FMT0 = (v: number) => nf(v, 0);
 
 type Mode = "detailed" | "conservative";
 
@@ -141,25 +209,48 @@ export default function StatisticsPage() {
   );
 
   // ---- данные --------------------------------------------------------------
+  // Номер запроса (TASKS2.md п.24, эталон — DrilldownPanel): если период или
+  // смена сменились, пока запрос в полёте, ответ отсталого запроса не имеет
+  // права перезатереть цифры нового окна.
+  const seq = useRef(0);
+  // Отмена вместо «дождётся и перетрёт» (TASKS2.md п.24): один контроллер на
+  // страницу. Предыдущий запрос не нужен ничему, кроме самого себя: ни
+  // параллельным тикам интервала, ни второму `overview` на первом рендере
+  // (`load` пересоздаётся, когда из ответа проставляется `period`) — отменяем
+  // его в начале каждой загрузки и при размонтировании.
+  const ctrl = useRef<AbortController | null>(null);
   const load = useCallback(
     async (quiet = false) => {
+      const my = ++seq.current;
+      ctrl.current?.abort();
+      const ac = new AbortController();
+      ctrl.current = ac;
       if (!quiet) setBusy(true);
       try {
-        const ov = await api.dispatcherOverview({ from: period?.from, to: period?.to, shift });
+        const ov = await api.dispatcherOverview(
+          { from: period?.from, to: period?.to, shift },
+          ac.signal,
+        );
+        if (my !== seq.current) return;
         // ПОЧЕМУ ЗДЕСЬ: ответ overview — единственный триггер перерисовки всех 34
         // плашек. Без перехода это одна задача главному потоку на 200+ мс, и до неё
         // не успевают дорисоваться ни шапка, ни панель периода. `busy` снимаем в том
         // же переходе: снятый сразу, он на кадр показал бы «Нет данных» (ниже по
-        // разметке условие !busy && !data).
+        // разметке условие !busy && !data). Снимаем независимо от `quiet`
+        // (TASKS2.md п.24): предыдущий запрос отменён этим, значит спиннер —
+        // забота последнего, иначе отменённый громкий `load` оставил бы его гореть.
         startRender(() => {
           setData(ov);
           setError("");
-          if (!quiet) setBusy(false);
+          setBusy(false);
         });
         if (!period) setPeriod({ from: ov.period.from, to: ov.period.to });
       } catch (e) {
+        // отмена — не ошибка (TASKS2.md п.24): плашка обязана молчать
+        if (isAbortError(e)) return;
+        if (my !== seq.current) return;
         setError(e instanceof Error ? e.message : "Не удалось загрузить статистику");
-        if (!quiet) setBusy(false);
+        setBusy(false);
       }
     },
     [period, shift, startRender],
@@ -167,6 +258,11 @@ export default function StatisticsPage() {
 
   useEffect(() => {
     void load();
+    return () => {
+      // размонтирование (или пересоздание `load`): летящий запрос больше не
+      // нужен (TASKS2.md п.24), и setState мёртвой страницы — лишний шум
+      ctrl.current?.abort();
+    };
   }, [load]);
 
   useEffect(() => {
@@ -569,13 +665,6 @@ function buildWidgets(
 
   // Радар «день против ночи»: каждая ось нормирована на лучшее из двух смен
   const split = data?.shift_split ?? [];
-  const radarAxes = [
-    { key: "tons", label: "тоннаж" },
-    { key: "calls", label: "судозаходы" },
-    { key: "tph", label: "темп т/ч" },
-    { key: "plan", label: "план %" },
-    { key: "calm", label: "без потерь" },
-  ];
   const best = {
     tons: Math.max(1, ...split.map((s) => s.throughput_t)),
     calls: Math.max(1, ...split.map((s) => s.calls)),
@@ -604,14 +693,6 @@ function buildWidgets(
     );
     return p ? p.throughput_t : null;
   };
-
-  const truckOps: BarSeries[] = [
-    { key: "imp_unload", label: "принял / выгрузка, импорт" },
-    { key: "exp_unload", label: "растарка / выгрузка, экспорт" },
-    { key: "imp_load", label: "затарка / погрузка, импорт" },
-    { key: "exp_load", label: "затарка / погрузка, экспорт" },
-    { key: "direct", label: "с судна в машину" },
-  ];
 
   // ---- выводка / постановка вагонов и платформы из аренды -------------------
   const moves = data?.rail_moves;
@@ -661,6 +742,23 @@ function buildWidgets(
     tip: [{ label: "суток в периоде", value: nf(w.days, 0) }],
   }));
   const directionBars: HBarItem[] = [
+    { label: "экспорт (погрузка)", value: data?.direction.export_t ?? 0, color: CHART.navy },
+    { label: "импорт (выгрузка)", value: data?.direction.import_t ?? 0, color: CHART.sky },
+  ];
+
+  // Стабильные колбэки кликов (TASKS2.md п.30): литерал `(label) => openRows(...)`
+  // пересоздаётся на каждый вызов `render` и обнуляет memo-сравнение пропсов;
+  // здесь они создаются один раз на сборку виджетов.
+  const openCargo = (label: string) => openRows("cargo", label);
+  const openBerth = (label: string) => openRows("berth", label);
+  const openVessel = (label: string) => openRows("vessel", label);
+  const openStation = (label: string) => openRows("station", label);
+  const openRailCargo = (label: string) => openRows("rail_cargo", label);
+  const openTruckCargo = (label: string) => openRows("truck_cargo", label);
+  const openRailMove = () => openRows("rail_move");
+  // Кольцо «Импорт и экспорт»: тот же состав, что у directionBars выше, но
+  // вычислен один раз на сборку — свежий массив в пропсе снимал бы memo.
+  const directionItems: Slice[] = [
     { label: "экспорт (погрузка)", value: data?.direction.export_t ?? 0, color: CHART.navy },
     { label: "импорт (выгрузка)", value: data?.direction.import_t ?? 0, color: CHART.sky },
   ];
@@ -807,11 +905,7 @@ function buildWidgets(
           data={throughput}
           height={height ?? 280}
           unit=" т"
-          series={[
-            { key: "throughput", label: "факт, т" },
-            { key: "plan", label: "план смены, т", color: CHART.plan, line: true },
-            { key: "calls", label: "судозаходов", color: CHART.sky, line: true, right: true },
-          ]}
+          series={THROUGHPUT_SERIES}
           onSelectKey={onSelectDay}
           selectedKey={selectedDay}
           ariaLabel="Грузопоток по суткам"
@@ -824,7 +918,7 @@ function buildWidgets(
       defaultSpan: 4,
       defaultHeight: 280,
       render: ({ height }) => (
-        <DonutChart items={cargoMix} height={height ?? 280} onSelect={(label) => openRows("cargo", label)} />
+        <DonutChart items={cargoMix} height={height ?? 280} onSelect={openCargo} />
       ),
     },
     {
@@ -838,7 +932,7 @@ function buildWidgets(
           data={cumulative}
           height={height ?? 220}
           unit=" т"
-          series={[{ key: "sum", label: "нарастающим итогом, т", line: true, color: CHART.navy }]}
+          series={CUMULATIVE_SERIES}
           ariaLabel="Нарастающий итог грузопотока"
         />
       ),
@@ -854,10 +948,7 @@ function buildWidgets(
           data={pareto}
           height={height ?? 220}
           unit=" т"
-          series={[
-            { key: "tons", label: "тоннаж, т" },
-            { key: "cum", label: "накопленная доля, %", color: CHART.amber, line: true, right: true },
-          ]}
+          series={PARETO_SERIES}
           ariaLabel="Парето грузов"
         />
       ),
@@ -883,7 +974,7 @@ function buildWidgets(
           height={height ?? 280}
           unit="т"
           color={CHART.navy}
-          onSelectKey={(label) => openRows("berth", label)}
+          onSelectKey={openBerth}
         />
       ),
     },
@@ -893,7 +984,7 @@ function buildWidgets(
       defaultSpan: 6,
       defaultHeight: 300,
       render: ({ height }) => (
-        <HBarsChart items={vesselItems} height={height ?? 300} unit="т" onSelectKey={(label) => openRows("vessel", label)} />
+        <HBarsChart items={vesselItems} height={height ?? 300} unit="т" onSelectKey={openVessel} />
       ),
     },
     {
@@ -919,7 +1010,7 @@ function buildWidgets(
       defaultSpan: 5,
       defaultHeight: 300,
       hint: split.length ? "фильтр «все смены» показывает оба ряда" : undefined,
-      render: ({ height }) => <RadarChart axes={radarAxes} series={radarSeries} height={height ?? 300} />,
+      render: ({ height }) => <RadarChart axes={RADAR_AXES} series={radarSeries} height={height ?? 300} />,
     },
     {
       id: "weekday_heat",
@@ -928,10 +1019,10 @@ function buildWidgets(
       defaultHeight: 240,
       render: ({ height }) => (
         <HeatmapChart
-          rows={["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]}
+          rows={WEEKDAYS}
           cols={heatWeeks}
           value={heatValue}
-          format={(v) => nf(v, 0)}
+          format={FMT0}
           height={height ?? 240}
         />
       ),
@@ -948,12 +1039,7 @@ function buildWidgets(
           height={height ?? 260}
           stack
           unit=" чел."
-          series={[
-            { key: "crew", label: "основная бригада" },
-            { key: "day_off", label: "вышедшие в выходной" },
-            { key: "contractors", label: "подрядчики" },
-            { key: "rate", label: "явка, %", color: CHART.amber, line: true, right: true, digits: 1 },
-          ]}
+          series={PERSONNEL_SERIES}
           onSelectKey={onSelectDay}
           selectedKey={selectedDay}
         />
@@ -971,11 +1057,7 @@ function buildWidgets(
           height={height ?? 260}
           stack
           unit=" чел."
-          series={[
-            { key: "sick", label: "больничный", color: CHART.crit },
-            { key: "vacation", label: "отпуск", color: CHART.amber },
-            { key: "other", label: "прогул / МОБ / учеба / донор", color: CHART.plan },
-          ]}
+          series={ABSENCE_SERIES}
         />
       ),
     },
@@ -990,11 +1072,7 @@ function buildWidgets(
           height={height ?? 240}
           stack
           unit=" шт."
-          series={[
-            { key: "ok", label: "исправно", color: CHART.ok },
-            { key: "repair", label: "в ремонте", color: CHART.warn },
-            { key: "availability", label: "готовность, %", color: CHART.accent, line: true, right: true, digits: 1 },
-          ]}
+          series={EQUIPMENT_SERIES}
         />
       ),
     },
@@ -1008,10 +1086,7 @@ function buildWidgets(
           data={railDay}
           height={height ?? 240}
           unit=" шт."
-          series={[
-            { key: "rail", label: "вагонов обработано" },
-            { key: "trucks", label: "автомашин", color: CHART.sky, line: true },
-          ]}
+          series={RAIL_DAY_SERIES}
           onSelectKey={onSelectDay}
           selectedKey={selectedDay}
         />
@@ -1028,7 +1103,7 @@ function buildWidgets(
           height={height ?? 260}
           unit="ваг."
           color={CHART.accent}
-          onSelectKey={(label) => openRows("rail_cargo", label)}
+          onSelectKey={openRailCargo}
         />
       ),
     },
@@ -1043,7 +1118,7 @@ function buildWidgets(
           height={height ?? 260}
           stack
           unit=" машин"
-          series={truckOps}
+          series={TRUCK_OPS}
           onSelectKey={onSelectDay}
           selectedKey={selectedDay}
         />
@@ -1060,7 +1135,7 @@ function buildWidgets(
           height={height ?? 260}
           unit="маш."
           color={CHART.sky}
-          onSelectKey={(label) => openRows("truck_cargo", label)}
+          onSelectKey={openTruckCargo}
         />
       ),
     },
@@ -1073,10 +1148,7 @@ function buildWidgets(
       render: ({ height }) => (
         <div className="flex h-full flex-col justify-center gap-3">
           <DonutChart
-            items={[
-              { label: "экспорт (погрузка)", value: data?.direction.export_t ?? 0, color: CHART.navy },
-              { label: "импорт (выгрузка)", value: data?.direction.import_t ?? 0, color: CHART.sky },
-            ]}
+            items={directionItems}
             height={(height ?? 240) - 8}
             centerLabel="всего"
           />
@@ -1090,17 +1162,17 @@ function buildWidgets(
       defaultHeight: 240,
       render: () => (
         <div className="grid grid-cols-2 gap-2">
-          <GaugeChart value={k?.plan_pct ?? null} max={120} label="выполнение плана, %" thresholds={[80, 100]} />
-          <GaugeChart value={k?.crew_rate ?? null} max={110} label="явка, %" thresholds={[75, 90]} />
+          <GaugeChart value={k?.plan_pct ?? null} max={120} label="выполнение плана, %" thresholds={TH_PLAN} />
+          <GaugeChart value={k?.crew_rate ?? null} max={110} label="явка, %" thresholds={TH_CREW} />
           <GaugeChart
             value={k?.downtime_pct ?? null}
             max={60}
             label="потери, %"
-            thresholds={[25, 35]}
+            thresholds={TH_DOWN}
             invert
             sub={`${nf(k?.downtime_h ?? 0, 0)} ч за период`}
           />
-          <GaugeChart value={k?.rs_availability ?? null} max={100} label="готовность техники, %" thresholds={[70, 85]} />
+          <GaugeChart value={k?.rs_availability ?? null} max={100} label="готовность техники, %" thresholds={TH_RS} />
         </div>
       ),
     },
@@ -1155,7 +1227,7 @@ function buildWidgets(
           height={height ?? 260}
           unit="ваг."
           color={CHART.accent}
-          onSelectKey={(label) => openRows("station", label)}
+          onSelectKey={openStation}
         />
       ),
     },
@@ -1175,10 +1247,7 @@ function buildWidgets(
           data={moveDay}
           height={height ?? 260}
           unit=" ваг."
-          series={[
-            { key: "in", label: "поставлено в порт" },
-            { key: "out", label: "выведено из порта", color: CHART.amber },
-          ]}
+          series={RAIL_MOVES_SERIES}
           onSelectKey={onSelectDay}
           selectedKey={selectedDay}
           ariaLabel="Выводка и постановка вагонов по суткам"
@@ -1196,11 +1265,8 @@ function buildWidgets(
           data={wagonMix}
           height={height ?? 260}
           unit=" ваг."
-          series={[
-            { key: "in", label: "поставлено" },
-            { key: "out", label: "выведено", color: CHART.amber },
-          ]}
-          onSelectKey={() => openRows("rail_move")}
+          series={WAGON_MIX_SERIES}
+          onSelectKey={openRailMove}
           ariaLabel="Вагоны по типам: вывод и ввод"
         />
       ),
@@ -1262,7 +1328,7 @@ function buildWidgets(
           items={cargoBars}
           height={height ?? 280}
           unit="т"
-          onSelectKey={(label) => openRows("cargo", label)}
+          onSelectKey={openCargo}
         />
       ),
     },
@@ -1290,7 +1356,7 @@ function buildWidgets(
           data={weekdayBars}
           height={height ?? 240}
           unit=" т"
-          series={[{ key: "tons", label: "средний грузопоток, т" }]}
+          series={WEEKDAY_BARS_SERIES}
           ariaLabel="Средний грузопоток по дням недели"
         />
       ),

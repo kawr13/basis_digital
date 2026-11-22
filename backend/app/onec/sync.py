@@ -12,14 +12,16 @@ from __future__ import annotations
 
 import logging
 import threading
+from typing import Iterable
 
-from sqlalchemy import select
+from sqlalchemy import insert, select
 from sqlalchemy.orm import Session
 
 from ..config import get_settings
 from ..models import (
     FactCargoBalance, FactProcessingDynamics, FactWarehouseCapacity, SyncRun, Warehouse, utcnow,
 )
+from ..services import job_lock
 from .base import Snapshot, StatsSource
 
 log = logging.getLogger("statcab.sync")
@@ -56,74 +58,148 @@ def get_source(db: Session | None = None) -> StatsSource:
 
 
 def _warehouses_map(db: Session, snap: Snapshot) -> dict[str, int]:
-    """Код склада из 1С → id в витрине. Новых складов заводим, существующие обновляем."""
-    known = {w.code: w.id for w in db.scalars(select(Warehouse))}
+    """Код склада из 1С → id в витрине. Новых складов заводим, существующие обновляем.
+
+    Один SELECT на все склады и один flush на новые: `db.get` на каждый код из
+    среза — это лишний round-trip к базе на каждый склад.
+    """
+    known = {w.code: w for w in db.scalars(select(Warehouse))}
+    fresh: list[Warehouse] = []
     for rec in snap.warehouses:
-        if rec.code in known:
-            wh = db.get(Warehouse, known[rec.code])
+        wh = known.get(rec.code)
+        if wh is not None:
             wh.name, wh.kind, wh.capacity, wh.unit, wh.is_active = rec.name, rec.kind, rec.capacity, rec.unit, True
         else:
             wh = Warehouse(code=rec.code, name=rec.name, kind=rec.kind,
                            capacity=rec.capacity, unit=rec.unit)
             db.add(wh)
-            db.flush()
-            known[rec.code] = wh.id
-    return known
+            known[rec.code] = wh
+            fresh.append(wh)
+    if fresh:
+        db.flush()  # id новых складов нужен фактовым разделам ниже
+    return {code: wh.id for code, wh in known.items()}
+
+
+BULK_CHUNK = 500
+
+
+def _bulk_apply(db: Session, model, items: list[tuple[tuple, dict]],
+                existing: Iterable, key_of) -> None:
+    """Идемпотентная укладка раздела: один SELECT существующих строк + вставки пачкой.
+
+    Уникального индекса на натуральный ключ в схеме нет — ON CONFLICT неприменим,
+    поэтому соответствие «ключ → строка» собирается в памяти: существующие
+    правятся через ORM-объекты, новые копятся в `pending` и уходят `insert`
+    батчами. Дубликат ключа внутри среза обновляет ту же запись pending —
+    одна строка с последним значением. Коммит решает вызывающий.
+    """
+    known = {key_of(row): row for row in existing}
+    pending: dict[tuple, dict] = {}
+    for key, values in items:
+        row = known.get(key)
+        if row is not None:
+            for name, value in values.items():
+                setattr(row, name, value)
+        elif key in pending:
+            pending[key].update(values)
+        else:
+            pending[key] = dict(values)
+    rows = list(pending.values())
+    for i in range(0, len(rows), BULK_CHUNK):
+        db.execute(insert(model), rows[i:i + BULK_CHUNK])
+
+
+def _apply_cargo(db: Session, snap: Snapshot, wh_ids: dict[str, int]) -> int:
+    """Остатки грузов: ключ (snapshot_at × склад × группа), snapshot_at в срезе один."""
+    items: list[tuple[tuple, dict]] = []
+    wids: set[int] = set()
+    for rec in snap.cargo:
+        wid = wh_ids.get(rec.warehouse_code)
+        if not wid:
+            continue
+        wids.add(wid)
+        items.append((
+            (snap.snapshot_at, wid, rec.cargo_group),
+            {"snapshot_at": snap.snapshot_at, "warehouse_id": wid, "cargo_group": rec.cargo_group,
+             "qty": rec.qty, "weight_t": rec.weight_t,
+             "overdue_weight_t": rec.overdue_weight_t, "avg_age_days": rec.avg_age_days}))
+    if not items:
+        return 0
+    _bulk_apply(
+        db, FactCargoBalance, items,
+        db.scalars(select(FactCargoBalance).where(
+            FactCargoBalance.snapshot_at == snap.snapshot_at,
+            FactCargoBalance.warehouse_id.in_(wids))),
+        lambda row: (row.snapshot_at, row.warehouse_id, row.cargo_group))
+    return len(items)
+
+
+def _apply_capacity(db: Session, snap: Snapshot, wh_ids: dict[str, int]) -> int:
+    """Ёмкость: ключ (snapshot_at × склад)."""
+    items: list[tuple[tuple, dict]] = []
+    wids: set[int] = set()
+    for rec in snap.capacity:
+        wid = wh_ids.get(rec.warehouse_code)
+        if not wid:
+            continue
+        wids.add(wid)
+        items.append((
+            (snap.snapshot_at, wid),
+            {"snapshot_at": snap.snapshot_at, "warehouse_id": wid,
+             "used": rec.used, "capacity": rec.capacity, "unit": rec.unit}))
+    if not items:
+        return 0
+    _bulk_apply(
+        db, FactWarehouseCapacity, items,
+        db.scalars(select(FactWarehouseCapacity).where(
+            FactWarehouseCapacity.snapshot_at == snap.snapshot_at,
+            FactWarehouseCapacity.warehouse_id.in_(wids))),
+        lambda row: (row.snapshot_at, row.warehouse_id))
+    return len(items)
+
+
+def _apply_dynamics(db: Session, snap: Snapshot, wh_ids: dict[str, int]) -> int:
+    """Динамика: ключ (день × склад); предварительный SELECT ограничен разбросом
+    дней и складами самого среза — иначе он тянул бы строки чужих периодов."""
+    items: list[tuple[tuple, dict]] = []
+    wids: set[int] = set()
+    dates = []
+    for rec in snap.dynamics:
+        wid = wh_ids.get(rec.warehouse_code)
+        if not wid:
+            continue
+        wids.add(wid)
+        dates.append(rec.bucket_date)
+        items.append((
+            (rec.bucket_date, wid),
+            {"bucket_date": rec.bucket_date, "warehouse_id": wid,
+             "inbound_t": rec.inbound_t, "outbound_t": rec.outbound_t,
+             "processed_t": rec.processed_t, "docs_count": rec.docs_count,
+             "avg_dwell_hours": rec.avg_dwell_hours}))
+    if not items:
+        return 0
+    _bulk_apply(
+        db, FactProcessingDynamics, items,
+        db.scalars(select(FactProcessingDynamics).where(
+            FactProcessingDynamics.bucket_date >= min(dates),
+            FactProcessingDynamics.bucket_date <= max(dates),
+            FactProcessingDynamics.warehouse_id.in_(wids))),
+        lambda row: (row.bucket_date, row.warehouse_id))
+    return len(items)
 
 
 def apply_snapshot(db: Session, snap: Snapshot) -> dict[str, int]:
     """Идемпотентно положить срез в витрину. Возвращает количество строк по разделам.
 
     Коммит не делаем — решает вызывающий (run_sync / push), чтобы срез либо лёг
-    целиком, либо не лёг вовсе.
+    целиком, либо не лёг вовсе. Разделы пишутся пакетно (см. `_bulk_apply`),
+    поэтому счётчики — это число строк среза, обработанных по известным складам.
     """
     wh_ids = _warehouses_map(db, snap)
-    counts = {"warehouses": len(snap.warehouses), "cargo": 0, "capacity": 0, "dynamics": 0}
-
-    for rec in snap.cargo:
-        wid = wh_ids.get(rec.warehouse_code)
-        if not wid:
-            continue
-        row = db.scalar(select(FactCargoBalance).where(
-            FactCargoBalance.snapshot_at == snap.snapshot_at,
-            FactCargoBalance.warehouse_id == wid,
-            FactCargoBalance.cargo_group == rec.cargo_group))
-        if not row:
-            row = FactCargoBalance(snapshot_at=snap.snapshot_at, warehouse_id=wid,
-                                   cargo_group=rec.cargo_group)
-            db.add(row)
-        row.qty, row.weight_t = rec.qty, rec.weight_t
-        row.overdue_weight_t, row.avg_age_days = rec.overdue_weight_t, rec.avg_age_days
-        counts["cargo"] += 1
-
-    for rec in snap.capacity:
-        wid = wh_ids.get(rec.warehouse_code)
-        if not wid:
-            continue
-        row = db.scalar(select(FactWarehouseCapacity).where(
-            FactWarehouseCapacity.snapshot_at == snap.snapshot_at,
-            FactWarehouseCapacity.warehouse_id == wid))
-        if not row:
-            row = FactWarehouseCapacity(snapshot_at=snap.snapshot_at, warehouse_id=wid)
-            db.add(row)
-        row.used, row.capacity, row.unit = rec.used, rec.capacity, rec.unit
-        counts["capacity"] += 1
-
-    for rec in snap.dynamics:
-        wid = wh_ids.get(rec.warehouse_code)
-        if not wid:
-            continue
-        row = db.scalar(select(FactProcessingDynamics).where(
-            FactProcessingDynamics.bucket_date == rec.bucket_date,
-            FactProcessingDynamics.warehouse_id == wid))
-        if not row:
-            row = FactProcessingDynamics(bucket_date=rec.bucket_date, warehouse_id=wid)
-            db.add(row)
-        row.inbound_t, row.outbound_t, row.processed_t = rec.inbound_t, rec.outbound_t, rec.processed_t
-        row.docs_count, row.avg_dwell_hours = rec.docs_count, rec.avg_dwell_hours
-        counts["dynamics"] += 1
-
-    return counts
+    return {"warehouses": len(snap.warehouses),
+            "cargo": _apply_cargo(db, snap, wh_ids),
+            "capacity": _apply_capacity(db, snap, wh_ids),
+            "dynamics": _apply_dynamics(db, snap, wh_ids)}
 
 
 def window_days(db: Session) -> int:
@@ -144,6 +220,13 @@ def _source_kind(db: Session) -> str:
         return str(app_settings.get(db, "onec.source")).strip().lower()
     except (KeyError, TypeError, ValueError):
         return get_settings().one_c_source
+
+
+def warnings_text(warnings: list[str] | None) -> str | None:
+    """Предупреждения разбора одной строкой для журнала; None — когда всё чисто."""
+    if not warnings:
+        return None
+    return " | ".join(warnings)[:2000]
 
 
 def run_sync(db: Session, days: int | None = None) -> SyncRun:
@@ -171,8 +254,14 @@ def run_sync(db: Session, days: int | None = None) -> SyncRun:
         counts = apply_snapshot(db, snap)
         rows = sum(counts.values())
         run.status, run.rows, run.finished_at = "ok", rows, utcnow()
+        # Витрина легла, но не вся: что именно 1С отдала неразборчивым, видно
+        # в журнале загрузок (п. 18 TASKS2.md).
+        run.warnings = warnings_text(snap.warnings)
         db.commit()
         log.info("Синхронизация %s: строк %d (%s)", source.name, rows, counts)
+        if snap.warnings:
+            log.warning("Синхронизация %s: разбор с предупреждениями (%d) — %s",
+                        source.name, len(snap.warnings), run.warnings)
         return run
     except Exception as exc:  # noqa: BLE001 — источник внешний, валим в журнал, не роняем сервис
         db.rollback()
@@ -184,11 +273,16 @@ def run_sync(db: Session, days: int | None = None) -> SyncRun:
 
 
 # ------------------------------------------------------------------ блокировка --
-# Загрузка на процесс одна. apply_snapshot ищет строку по ключу и под двумя
-# параллельными прогонами способен наплодить дубликатов, а планировщик и ручная
-# кнопка в админке друг про друга ничего не знают. Тому, кто пришёл на занятую
-# блокировку, очередь не делают: try_sync отвечает None, а эндпоинт превращает
-# это в 409 с текстом SYNC_BUSY.
+# Загрузка на кабинет одна: apply_snapshot ищет строку по уникальному ключу и под
+# двумя параллельными прогонами способен наплодить дубликатов, а планировщик,
+# ручная кнопка и push из 1С друг про друга ничего не знают. Тому, кто пришёл на
+# занятую блокировку, очередь не делают: try_sync отвечает None, эндпоинт
+# превращает это в 409 с текстом SYNC_BUSY.
+#
+# Замок в два уровня. Локальный — дешёвый, ловит наложение внутри процесса и не
+# трогает базу. Аренда job_lock — общая между процессами: при UVICORN_WORKERS>1
+# планировщик заводится в каждом воркере, и одного локального замка не хватает
+# (п. 8 TASKS2.md).
 _SYNC_LOCK = threading.Lock()
 
 SYNC_BUSY = ("Синхронизация уже выполняется: дождитесь, пока кабинет закончит текущую "
@@ -196,15 +290,33 @@ SYNC_BUSY = ("Синхронизация уже выполняется: дожд
 
 
 def try_sync(db: Session, days: int | None = None) -> SyncRun | None:
-    """run_sync, если никто другой не грузит; None — когда загрузка уже идёт.
-
-    Блокировка местная, на процесс. От двух планировщиков в разных воркерах
-    uvicorn она не спасает — там нужен внешний мьютекс (advisory-лок PostgreSQL
-    или отдельный сервис синхронизации), это за рамками пункта.
-    """
+    """run_sync, если никто другой не грузит; None — когда загрузка уже идёт."""
     if not _SYNC_LOCK.acquire(blocking=False):
         return None
     try:
-        return run_sync(db, days=days)
+        with job_lock.held(db, job_lock.VITRINA, note="pull-синхронизация 1С") as free:
+            if not free:
+                return None
+            return run_sync(db, days=days)
     finally:
         _SYNC_LOCK.release()
+
+
+def reconcile_hung_runs(db: Session) -> int:
+    """Дописать финал загрузкам, которые оборвались вместе с процессом.
+
+    Статус «running» честный — пока жив процесс, его написавший. Если процесс
+    умер посреди цикла, строка висит вечно: дашборд показывает «идёт загрузка»,
+    а админ считает кабинет зависшим. Закрываем их ошибкой при старте (п. 16
+    TASKS2.md) — до первой новой загрузки, чтобы не спутать с живой.
+    """
+    hung = db.scalars(select(SyncRun).where(SyncRun.status == "running")).all()
+    for run in hung:
+        run.status = "error"
+        run.finished_at = utcnow()
+        run.error = ("Загрузка прервана остановкой кабинета: процесс завершился, "
+                     "не завершив цикл. Витрина — на момент последней успешной загрузки.")
+    if hung:
+        db.commit()
+        log.warning("Закрыто зависших загрузок прошлого запуска: %d", len(hung))
+    return len(hung)

@@ -97,7 +97,9 @@ class UserWarehouseScope(Base):
     __table_args__ = (UniqueConstraint("user_id", "warehouse_id", name="uq_user_wh"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    # Отдельный индекс на user_id не нужен: uq_user_wh начинается с него же,
+    # покрывающим объектом проверяется и каскад внешнего ключа (п. 32 TASKS2.md).
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
     warehouse_id: Mapped[int] = mapped_column(ForeignKey("warehouses.id", ondelete="CASCADE"))
 
     user: Mapped[User] = relationship(back_populates="scopes")
@@ -143,12 +145,13 @@ class FactCargoBalance(Base):
 
     __tablename__ = "fact_cargo_balance"
     __table_args__ = (
-        Index("ix_cb_snap_wh", "snapshot_at", "warehouse_id"),
+        # Уникальность среза заодно держит индекс по (snapshot_at, warehouse_id):
+        # дублирующий ix_cb_snap_wh убран (п. 32 TASKS2.md).
         UniqueConstraint("snapshot_at", "warehouse_id", "cargo_group", name="uq_cb_snap"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    snapshot_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+    snapshot_at: Mapped[datetime] = mapped_column(DateTime)
     warehouse_id: Mapped[int] = mapped_column(ForeignKey("warehouses.id", ondelete="CASCADE"))
     cargo_group: Mapped[str] = mapped_column(String(64))   # номенклатурная группа / вид груза
     qty: Mapped[float] = mapped_column(Float, default=0)   # мест / паллет
@@ -162,12 +165,13 @@ class FactWarehouseCapacity(Base):
 
     __tablename__ = "fact_warehouse_capacity"
     __table_args__ = (
-        Index("ix_wc_snap_wh", "snapshot_at", "warehouse_id"),
+        # Уникальный ключ (snapshot_at, warehouse_id) работает и индексом выборки:
+        # дублирующий ix_wc_snap_wh убран (п. 32 TASKS2.md).
         UniqueConstraint("snapshot_at", "warehouse_id", name="uq_wc_snap"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    snapshot_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+    snapshot_at: Mapped[datetime] = mapped_column(DateTime)
     warehouse_id: Mapped[int] = mapped_column(ForeignKey("warehouses.id", ondelete="CASCADE"))
     used: Mapped[float] = mapped_column(Float, default=0)
     capacity: Mapped[float] = mapped_column(Float, default=0)
@@ -179,12 +183,13 @@ class FactProcessingDynamics(Base):
 
     __tablename__ = "fact_processing_dynamics"
     __table_args__ = (
-        Index("ix_pd_day_wh", "bucket_date", "warehouse_id"),
+        # Уникальный ключ (bucket_date, warehouse_id) работает и индексом выборки:
+        # дублирующий ix_pd_day_wh убран (п. 32 TASKS2.md).
         UniqueConstraint("bucket_date", "warehouse_id", name="uq_pd_day"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    bucket_date: Mapped[date] = mapped_column(Date, index=True)
+    bucket_date: Mapped[date] = mapped_column(Date)
     warehouse_id: Mapped[int] = mapped_column(ForeignKey("warehouses.id", ondelete="CASCADE"))
     inbound_t: Mapped[float] = mapped_column(Float, default=0)     # принято, т
     outbound_t: Mapped[float] = mapped_column(Float, default=0)    # отгружено, т
@@ -208,12 +213,13 @@ class FactDispatcherShift(Base):
     """Шапка смены: персонал, бригада, подрядчики, ричстакеры, диспетчер."""
     __tablename__ = "fact_dispatcher_shift"
     __table_args__ = (
+        # Уникальность смены закрывает и выборки по report_date: дублирующий
+        # ix_ds_date убран (п. 32 TASKS2.md).
         UniqueConstraint("report_date", "shift", name="uq_ds_shift"),
-        Index("ix_ds_date", "report_date"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    report_date: Mapped[date] = mapped_column(Date, index=True)
+    report_date: Mapped[date] = mapped_column(Date)
     shift: Mapped[str] = mapped_column(String(8))          # 08-20 | 20-08
     sheet: Mapped[str] = mapped_column(String(64), default="")
     dispatcher: Mapped[str] = mapped_column(String(128), default="")
@@ -261,7 +267,7 @@ class FactVesselOperation(Base):
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    report_date: Mapped[date] = mapped_column(Date, index=True)
+    report_date: Mapped[date] = mapped_column(Date)
     shift: Mapped[str] = mapped_column(String(8))
     berth: Mapped[str] = mapped_column(String(32), default="")   # РП - 1/2
     vessel: Mapped[str] = mapped_column(String(128))
@@ -299,7 +305,7 @@ class FactRailOperation(Base):
     __table_args__ = (Index("ix_ro_date", "report_date", "shift"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    report_date: Mapped[date] = mapped_column(Date, index=True)
+    report_date: Mapped[date] = mapped_column(Date)
     shift: Mapped[str] = mapped_column(String(8))
     cargo_group: Mapped[str] = mapped_column(String(64))
     station_start: Mapped[float] = mapped_column(Float, default=0)   # на станции на начало смены
@@ -319,7 +325,7 @@ class FactTruckOperation(Base):
     __table_args__ = (Index("ix_to_date", "report_date", "shift"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    report_date: Mapped[date] = mapped_column(Date, index=True)
+    report_date: Mapped[date] = mapped_column(Date)
     shift: Mapped[str] = mapped_column(String(8))
     cargo_group: Mapped[str] = mapped_column(String(64))
     imp_unload: Mapped[float] = mapped_column(Float, default=0)     # принял / выгрузка, импорт
@@ -342,7 +348,7 @@ class FactVesselArrival(Base):
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    report_date: Mapped[date] = mapped_column(Date, index=True)
+    report_date: Mapped[date] = mapped_column(Date)
     shift: Mapped[str] = mapped_column(String(8))
     eta: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     vessel: Mapped[str] = mapped_column(String(128))
@@ -362,7 +368,7 @@ class FactRailArrival(Base):
     __table_args__ = (Index("ix_ra_date", "report_date", "shift"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    report_date: Mapped[date] = mapped_column(Date, index=True)
+    report_date: Mapped[date] = mapped_column(Date)
     shift: Mapped[str] = mapped_column(String(8))
     station: Mapped[str] = mapped_column(String(64), default="")
     cargo_group: Mapped[str] = mapped_column(String(64), default="")
@@ -381,7 +387,7 @@ class FactRailDeparture(Base):
     __table_args__ = (Index("ix_rd_date", "report_date", "shift"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    report_date: Mapped[date] = mapped_column(Date, index=True)
+    report_date: Mapped[date] = mapped_column(Date)
     shift: Mapped[str] = mapped_column(String(8))
     row_no: Mapped[int] = mapped_column(Integer, default=0)      # строка листа, для порядка
     move_date: Mapped[date | None] = mapped_column(Date, nullable=True)
@@ -404,7 +410,7 @@ class FactRailDelivery(Base):
     __table_args__ = (Index("ix_rl_date", "report_date", "shift"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    report_date: Mapped[date] = mapped_column(Date, index=True)
+    report_date: Mapped[date] = mapped_column(Date)
     shift: Mapped[str] = mapped_column(String(8))
     row_no: Mapped[int] = mapped_column(Integer, default=0)
     move_date: Mapped[date | None] = mapped_column(Date, nullable=True)
@@ -427,7 +433,7 @@ class FactPlatformBalance(Base):
     __table_args__ = (Index("ix_pb_date", "report_date", "shift"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    report_date: Mapped[date] = mapped_column(Date, index=True)
+    report_date: Mapped[date] = mapped_column(Date)
     shift: Mapped[str] = mapped_column(String(8))
     owner: Mapped[str] = mapped_column(String(64))
     total_cars: Mapped[float] = mapped_column(Float, default=0)       # всего
@@ -451,6 +457,29 @@ class SyncRun(Base):
     status: Mapped[str] = mapped_column(String(16), default="ok")  # ok | error
     rows: Mapped[int] = mapped_column(Integer, default=0)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Разбор среза 1С прошёл не идеально: строки, которые кабинет не понял
+    # (п. 18 TASKS2.md). Загрузка от этого не падает, но менеджер порта должен
+    # видеть, что витрина неполная, — иначе молча недосчитанные склады
+    # выглядят как реальная картина.
+    warnings: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class JobLock(Base):
+    """Аренда «тяжёлой» работы между процессами кабинета (п. 8 TASKS2.md).
+
+    Блокировка на threading.Lock бережёт только один процесс: при
+    UVICORN_WORKERS>1 планировщик заводится в каждом воркере, и витрину начинают
+    писать два процесса сразу. Строка здесь — общий мьютекс: взявший работу
+    вписывает владельца, отпускает её DELETE-ом, а просроченную аренду (процесс
+    ушёл вместе с контейнером) забирает следующий.
+    """
+
+    __tablename__ = "job_lock"
+
+    name: Mapped[str] = mapped_column(String(32), primary_key=True)   # vitrina_write
+    owner: Mapped[str] = mapped_column(String(64))                     # pid@host:uuid
+    acquired_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    note: Mapped[str | None] = mapped_column(String(128), nullable=True)
 
 
 class UserPreference(Base):
@@ -512,7 +541,9 @@ class Berth(Base):
     sort_order: Mapped[int] = mapped_column(Integer, default=0)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
 
-    placements: Mapped[list["VesselPlacement"]] = relationship(back_populates="berth")
+    placements: Mapped[list["VesselPlacement"]] = relationship(
+        back_populates="berth", foreign_keys="VesselPlacement.berth_id"
+    )
 
 
 class VesselPlacement(Base):
@@ -525,7 +556,9 @@ class VesselPlacement(Base):
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    berth_id: Mapped[int] = mapped_column(ForeignKey("berths.id", ondelete="RESTRICT"), index=True)
+    # Отдельный индекс на berth_id не нужен: ix_placement_berth начинается с
+    # него же — покрывающий индекс закрывает и проверку RESTRICT (п. 32 TASKS2.md).
+    berth_id: Mapped[int] = mapped_column(ForeignKey("berths.id", ondelete="RESTRICT"))
     # Устарело: раньше причал делился на «дорожки» (1..N). Теперь шкала другая —
     # длина причала сверху вниз, 10 м на ячейку. Колонку оставили, старые строки
     # никуда не деваются; на проверку конфликта она больше не влияет.
@@ -536,7 +569,19 @@ class VesselPlacement(Base):
     # и оно конфликтует со всем, что встанет рядом по времени. Так честнее, чем
     # молча разрешить вторую постановку.
     length_m: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Отметка швартовки бывает отрицательной: нос встал раньше начала шкалы
+    # своего причала, то есть судно заходит на причал выше по фронту.
     offset_m: Mapped[int] = mapped_column(Integer, default=0)
+
+    # Нахлёст на соседний причал: судно длиннее своего причала (или поставлено
+    # впритык к его краю) и частью корпуса стоит на соседнем участке фронта.
+    # Это не ошибка ввода: в живом плане суда заходят на соседние причала каждый
+    # день, и задача кабинета — показать занятые метры там, где они стоят, а не
+    # запретить постановку. Сколько метров ушло на соседа, отдельной колонкой не
+    # хранится: это считается из offset_m + length_m и метража причала (occupancy).
+    spill_berth_id: Mapped[int | None] = mapped_column(
+        ForeignKey("berths.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
 
     vessel: Mapped[str] = mapped_column(String(128))         # CROWN SAPPHIRE
     volume: Mapped[str | None] = mapped_column(String(64), nullable=True)   # «5 500», «(100+40) + 4 000»
@@ -563,4 +608,10 @@ class VesselPlacement(Base):
     created_by: Mapped[int | None] = mapped_column(Integer, nullable=True)
     updated_by: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
-    berth: Mapped[Berth] = relationship(back_populates="placements")
+    # У причала два лица: у него стоят (berth) и на него заходят чужие хвосты
+    # (spill_berth). Оба — внешний ключ на berths, поэтому foreign_keys обязан
+    # быть указан явно: иначе SQLAlchemy не понимает, какой из них «настоящий».
+    berth: Mapped[Berth] = relationship(
+        back_populates="placements", foreign_keys="VesselPlacement.berth_id"
+    )
+    spill_berth: Mapped["Berth | None"] = relationship(foreign_keys="VesselPlacement.spill_berth_id")

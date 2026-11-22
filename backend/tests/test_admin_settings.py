@@ -330,6 +330,31 @@ def test_push_auth_and_idempotency(client, admin_hdr, settings_snapshot):
         assert len(runs) == 2 and all(r.status == "ok" for r in runs)
 
 
+
+def test_push_s_oboydennymi_strokami_dokladnyvaetsya_v_zhurnale(client, admin_hdr, settings_snapshot):
+    """П. 18: битая строка не роняет срез, но о ней слышно — в ответе и в журнале."""
+    assert _patch(client, admin_hdr, {"onec.push_token": PUSH_TOKEN}).status_code == 200
+
+    payload = _push_payload()
+    payload["dynamics"].append({"warehouse_code": "WH-01", "date": "не дата", "processed_t": 5})
+
+    r = client.post(PUSH_URL, json=payload, headers={"X-OneC-Token": PUSH_TOKEN})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["status"] == "ok"
+    assert body["counts"]["dynamics"] == 2, "непонятную строку не записываем в загруженные"
+    assert body["warnings"] and any("динамик" in w for w in body["warnings"])
+
+    with SessionLocal() as db:
+        run = db.get(SyncRun, body["run_id"])
+        assert run.status == "ok" and run.warnings and "динамик" in run.warnings
+
+    journal = client.get("/api/admin/sync/runs", headers=admin_hdr)
+    assert journal.status_code == 200
+    row = next(x for x in journal.json() if x["id"] == body["run_id"])
+    assert row["warnings"] and "динамик" in row["warnings"]
+
+
 def test_push_bad_payload_is_400_not_500(client, admin_hdr, settings_snapshot):
     assert _patch(client, admin_hdr, {"onec.push_token": PUSH_TOKEN}).status_code == 200
     hdr = {"X-OneC-Token": PUSH_TOKEN}

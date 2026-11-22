@@ -210,13 +210,14 @@ class SyncRunOut(BaseModel):
     status: str
     rows: int
     error: str | None = None
+    # чем разбор среза 1С предупредил (п. 18 TASKS2.md); пусто — когда срез чист
+    warnings: str | None = None
 
 
 class SyncRunResult(SyncRunOut):
     """Результат загрузки: итог + разбивка строк по разделам среза."""
 
     counts: dict[str, int] = {}
-
 
 class PushOut(BaseModel):
     status: str
@@ -225,6 +226,58 @@ class PushOut(BaseModel):
     snapshot_at: datetime
     rows: int
     counts: dict[str, int] = {}
+    # список, а не строка: 1С забирает ответ целиком и кладёт себе в журнал
+    warnings: list[str] = []
+
+
+# ------------------------------------------------- база данных кабинета (п. 26–28) --
+
+class DbParts(BaseModel):
+    """Части, из которых кабинет собирает URL базы.
+
+    Наружу пароль не уходит никогда: вместо него `password_set` и маска `***`,
+    которую UI возвращает при сохранении, если пароль не меняли.
+    """
+
+    dialect: str = "postgresql"
+    host: str = ""
+    port: int = 5432
+    user: str = ""
+    database: str = ""
+
+
+class DbCandidate(BaseModel):
+    """Кандидат из формы: те же части, но пароль может прийти (или маска)."""
+
+    dialect: str = Field(default="postgresql", max_length=16)
+    host: str = Field(default="", max_length=200)
+    port: int = Field(default=5432, ge=1, le=65535)
+    user: str = Field(default="", max_length=200)
+    password: str | None = Field(default=None, max_length=200)
+    database: str = Field(default="", max_length=500)
+
+
+class DbConfigOut(BaseModel):
+    source: str                      # settings | env
+    url: str                         # маска той базы, на которой кабинет живёт сейчас
+    server_version: str
+    parts: DbParts
+    password_set: bool
+    env_url: str                     # маска DATABASE_URL — куда вернёт «вернуть ENV»
+    env_parts: DbParts
+
+
+class DbTestOut(BaseModel):
+    ok: bool
+    version: str | None = None
+    error: str | None = None
+    url: str
+
+
+class RestartOut(BaseModel):
+    status: str
+    note: str
+
 
 
 class AuditOut(BaseModel):
@@ -311,9 +364,14 @@ class PlacementIn(BaseModel):
     berth_id: int
     # устарело: шкала внутри причала теперь метровая (offset_m + length_m)
     lane: int = Field(default=1, ge=1, le=12)
-    # длина судна и отметка швартовки в метрах от начала причала
+    # длина судна и отметка швартовки в метрах от начала причала; отметка бывает
+    # отрицательной — это нос раньше начала шкалы, то есть заход на причал выше
     length_m: int | None = Field(default=None, ge=1, le=500)
-    offset_m: int = Field(default=0, ge=0, le=5000)
+    offset_m: int = Field(default=0, ge=-2000, le=5000)
+    # причал, на который судно выходит за габарит своего (нахлёст); правила —
+    # в services/vessels.validate, схема только не даёт прислать чушь
+    spill_berth_id: int | None = None
+
     vessel: str = Field(min_length=2, max_length=128)
     volume: str | None = Field(default=None, max_length=64)
     cargo: str | None = Field(default=None, max_length=64)
@@ -332,7 +390,11 @@ class PlacementUpdate(BaseModel):
     berth_id: int | None = None
     lane: int | None = Field(default=None, ge=1, le=12)
     length_m: int | None = Field(default=None, ge=1, le=500)
-    offset_m: int | None = Field(default=None, ge=0, le=5000)
+    offset_m: int | None = Field(default=None, ge=-2000, le=5000)
+    # null в теле — «нахлёст снять»; отсутствие поля — «оставить как было»
+    # (различает их model_fields_set, как и length_m)
+    spill_berth_id: int | None = None
+
     vessel: str | None = Field(default=None, min_length=2, max_length=128)
     volume: str | None = Field(default=None, max_length=64)
     cargo: str | None = Field(default=None, max_length=64)
@@ -351,6 +413,10 @@ class PlacementOut(BaseModel):
     lane: int
     length_m: int | None
     offset_m: int
+    # причал, на который судно выходит за габарит (нахлёст); сколько именно
+    # метров — считает фронт по occupancy(), отдельного поля в ответе нет
+    spill_berth_id: int | None
+
     vessel: str
     volume: str | None
     cargo: str | None

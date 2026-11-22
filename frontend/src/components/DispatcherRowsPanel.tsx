@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { api, type DispatcherRowsResult, type DispatcherRowKind } from "../api";
+import { api, isAbortError, type DispatcherRowsResult, type DispatcherRowKind } from "../api";
 import { dmy, nf } from "../format";
 
 /**
@@ -28,14 +28,22 @@ export function DispatcherRowsPanel({
 
   useEffect(() => {
     let alive = true;
+    // отмена вместо «дождётся и перетрёт» (TASKS2.md п.24): смена разреза
+    // или закрытие панели отменяют прежнюю страницу строк, а не ждут её
+    const ac = new AbortController();
     setData(null);
     setError("");
     api
-      .dispatcherRows({ from, to, shift, kind, key: rowKey ?? undefined })
+      .dispatcherRows({ from, to, shift, kind, key: rowKey ?? undefined }, ac.signal)
       .then((d) => alive && setData(d))
-      .catch((e) => alive && setError(e instanceof Error ? e.message : "Не удалось загрузить строки"));
+      .catch((e) => {
+        // отмена — не ошибка (TASKS2.md п.24): плашка обязана молчать
+        if (isAbortError(e)) return;
+        if (alive) setError(e instanceof Error ? e.message : "Не удалось загрузить строки");
+      });
     return () => {
       alive = false;
+      ac.abort();
     };
   }, [kind, rowKey, from, to, shift]);
 
@@ -56,6 +64,7 @@ export function DispatcherRowsPanel({
       await api.dispatcherRowsCsv({ from, to, shift, kind, key: rowKey ?? undefined });
       setError("");
     } catch (e) {
+      if (isAbortError(e)) return;
       setError(e instanceof Error ? e.message : "Не удалось выгрузить CSV");
     } finally {
       setCsvBusy(false);

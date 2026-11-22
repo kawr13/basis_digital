@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api, type CargoReport, type ProcessingReport } from "../api";
+import { api, isAbortError, type CargoReport, type ProcessingReport } from "../api";
 import { asOf, dayFull, dayLabel, dmy, nf } from "../format";
 
 /**
@@ -58,6 +58,9 @@ export function DrilldownPanel({
   // номер запроса: если пользователь переключил день/склад, пока запрос в полёте,
   // ответ отсталого запроса не должен перезатереть новые данные
   const seq = useRef(0);
+  // общий контроллер (TASKS2.md п.24): закрытие панели или переключение цели
+  // отменяют оба отчёта прежней загрузки, а не ждут своих ответов
+  const ctrl = useRef<AbortController | null>(null);
 
   const period = day
     ? { from: day, to: day }
@@ -65,18 +68,30 @@ export function DrilldownPanel({
 
   const load = useCallback(async () => {
     const my = ++seq.current;
+    ctrl.current?.abort();
+    const ac = new AbortController();
+    ctrl.current = ac;
     setBusy(true);
     try {
       const warehouses =
         warehouseId != null ? [warehouseId] : scopeKey ? scopeKey.split(",").map(Number) : undefined;
-      const report = await api.reportProcessing({ from: period.from, to: period.to, warehouses });
-      // чем загружен склад — только в режиме «склад»: остатки отдаются по последнему срезу
-      const balance = warehouseId != null ? await api.reportCargo({ warehouses: [warehouseId] }) : null;
+      // два независимых отчёта одним `Promise.all` (TASKS2.md п.24): остатки
+      // не зависят от обработки, а последовательное ожидание удваивало время
+      // открытия панели; отмена — одна на оба
+      const [report, balance] = await Promise.all([
+        api.reportProcessing({ from: period.from, to: period.to, warehouses }, ac.signal),
+        // чем загружен склад — только в режиме «склад»: остатки отдаются по последнему срезу
+        warehouseId != null
+          ? api.reportCargo({ warehouses: [warehouseId] }, ac.signal)
+          : Promise.resolve(null),
+      ]);
       if (my !== seq.current) return;
       setProc(report);
       setCargo(balance);
       setError("");
     } catch (e) {
+      // отмена — не ошибка (TASKS2.md п.24): плашка обязана молчать
+      if (isAbortError(e)) return;
       if (my !== seq.current) return;
       setError(e instanceof Error ? e.message : "Не удалось получить детализацию");
     } finally {
@@ -87,6 +102,13 @@ export function DrilldownPanel({
 
   useEffect(() => {
     load();
+    return () => {
+      // закрытие/пересборка панели (TASKS2.md п.24): подъём номера — чтобы
+      // опоздавший ответ отсекался проверкой `my !== seq.current` даже без
+      // отмены, и отмена летящих запросов — мёртвой панели они не нужны
+      ++seq.current;
+      ctrl.current?.abort();
+    };
   }, [load]);
 
   // Esc закрывает панель с клавиатуры.

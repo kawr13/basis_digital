@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta
 
+from app.services.plan_pdf import ARROW_GAP
+
 PERIOD = {"from": "2026-05-01", "to": "2026-05-31"}
 
 
@@ -337,7 +339,9 @@ def test_free_offset_suggests_free_spot(client, admin_hdr):
                            "length_m": 40},
                    headers=admin_hdr)
     assert r.status_code == 200, r.text
-    assert r.json()["offset_m"] == 50 and r.json()["fits"] is True
+    assert r.json()["offset_m"] == 60 and r.json()["fits"] is True
+    # 60, а не 50: подсказка обязана предлагать место, где не придётся ловить 409,
+    # а между бортами обязано оставаться `MIN_GAP_M` = 10 м
 
 
 def test_length_cells_scale(client, admin_hdr):
@@ -363,10 +367,38 @@ def test_touching_slots_do_not_conflict(client, admin_hdr):
     assert b.status_code == 201, b.text
 
 
-def test_bad_slot_time(client, admin_hdr):
-    r = _mk(client, admin_hdr, code="РП-5", vessel="WRONG TIME", start="2026-05-03T07:00:00",
-            end="2026-05-04T00:00:00")
-    assert r.status_code == 400 and "слот" in r.json()["detail"].lower()
+def test_time_need_not_be_slot_aligned(client, admin_hdr):
+    """Судно приходит и уходит, когда ему удобно, а не когда начинается слот.
+
+    22:00 и 06:30 — рабочие случаи: слот в 6 часов остался только шкалой, которой
+    меряют стоянку на полосе, и требовать «только 00/06/12/18» значило бы терять
+    живое время прямо в окне постановки.
+    """
+    r = _mk(client, admin_hdr, code="РП-5", vessel="OFF GRID", start="2026-05-03T22:00:00",
+            end="2026-05-04T06:30:00")
+    assert r.status_code == 201, r.text
+    row = r.json()
+    assert row["starts_at"] == "2026-05-03T22:00:00" and row["ends_at"] == "2026-05-04T06:30:00"
+
+
+def test_off_grid_times_still_clash_by_time(client, admin_hdr):
+    """Отмена кратности слоту не отменяет смысл плана: минута внахлёст видна.
+
+    Касание границ конфликтом НЕ считается: ушедшее в 06:00 судно освобождает
+    причал к 06:00 (почему — см. `test_left_at_2200_frees_the_berth_...`).
+    Настоящее наложение — минута в чужую стоянку — ловится ровно так же, как
+    ловилось на шкале шестичасовых слотов, только теперь с точностью до минуты.
+    """
+    a = _mk(client, admin_hdr, code="РП-6", vessel="UNTIL SIX", start="2026-06-10T22:00:00",
+            end="2026-06-11T06:00:00")
+    assert a.status_code == 201, a.text
+    b = _mk(client, admin_hdr, code="РП-6", vessel="AT SIX", start="2026-06-11T06:00:00",
+            end="2026-06-11T09:00:00")
+    assert b.status_code == 201, f"впритык по времени не пустило: {b.status_code} {b.text}"
+    c = _mk(client, admin_hdr, code="РП-6", vessel="IN SIX", start="2026-06-11T05:50:00",
+            end="2026-06-11T09:00:00")
+    assert c.status_code == 409, "десять минут в чужой стоянке не считаются конфликтом"
+    assert "UNTIL SIX" in c.text, c.text
 
 
 def test_end_before_start(client, admin_hdr):
@@ -1033,11 +1065,12 @@ def test_plan_pdf_bar_and_its_waiting_chip_are_tied_by_one_line(client, admin_hd
         chip_cx = (chip[1] + chip[3]) / 2
 
         # Одно целое соединение полосы и её чипа: старт — ровно нижняя грань
-        # полосы, конец — верхняя грань чипа (до неё линия не доезжает 5.5 pt,
-        # которые arrow_straight оставляет под остриём).
+        # полосы, конец — верхняя грань чипа (до неё линия не доезжает
+        # `ARROW_GAP` pt, которые `arrow_straight` оставляет под остриём; число
+        # берётся из рисовальщика, иначе подгонка острия ломала бы тест).
         line = [s for s in strokes if s[0] == 0
                 and abs(max(s[2], s[4]) - bar_y) <= 0.6
-                and chip_top - 0.6 <= min(s[2], s[4]) <= chip_top + 6.5]
+                and chip_top - 0.6 <= min(s[2], s[4]) <= chip_top + ARROW_GAP + 0.5]
         assert len(line) == 1, f"полосу и её чип должна соединять одна линия: {line}"
         seg = line[0]
         x_bar = seg[1] if seg[2] > seg[4] else seg[3]
@@ -1058,7 +1091,7 @@ def test_plan_pdf_bar_and_its_waiting_chip_are_tied_by_one_line(client, admin_hd
         # инверсия старой проверки: от блока причала к чипу теперь обязан идти
         # ровно один отрезок — та самая линия, которой здесь «не должно быть»
         across = [s for s in strokes if s[0] == 0
-                  and min(s[2], s[4]) < chip_top + 8  # 5.5 pt под остриём не доезжают
+                  and min(s[2], s[4]) < chip_top + ARROW_GAP + 1  # под остриём не доезжают
                   and max(s[2], s[4]) > chip_top + 20]
         assert len(across) == 1, f"к чипу ведёт не одна линия: {across}"
     finally:

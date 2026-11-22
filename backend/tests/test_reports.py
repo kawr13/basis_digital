@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 
+from app.services.reports import CAPACITY_TREND_MAX_DAYS
+
 
 def test_processing_report_scoped_to_manager(client, manager_hdr):
     r = client.get("/api/reports/processing", headers=manager_hdr)
@@ -111,6 +113,21 @@ def test_capacity_trend(client, admin_hdr):
     rows = r.json()["rows"]
     assert rows
     assert 0 <= rows[0]["utilization"] <= 3
+
+
+def test_capacity_trend_period_capped(client, admin_hdr):
+    """TASKS2.md п.34: период выше потолка — 400, ровно потолку — 200; JSON и CSV одинаково."""
+    end = date.today()
+    over = end - timedelta(days=CAPACITY_TREND_MAX_DAYS)       # на сутки длиннее кэпа
+    exact = end - timedelta(days=CAPACITY_TREND_MAX_DAYS - 1)  # ровно кэп
+    qs_over = f"?from={over.isoformat()}&to={end.isoformat()}"
+    qs_max = f"?from={exact.isoformat()}&to={end.isoformat()}"
+    for path in ("/api/reports/capacity-trend", "/api/reports/capacity-trend.csv"):
+        bad = client.get(path + qs_over, headers=admin_hdr)
+        assert bad.status_code == 400, path
+        assert str(CAPACITY_TREND_MAX_DAYS) in bad.json()["detail"]
+        ok = client.get(path + qs_max, headers=admin_hdr)
+        assert ok.status_code == 200, path
 
 
 def test_reports_need_auth(client):

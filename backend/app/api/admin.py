@@ -97,6 +97,9 @@ def update_user(user_id: int, payload: UserUpdate, db: Session = Depends(get_db)
             raise HTTPException(status.HTTP_400_BAD_REQUEST, msg)
         user.password_hash = hash_password(payload.password)
         user.password_changed_at = utcnow()
+        # Сброс пароля = «человека могли уволить, а сессия осталась»: без отзыва
+        # refresh украденный токен жил бы до конца срока действия.
+        _revoke_tokens(db, user)
         user.failed_attempts = 0
         user.locked_until = None
     if payload.warehouse_ids is not None:
@@ -120,6 +123,7 @@ def reset_password(user_id: int, db: Session = Depends(get_db), actor: User = De
     user.password_changed_at = utcnow()
     user.failed_attempts = 0
     user.locked_until = None
+    _revoke_tokens(db, user)
     db.add(AuditLog(user_id=actor.id, login=actor.login, action="admin.reset_password",
                     detail=f"target={user.login}"))
     db.commit()

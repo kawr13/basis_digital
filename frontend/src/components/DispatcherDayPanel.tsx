@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { api, type DispatcherDay } from "../api";
+import { api, isAbortError, type DispatcherDay } from "../api";
 import { dayFull, dmyhm, nf, pct } from "../format";
 
 /**
@@ -23,14 +23,22 @@ export function DispatcherDayPanel({
 
   useEffect(() => {
     let alive = true;
+    // отмена вместо «дождётся и перетрёт» (TASKS2.md п.24): смена дня/смены
+    // или закрытие панели отменяют прежний запрос, а не ждут его ответа
+    const ac = new AbortController();
     setData(null);
     setError("");
     api
-      .dispatcherDay(day, shift)
+      .dispatcherDay(day, shift, ac.signal)
       .then((d) => alive && setData(d))
-      .catch((e) => alive && setError(e instanceof Error ? e.message : "Не удалось загрузить день"));
+      .catch((e) => {
+        // отмена — не ошибка (TASKS2.md п.24): плашка обязана молчать
+        if (isAbortError(e)) return;
+        if (alive) setError(e instanceof Error ? e.message : "Не удалось загрузить день");
+      });
     return () => {
       alive = false;
+      ac.abort();
     };
   }, [day, shift]);
 

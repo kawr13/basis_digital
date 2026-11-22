@@ -1,0 +1,100 @@
+# CI кабинета (TASKS2.md, п. 23): pytest бэкенда и сборка фронта на каждый
+# push и pull request.
+#
+# Python один — 3.12, а не матрица 3.12/3.13: прод-образ это python:3.12-slim
+# (backend/Dockerfile), и CI должен проверять ровно тот интерпретатор, который
+# поедет на сервер. Матрица удваивает минуты раннеров и очередь, а ловила бы
+# расхождения, которые никто не чинит, потому что 3.13 в проде не крутится.
+#
+# PostgreSQL-сервис не поднят намеренно: тесты кабинета работают на SQLite
+# (backend/tests/conftest.py подставляет sqlite-файл во временном каталоге),
+# postgres им не нужен.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    name: Backend (pytest, Python 3.12)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          # Кэш пилим по тому же файлу, из которого ставим: требования
+          # кабинета живут в requirements-dev.txt (он же полный, не «поверх» base).
+          cache-dependency-path: backend/requirements-dev.txt
+
+      - name: Установка зависимостей
+        run: python -m pip install -r backend/requirements-dev.txt
+
+      # Тесты сами кладут sqlite во временный каталог — никакой БД не нужно.
+      - name: Тесты
+        working-directory: backend
+        run: python -m pytest -q
+
+  frontend:
+    name: Frontend (tsc + vite build, Node 22)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # npm ci, а не npm install: собираем ровно по lock-файлу.
+      - name: Установка зависимостей
+        working-directory: frontend
+        run: npm ci
+
+      # tsc -b отдельным шагом: при ошибке типов в логе видно файлы,
+      # а не только «build failed» из составного npm-скрипта.
+      - name: Типы
+        working-directory: frontend
+        run: npx tsc -b --pretty false
+
+      - name: Сборка
+        working-directory: frontend
+        run: npm run build
+
+  # Конфигурация выката (п. 23 TASKS2.md): pytest не видит shell-скрипты, compose
+  # и nginx, а живут кабинеты именно на них. Падение любой проверки красит
+  # сборку: каждый шаг — отдельная команда без continue-on-error.
+  config:
+    name: Конфиги (shell, compose, nginx)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # bash -n ловит синтаксические ошибки deploy.sh и backup.sh до сервера.
+      - name: Синтаксис shell-скриптов
+        run: bash -n deploy.sh deploy/backup.sh
+
+      # compose config -q: синтаксис и подстановки. POSTGRES_PASSWORD и SECRET_KEY
+      # обязательны (`:?`), на CI контейнеры не запускаются — подойдут заглушки.
+      # Оверлеи проверяются тем же прогоном: они тоже часть выката.
+      - name: docker compose config
+        run: |
+          export POSTGRES_PASSWORD=ci-secret SECRET_KEY=ci-secret
+          docker compose -f docker-compose.yml config -q
+          docker compose -f docker-compose.yml -f deploy/nginx/docker-compose.host-nginx.yml config -q
+          docker compose -f docker-compose.yml -f deploy/caddy/docker-compose.caddy.yml config -q
+
+      # nginx -t на том же образе (nginx:1.27-alpine) и том же пути внутри образа,
+      # что даёт frontend/Dockerfile: собирать весь образ фронта ради проверки
+      # конфига не нужно — nginx -t не требует ни статики, ни бэкенда.
+      - name: nginx -t на конфиге фронта
+        run: |
+          docker run --rm \
+            -v "$PWD/frontend/nginx.conf:/etc/nginx/conf.d/default.conf:ro" \
+            nginx:1.27-alpine nginx -t

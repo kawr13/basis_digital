@@ -12,13 +12,14 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..db import get_db
-from ..deps import require_roles
-from ..models import Role, SyncRun, User
+from ..db import SessionLocal, EngineSwapError, get_db, masked_url
+from ..deps import client_ip, require_roles
+from ..models import AuditLog, Role, SyncRun, User
 from ..onec.sync import SYNC_BUSY, get_source, try_sync
-from ..schemas import OneCCheck, OneCTestOut, SettingsEnvelope, SyncRunOut, SyncRunResult
-from ..services import app_settings
-from ..services import scheduling
+from ..schemas import (DbCandidate, DbConfigOut, DbTestOut, OneCCheck, OneCTestOut, RestartOut,
+                       SettingsEnvelope, SyncRunOut, SyncRunResult)
+from ..services import app_settings, dbconfig, lifecycle, scheduling
+from ..services import job_lock
 
 log = logging.getLogger("statcab.admin.settings")
 
@@ -123,7 +124,7 @@ def manual_sync(days: int | None = Query(default=None, ge=1, le=366),
     return SyncRunResult(
         id=run.id, started_at=run.started_at, finished_at=run.finished_at,
         source=run.source, status=run.status, rows=run.rows, error=run.error,
-        counts={"rows": run.rows},
+        warnings=run.warnings, counts={"rows": run.rows},
     )
 
 
@@ -133,3 +134,112 @@ def sync_history(limit: int = Query(default=20, ge=1, le=200),
     """Последние загрузки (включая push) — свежие сверху."""
     return list(db.scalars(select(SyncRun).order_by(SyncRun.started_at.desc(), SyncRun.id.desc())
                            .limit(limit)))
+
+
+# ------------------------------------------------- база данных кабинета (п. 26–28) --
+# Пароль наружу не отдаётся ни в одном ответе: вместо него маска и флаг
+# `password_set`. Каждое действие оставляет след в аудите вместе с IP.
+
+def _audit(db: Session, actor: User, request: Request, action: str, detail: str) -> None:
+    db.add(AuditLog(user_id=actor.id, login=actor.login, action=action,
+                    ip=client_ip(request), detail=detail[:500]))
+    db.commit()
+
+
+@router.get("/db", response_model=DbConfigOut)
+def read_db(_: User = Depends(admin_only), db: Session = Depends(get_db)):
+    """Части текущей базы, её источник и версия сервера."""
+    return DbConfigOut(**dbconfig.public(db))
+
+
+@router.post("/db/test", response_model=DbTestOut)
+def test_db(payload: DbCandidate, request: Request,
+            actor: User = Depends(admin_only), db: Session = Depends(get_db)):
+    """Проверить кандидата: подключиться, `SELECT 1`, отпустить. Ничего не меняем.
+
+    Именно для «сначала убедиться» эта кнопка и существует: админ обязан видеть,
+    что база отвечает, ДО того как кабинет на неё переедет.
+    """
+    candidate = dbconfig.with_password(db, payload.model_dump())
+    result = dbconfig.test(candidate)
+    _audit(db, actor, request, "admin.db_test",
+           f"{dbconfig.masked(candidate)}: " +
+           (f"ok ({result['version']})" if result["ok"] else f"отказ — {result['error']}"))
+    return DbTestOut(**result)
+
+
+@router.put("/db", response_model=DbConfigOut)
+def apply_db(payload: DbCandidate, request: Request,
+             actor: User = Depends(admin_only), db: Session = Depends(get_db)):
+    """Сохранить части и переехать на новую базу без перезапуска сервиса.
+
+    Успех — только если новая база ответила и схема на ней подготовлена. Иначе
+    кабинет остаётся на прежней базе и отвечает 400 с объяснением: опечатка в
+    порте не имеет права оставлять порт без кабинета.
+
+    Внимание: начатые в эту секунду запросы падают — соединения прежней базы
+    закрываются. Об этом предупреждает форма.
+    """
+    candidate = dbconfig.with_password(db, payload.model_dump())
+    shown = dbconfig.masked(candidate)
+    try:
+        dbconfig.apply(db, candidate, actor)
+    except ValueError as exc:                       # конфигурация собрана неверно
+        _audit(db, actor, request, "admin.db_apply", f"{shown}: отказ — {exc}")
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
+    except EngineSwapError as exc:                  # база не ответила / нет прав на DDL
+        _audit(db, actor, request, "admin.db_apply", f"{shown}: отказ — {exc}")
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    # Сессия запроса привязана к прежней базе — аудит переезда пишем там же, где
+    # лежит указатель на новую (bootstrap-база), иначе запись о переезде уедет
+    # в базу, которую кабинет уже не использует.
+    _audit(db, actor, request, "admin.db_apply", f"{shown}: применено")
+    # Расписание перечитывает НОВАЯ база: интервал синхронизации лежит в её
+    # настройках, а сессия запроса привязана к прежней.
+    with SessionLocal() as fresh:
+        scheduling.reschedule(getattr(request.app.state, "scheduler", None), fresh)
+    return DbConfigOut(**dbconfig.public(db))
+
+
+@router.delete("/db", response_model=DbConfigOut)
+def revert_db(request: Request, actor: User = Depends(admin_only),
+              db: Session = Depends(get_db)):
+    """Вернуться к `DATABASE_URL` из окружения.
+
+    Если к прежней базе подключиться не удалось (например, сервер уже выключен),
+    кабинет остаётся на текущей базе и отвечает 400 — тогда помогает перезапуск
+    сервиса: он стартует на bootstrap-URL и игнорит указатель только после
+    «вернуть ENV».
+    """
+    try:
+        dbconfig.revert(db, actor)
+    except EngineSwapError as exc:
+        _audit(db, actor, request, "admin.db_revert", f"отказ — {exc}")
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    with SessionLocal() as fresh:
+        fresh.add(AuditLog(user_id=actor.id, login=actor.login, action="admin.db_revert",
+                           ip=client_ip(request), detail=f"вернулись к {masked_url()}"))
+        fresh.commit()
+        # Интервал снова читается из базы окружения — той, куда вернулись.
+        scheduling.reschedule(getattr(request.app.state, "scheduler", None), fresh)
+    return DbConfigOut(**dbconfig.public(db))
+
+
+@router.post("/service/restart", status_code=202, response_model=RestartOut)
+def restart_service(request: Request, actor: User = Depends(admin_only),
+                    db: Session = Depends(get_db)):
+    """Перезапустить сервис: процесс завершается, супервизор поднимает заново.
+
+    Пока идёт загрузка витрины или импорт отчёта диспетчера — 409: рвать
+    посередине нельзя, а супервизор поднимет кабинет на полуслове.
+    """
+    busy = job_lock.info(db, job_lock.VITRINA)
+    if busy:
+        raise HTTPException(status.HTTP_409_CONFLICT,
+                            "Сейчас идёт загрузка данных — перезапросите перезапуск, "
+                            "когда она закончится.")
+    _audit(db, actor, request, "admin.service_restart", "перезапуск по запросу администратора")
+    lifecycle.schedule_exit()
+    return RestartOut(status="restarting",
+                      note="Процесс завершается; Docker или systemd поднимут кабинет "
+                           "через несколько секунд.")

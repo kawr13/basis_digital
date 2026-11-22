@@ -478,7 +478,45 @@ export type SyncRun = {
   status: string;
   rows: number;
   error: string | null;
+  /** Чем разбор среза предупредил (п. 18 TASKS2.md): битые строки 1С. */
+  warnings?: string | null;
   counts?: Record<string, number>;
+};
+
+/** Части, из которых кабинет собирает URL базы (п. 26–28 TASKS2.md). */
+export type DbParts = {
+  dialect: string;
+  host: string;
+  port: number;
+  user: string;
+  database: string;
+};
+
+/** То, что отправляет форма: пароль — либо новый, либо null («не меняли»). */
+export type DbCandidate = {
+  dialect: string;
+  host: string;
+  port: number;
+  user: string;
+  database: string;
+  password: string | null;
+};
+
+export type DbConfig = {
+  source: string;
+  url: string;
+  server_version: string;
+  parts: DbParts;
+  password_set: boolean;
+  env_url: string;
+  env_parts: DbParts;
+};
+
+export type DbTestResult = {
+  ok: boolean;
+  version: string | null;
+  error: string | null;
+  url: string;
 };
 
 export type AuditEntry = {
@@ -524,18 +562,62 @@ export function setOnSessionExpired(cb: () => void) {
   onExpired = cb;
 }
 
+/**
+ * Отмена запроса вызывающей стороной (TASKS2.md п.24): `DOMException` с
+ * `name === "AbortError"`. Проверка обязана быть отдельной: `DOMException
+ * instanceof Error` истинно, поэтому `errText` и `e instanceof Error ?
+ * e.message` без неё показали бы в плашке служебное «signal is aborted
+ * without reason» — а отменённый ответ странице просто больше не нужен,
+ * это не ошибка и красной плашки быть не должно.
+ */
+export function isAbortError(e: unknown): boolean {
+  return e instanceof DOMException && e.name === "AbortError";
+}
+
+/**
+ * Таймаут запроса (TASKS2.md п.24): подвешенный бэкенд не должен держать
+ * запрос вечно — страница висела бы со спиннером, пока браузер сам не
+ * устанет. Превышение — `TimeoutError`, отмена вызывающей стороной —
+ * `AbortError`: первое превращаем в понятную ошибку, вторую оставляем как
+ * есть — такой ответ странице больше не нужен, и она сама его проигнорирует.
+ */
+const REQUEST_TIMEOUT_MS = 30_000;
+
+/**
+ * Таймаут и сигнал вызывающей стороны в одном: `AbortSignal.any`. Ручной
+ * relay-вариант (слушатель `{once: true}` на сигнале вызывающей стороны)
+ * убран (TASKS2.md п.24): он не снимался по завершении fetch, а страницы
+ * держат один контроллер на всю жизнь — слушатель копился бы на сигнале
+ * до его гибели. `AbortSignal.any` есть во всех целевых браузерах кабинета,
+ * тип — в DOM-библиотеке TS 5.6, так что ветка отката не нужна.
+ */
+function withTimeout(signal: AbortSignal | null | undefined): AbortSignal {
+  const timeout = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
+  return signal ? AbortSignal.any([signal, timeout]) : timeout;
+}
+
 async function raw(path: string, init: RequestInit = {}) {
-  const res = await fetch(path, {
-    credentials: "include",
-    ...init,
-    headers: {
-      Accept: "application/json",
-      ...(init.body ? { "Content-Type": "application/json" } : {}),
-      ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
-      ...(init.headers || {}),
-    },
-  });
-  return res;
+  // `init.signal` — отмена вызывающей стороны; доходит сюда через `init`
+  // из `request`/`requestBlob`, повторяющих запрос транзитом.
+  const signal = withTimeout(init.signal);
+  try {
+    return await fetch(path, {
+      credentials: "include",
+      ...init,
+      signal,
+      headers: {
+        Accept: "application/json",
+        ...(init.body ? { "Content-Type": "application/json" } : {}),
+        ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+        ...(init.headers || {}),
+      },
+    });
+  } catch (e) {
+    if (e instanceof DOMException && e.name === "TimeoutError") {
+      throw new ApiError(408, `Сервер не ответил за ${REQUEST_TIMEOUT_MS / 1000} с — попробуйте ещё раз`);
+    }
+    throw e;
+  }
 }
 
 async function refresh(): Promise<boolean> {
@@ -643,8 +725,12 @@ export type Placement = {
   lane: number;
   /** длина судна в метрах; null — неизвестна, занимает причал до конца */
   length_m: number | null;
-  /** отметка швартовки в метрах от начала причала */
+  /** отметка швартовки в метрах от начала причала; отрицательная — нос вышел
+   *  за начало причала, то есть стоит на причале выше по фронту */
   offset_m: number;
+  /** причал, на который судно выходит корпусом (нахлёст); null — стоит целиком
+   *  у своего причала. Соседний по фронту, метры соседа в это время заняты */
+  spill_berth_id?: number | null;
   vessel: string;
   volume: string | null;
   cargo: string | null;
@@ -670,6 +756,8 @@ export type PlacementInput = {
   lane: number;
   length_m: number | null;
   offset_m: number;
+  /** см. Placement.spill_berth_id */
+  spill_berth_id?: number | null;
   vessel: string;
   volume?: string | null;
   cargo?: string | null;
@@ -726,10 +814,12 @@ function saveBlob(blob: Blob, filename: string) {
   const a = document.createElement("a");
   a.href = url;
   a.download = filename;
-  document.body.appendChild(a);
   a.click();
   a.remove();
-  URL.revokeObjectURL(url);
+  // Отложенный revoke (TASKS2.md п.24): Firefox и Safari в момент клика ещё
+  // не отдали blob загрузчику — синхронный revoke обрывает скачивание, файл
+  // теряется. Те же 10 с, что и для PDF на «Постановке судов».
+  window.setTimeout(() => URL.revokeObjectURL(url), 10_000);
 }
 
 export const api = {
@@ -743,10 +833,15 @@ export const api = {
   },
   logout: () => request<void>("/api/auth/logout", { method: "POST" }),
   me: () => request<User>("/api/auth/me"),
-  summary: () => request<Summary>("/api/metrics/summary"),
-  cargo: () => request<CargoBalance>("/api/metrics/cargo-balance"),
-  capacity: () => request<Capacity>("/api/metrics/warehouse-capacity"),
-  dynamics: (days = 14) => request<Dynamics>(`/api/metrics/processing-dynamics?days=${days}`),
+  // `signal` у периодных и тяжёлых запросов (TASKS2.md п.24) — отмена
+  // вызывающей стороной: страница, у которой сменился период или которая
+  // закрыта, не обязана дожидаться ответа. Не передан — запрос живёт до
+  // ответа или таймаута, как раньше.
+  summary: (signal?: AbortSignal) => request<Summary>("/api/metrics/summary", { signal }),
+  cargo: (signal?: AbortSignal) => request<CargoBalance>("/api/metrics/cargo-balance", { signal }),
+  capacity: (signal?: AbortSignal) => request<Capacity>("/api/metrics/warehouse-capacity", { signal }),
+  dynamics: (days = 14, signal?: AbortSignal) =>
+    request<Dynamics>(`/api/metrics/processing-dynamics?days=${days}`, { signal }),
 
   // персональные настройки (раскладка дашборда, фильтры отчётов)
   preferences: () => request<Record<string, unknown>>("/api/settings/preferences"),
@@ -760,9 +855,14 @@ export const api = {
 
   // отчёты
   reportWarehouses: () => request<ReportWarehouse[]>("/api/reports/warehouses"),
-  reportProcessing: (p: ReportParams) => request<ProcessingReport>(`/api/reports/processing?${qs(p)}`),
-  reportCargo: (p: ReportParams) => request<CargoReport>(`/api/reports/cargo?${qs(p)}`),
-  reportCapacity: (p: ReportParams) => request<CapacityTrendReport>(`/api/reports/capacity-trend?${qs(p)}`),
+  // `signal` — та же отмена вызывающей стороной, что у метрик (TASKS2.md
+  // п.24): переключение вкладки/периода отменяет прежний отчёт.
+  reportProcessing: (p: ReportParams, signal?: AbortSignal) =>
+    request<ProcessingReport>(`/api/reports/processing?${qs(p)}`, { signal }),
+  reportCargo: (p: ReportParams, signal?: AbortSignal) =>
+    request<CargoReport>(`/api/reports/cargo?${qs(p)}`, { signal }),
+  reportCapacity: (p: ReportParams, signal?: AbortSignal) =>
+    request<CapacityTrendReport>(`/api/reports/capacity-trend?${qs(p)}`, { signal }),
 
   // публичные настройки: пороги и периоды — чтобы UI и бэкенд считали одинаково
   publicSettings: () => request<Record<string, number | string>>("/api/settings/public"),
@@ -793,24 +893,28 @@ export const api = {
 
   // ------------------------------------- статистика: отчёт диспетчера порта ---
   dispatcherMeta: () => request<DispatcherMeta>("/api/dispatcher/meta"),
-  dispatcherOverview: (p: { from?: string; to?: string; shift?: string }) => {
+  // `signal` — отмена вызывающей стороной (TASKS2.md п.24): новая загрузка
+  // «Индикаторов» отменяет прежний `overview`, опоздавший ответ не перетирает
+  // цифры нового окна.
+  dispatcherOverview: (p: { from?: string; to?: string; shift?: string }, signal?: AbortSignal) => {
     const q = new URLSearchParams();
     if (p.from) q.set("from", p.from);
     if (p.to) q.set("to", p.to);
     if (p.shift && p.shift !== "all") q.set("shift", p.shift);
     const tail = q.toString();
-    return request<DispatcherOverview>(`/api/dispatcher/overview${tail ? `?${tail}` : ""}`);
+    return request<DispatcherOverview>(`/api/dispatcher/overview${tail ? `?${tail}` : ""}`, { signal });
   },
-  dispatcherDay: (day: string, shift?: string) =>
+  dispatcherDay: (day: string, shift?: string, signal?: AbortSignal) =>
     request<DispatcherDay>(
       `/api/dispatcher/day?date=${day}${shift && shift !== "all" ? `&shift=${shift}` : ""}`,
+      { signal },
     ),
   /**
    * Строки витрины для дриллдауна — страницей: `limit` строк с `offset`, а
    * `total` и `truncated` говорят, сколько всего и есть ли что долистать.
    */
-  dispatcherRows: (p: DispatcherRowsParams & { limit?: number; offset?: number }) =>
-    request<DispatcherRowsResult>(`/api/dispatcher/rows?${rowsQuery(p).toString()}`),
+  dispatcherRows: (p: DispatcherRowsParams & { limit?: number; offset?: number }, signal?: AbortSignal) =>
+    request<DispatcherRowsResult>(`/api/dispatcher/rows?${rowsQuery(p).toString()}`, { signal }),
   /**
    * Выгрузка строк дриллдауна. Файл собирает бэкенд, и лимита на нём нет, поэтому
    * CSV полнее экрана: на экране страница, в файле — весь период. Запрос идёт
@@ -826,6 +930,17 @@ export const api = {
       method: "POST",
       body: JSON.stringify(body),
     }),
+  // --------------------------------------- админка: база данных и перезапуск ---
+  dbConfig: () => request<DbConfig>("/api/admin/db"),
+  dbTest: (body: DbCandidate) => request<DbTestResult>("/api/admin/db/test", {
+    method: "POST",
+    body: JSON.stringify(body),
+  }),
+  dbApply: (body: DbCandidate) =>
+    request<DbConfig>("/api/admin/db", { method: "PUT", body: JSON.stringify(body) }),
+  dbRevert: () => request<DbConfig>("/api/admin/db", { method: "DELETE" }),
+  serviceRestart: () =>
+    request<{ status: string; note: string }>("/api/admin/service/restart", { method: "POST" }),
   // -------------------------------------------------- администрирование: склады ---
   adminWarehouses: () => request<AdminWarehouse[]>("/api/admin/warehouses"),
   adminCreateWarehouse: (body: WarehouseInput) =>
@@ -855,11 +970,13 @@ export const api = {
     request<SyncRun>(`/api/admin/sync/run${days ? `?days=${days}` : ""}`, { method: "POST" }),
   syncRuns: (limit = 20) => request<SyncRun[]>(`/api/admin/sync/runs?limit=${limit}`),
   adminAudit: (limit = 100) => request<AuditEntry[]>(`/api/admin/audit?limit=${limit}`),
-  /** Выгрузка CSV: fetch с Authorization, затем сохранение файла на диск браузера. */
+  /**
+   * Выгрузка CSV идёт через `requestBlob`: он умеет повтор после ротации
+   * протухшего access-токена (TASKS2.md п.24), поэтому выгрузка переживает
+   * 401, а не падает с «Не удалось выгрузить отчёт» на живом бэкенде.
+   */
   async downloadCsv(path: string, p: ReportParams, filename: string) {
-    const res = await raw(`${path}?${qs(p)}`);
-    if (!res.ok) throw new ApiError(res.status, "Не удалось выгрузить отчёт");
-    saveBlob(await res.blob(), filename);
+    saveBlob(await requestBlob(`${path}?${qs(p)}`), filename);
   },
 
   // ---- постановка судов ----
@@ -883,13 +1000,16 @@ export const api = {
     });
     return requestBlob(`/api/vessels/plan.pdf?${q}`);
   },
-  vesselPlan: (from?: string, to?: string, berthId?: number) => {
+  // `signal` — отмена вызывающей стороной (TASKS2.md п.24): `/placements` за
+  // месяц — самый тяжёлый запрос кабинета, при смене периода прежний ответ
+  // не должен перекрашивать сетку старым планом.
+  vesselPlan: (from?: string, to?: string, berthId?: number, signal?: AbortSignal) => {
     const q = new URLSearchParams();
     if (from) q.set("from", from);
     if (to) q.set("to", to);
     if (berthId) q.set("berth_id", String(berthId));
     const tail = q.toString();
-    return request<VesselPlan>(`/api/vessels/placements${tail ? `?${tail}` : ""}`);
+    return request<VesselPlan>(`/api/vessels/placements${tail ? `?${tail}` : ""}`, { signal });
   },
   createPlacement: (body: PlacementInput) =>
     request<Placement>("/api/vessels/placements", { method: "POST", body: JSON.stringify(body) }),

@@ -3,13 +3,18 @@
 Документ ручной: его заводит диспетчер, 1С его не трогает. Правила здесь —
 те же, что человек соблюдает на бумаге:
 
-* время кратно слоту (сутки = 4 слота по 6 часов), иначе строка не совпадёт
-  с сеткой плана;
+* сутки разбиты на 4 слота по 6 часов — это шкала плана, а не правило ввода:
+  судно становится и уходит в любой момент (22:00, 06:30), слоты лишь то, чем
+  этот срок меряют на бумаге и на экране;
 * конец не раньше начала;
 * судно занимает у причала отрезок длины: отметка швартовки + длина. Два судна
   не пересекаются, только если не пересекаются и по времени, и по длине — это и
   есть главный смысл плана: показать, где причал не справляется;
-* судно не может встать за край причала (сверяем с его метражом).
+* судно не может встать «в воздухе»: его отрезок длины сверяется с метражом
+  причала, а если корпус лезет за габарит — постановка обязана назвать причал,
+  на который она выходит (`spill_berth_id`), и занятые метры считаются уже на
+  двух причалах. Запретить нахлёст означало бы запретить план: в живом
+  графике суда заходят на соседние причала каждый день;
 """
 from __future__ import annotations
 
@@ -53,6 +58,14 @@ SLOT = timedelta(hours=6)
 MAX_SLOTS = 4 * 366
 # Вертикальная шкала плана: 10 метров длины причала на одну ячейку.
 M_PER_CELL = 10
+# Минимальный зазор между бортами двух судов у одной стенки (заказчик, 11.11:
+# «между суднами должно быть минимум расстояние 10 метров»). Меряется вдоль
+# причала между соседними сегментами корпусов — в том числе там, где чужой
+# корпус лёг на мои метры нахлёстом. Полотна между причалами (дамба, слип) не
+# считаются: расстояние есть только там, где у обоих судов лежат метры одного
+# причала.
+MIN_GAP_M = 10
+
 # Если метраж причала не завели, сетка всё равно обязана что-то показать.
 UNKNOWN_LENGTH_M = 100
 # Больше 500 м судов в наших портах не бывает — это опечатка в поле.
@@ -78,15 +91,6 @@ PARK_SORT_ORDER = 900
 def normalize(dt: datetime) -> datetime:
     """Секунды и микросекунды не значимы: план оперирует слотами."""
     return dt.replace(second=0, microsecond=0)
-
-
-def slot_error(dt: datetime) -> str | None:
-    """Сообщение об ошибке, если время не совпадает с началом слота."""
-    if dt.minute != 0:
-        return "Время должно быть началом слота: 00:00, 06:00, 12:00 или 18:00"
-    if dt.hour not in SLOT_HOURS:
-        return "Слот начинается в 00:00, 06:00, 12:00 или 18:00"
-    return None
 
 
 def slots_count(starts_at: datetime, ends_at: datetime) -> int:
@@ -123,6 +127,267 @@ def span_of(row: VesselPlacement) -> tuple[int, float]:
     return (start, float("inf")) if row.length_m is None else (start, start + row.length_m)
 
 
+def neighbours(db: Session, berth: Berth) -> tuple[Berth | None, Berth | None]:
+    """Соседи причала по фронту: (выше, ниже) — с меньшим и большим sort_order.
+
+    sort_order — это порядок участков вдоль стенки, поэтому «соседний причал"
+    считается именно по нему, а не по тому, что стоит рядом в списке на экране.
+    Карман «Ожидание» соседом не бывает: метража у него нет и метры он отдать
+    не может. Снятый с линии причал тоже выпадает: он не участвует в плане.
+    """
+    row_list = list(
+        db.execute(
+            select(Berth)
+            .where(Berth.is_active.is_(True), Berth.code != PARK_CODE)
+            .order_by(Berth.sort_order, Berth.id)
+        )
+        .scalars()
+        .all()
+    )
+    for i, item in enumerate(row_list):
+        if item.id == berth.id:
+            return (
+                row_list[i - 1] if i else None,
+                row_list[i + 1] if i + 1 < len(row_list) else None,
+            )
+    return (None, None)
+
+
+def overhang(offset_m: int, length_m: int | None, own_len: int) -> tuple[int, int]:
+    """Сколько метров судно вылезает за габарит причала: (назад, вперёд).
+
+    «вперёд» — хвост полез за конец причала; «назад» — нос встал раньше его
+    начала, то есть отметка швартовки отрицательная. Длина неизвестна — лезущий
+    хвост это «до конца причала и дальше», а сколько именно — неизвестно, поэтому
+    таким суднам нахлёст запрещён целиком (см. validate).
+    """
+    start = offset_m or 0
+    if length_m is None:
+        return (max(-start, 0), 0)
+    return (max(-start, 0), max(start + length_m - own_len, 0))
+
+
+def front_pairs(
+    db: Session, cache: dict[int, tuple[int, int]] | None = None
+) -> list[tuple[int, int]]:
+    """Живые причала фронта как [(id, метраж)] в порядке стенки.
+
+    Порядок `sort_order` — это то, как участки идут у воды (экспозиция), поэтому
+    именно он решает, куда ложатся метры корпуса, вылезшего за габарит. Карман
+    «Ожидание» и снятые с линии причалы выпадает: метров, на которые можно лечь,
+    у них нет.
+    """
+    store = {} if cache is None else cache
+    if "front" not in store:
+        rows = db.execute(
+            select(Berth)
+            .where(Berth.is_active.is_(True), Berth.code != PARK_CODE)
+            .order_by(Berth.sort_order, Berth.id)
+        ).scalars().all()
+        store["front"] = [(b.id, berth_length(b)) for b in rows]
+    return store["front"]
+
+
+def spill_segments(
+    *, offset_m: int = 0, length_m: int | None, own_id: int, own_len: int,
+    spill_berth_id: int | None = None,
+    front: list[tuple[int, int]] | None = None,
+) -> list[tuple[int, float, float, str]]:
+    """Сегменты нахлёста: [(причал, от, до, «нос»/«хвост»)] вдоль фронта.
+
+    Корпус — непрерывный отрезок стенки. Сколько метров вылезло за свой причал,
+    столько и лежит дальше: весь сосед, затем следующий, пока метраж не кончится.
+    Раньше нахлёст целиком отдавался одному причалу: 175 м хвоста у соседа в 130 м
+    показывались как 130, а 45 м корпуса исчезали с плана — и на них свободно
+    вставало другое судно.
+
+    Причал из `spill_berth_id` — слово диспетчера о том, КАКОЙ причал принимает
+    корпус (он же задаёт, с какого начинать), но не отменяет метраж: остаток
+    переезжает на следующего. Если причал не назван, отсчёт от соседа. Нос,
+    вставший раньше начала шкалы, ложится на КОНЕЦ чужой стенки и идёт выше по
+    фронту, хвост за концом — с НАЧАЛА и ниже по фронту.
+    """
+    back, fwd = overhang(offset_m, length_m, own_len)
+    out: list[tuple[int, float, float, str]] = []
+    if not (back or fwd) or not front:
+        return out
+    ids = [bid for bid, _ in front]
+    if own_id not in ids:
+        return out
+    here = ids.index(own_id)
+    # Комy из сторон достается названный причал. Если корпус лезет в обе стороны,
+    # названный читается по фронту (выше своего — нос, ниже — хвост); если сторона
+    # одна, то назван именно она, каким бы причал ни стоял в списке: между причалами
+    # бывают дамба и слип, и слово диспетчера про воду важнее порядка строк.
+    named = None
+    if spill_berth_id in ids and spill_berth_id != own_id:
+        k = ids.index(spill_berth_id)
+        named = ("bow" if k < here else "stern") if (back and fwd) else ("bow" if back else "stern")
+    for side, meters, step in (("bow", back, -1), ("stern", fwd, 1)):
+        if not meters:
+            continue
+        # названный причал — точка, с которой корпус ложится дальше по фронту
+        j = ids.index(spill_berth_id) if side == named else here + step
+        while 0 <= j < len(front) and meters > 0:
+            bid, blen = front[j]
+            j += step
+            if bid == own_id or not blen:
+                continue
+            take = min(meters, blen)
+            out.append(
+                (bid, blen - take, blen, side) if side == "bow" else (bid, 0, take, side)
+            )
+            meters -= take
+    return out
+
+
+def occupancy(
+    *,
+    berth_id: int,
+    own_len: int,
+    offset_m: int = 0,
+    length_m: int | None = None,
+    spill_berth_id: int | None = None,
+    front: list[tuple[int, int]] | None = None,
+) -> list[tuple[int, int, float]]:
+    """Сегменты (причал, начало, конец) в метрах, которые занимает постановка.
+
+    Всё, что решает «кто кому мешает», обязано считать занятость только отсюда:
+    иначе метры, отданные соседу, окажутся невидимыми, и на них спокойно встанет
+    второе судно.
+    """
+    start = offset_m or 0
+    end = float("inf") if length_m is None else start + length_m
+    out: list[tuple[int, int, float]] = []
+    own_start, own_end = max(start, 0), (float("inf") if length_m is None else min(end, own_len))
+    if own_end > own_start:
+        out.append((berth_id, own_start, own_end))
+    for bid, m_from, m_to, _side in spill_segments(
+        offset_m=start, length_m=length_m, own_id=berth_id, own_len=own_len,
+        spill_berth_id=spill_berth_id, front=front,
+    ):
+        out.append((bid, m_from, m_to))
+    return out
+
+
+def _len_of(db: Session, berth_id: int | None, lengths: dict[int, int]) -> int:
+    """Метраж причала с мемоизацией: сетка считает занятость для каждой строки."""
+    if berth_id is None:
+        return UNKNOWN_LENGTH_M
+    if berth_id not in lengths:
+        berth = db.get(Berth, berth_id)
+        lengths[berth_id] = berth_length(berth) if berth else UNKNOWN_LENGTH_M
+    return lengths[berth_id]
+
+
+def segments_of_row(
+    db: Session, row: VesselPlacement, lengths: dict[int, int] | None = None,
+    memo: dict | None = None,
+) -> list[tuple[int, int, float]]:
+    """Сегменты уже сохранённой постановки, включая нахлёст на соседей."""
+    cache = {} if lengths is None else lengths
+    store = {} if memo is None else memo
+    return occupancy(
+        berth_id=row.berth_id,
+        own_len=_len_of(db, row.berth_id, cache),
+        offset_m=row.offset_m,
+        length_m=row.length_m,
+        spill_berth_id=row.spill_berth_id,
+        front=front_pairs(db, store),
+    )
+
+
+def _candidates(
+    db: Session,
+    *,
+    berth_ids: list[int],
+    starts_at: datetime,
+    ends_at: datetime,
+    exclude_id: int | None = None,
+) -> list[VesselPlacement]:
+    """Постановки, которые обязаны участвовать в проверке метров.
+
+    Дешевле всего было бы брать «свои причалы + соседей», но для нахлёста узкого
+    запроса не существует: `spill_berth_id` говорит, где корпус НАЧИНАЕТ лежать,
+    а не как далеко дотянется — 175 м хвоста через соседа в 130 м ложатся и на
+    следующий причал, а ссылка при этом стоит на соседа. Без нахлёста корпус целиком
+    внутри своего причала, поэтому сосед сверху молча мешать не может. Берём свои
+    причалы и вообще все постановки с нахлёстом в этом окне: их в терминале единицы,
+    а пропустить чужие 45 м дороже, чем прочитать лишние строки.
+    """
+    # Интервал полуоткрытый: судно, ушедшее в 22:00, не мешает тому, что начало
+    # разгрузку в 22:00. Включительное сравнение означало, что к освободившемуся
+    # причалу нельзя придвинуться впритык — ни минутой раньше, ни минутой позже,
+    # а за минуту до этого придвинуться было нельзя и на бумаге: полоса кончается
+    # ровно в 22:00, два судна на плане стоят вплотную, а кабинет на это отвечал
+    # 409. Метры ровно так же считают полуоткрыто (`ms < oe and os_ < me`):
+    # 0–60 и 60–120 м — не пересечение, и время не имеет права быть злее метров.
+    stmt = select(VesselPlacement).where(
+        VesselPlacement.starts_at < ends_at,
+        VesselPlacement.ends_at > starts_at,
+        or_(VesselPlacement.berth_id.in_(berth_ids),
+            VesselPlacement.spill_berth_id.is_not(None)),
+    )
+    if exclude_id is not None:
+        stmt = stmt.where(VesselPlacement.id != exclude_id)
+    return list(db.execute(stmt.order_by(VesselPlacement.starts_at)).scalars())
+
+
+def find_clash(
+    db: Session,
+    *,
+    berth_id: int,
+    starts_at: datetime,
+    ends_at: datetime,
+    offset_m: int = 0,
+    length_m: int | None = None,
+    spill_berth_id: int | None = None,
+    exclude_id: int | None = None,
+):
+    """Первая встреча бортов: (кто мешает, причал, мои метры, его метры, зазор).
+
+    Кандидатами считаются постановки, стоящие на любом из моих причалов, И те,
+    которые на них заходят своим нахлёстом: чужие 20 м на моём причале — это
+    ровно те же занятые 20 м, что и мои собственные.
+
+    Пятый элемент — зазор между бортами вдоль причала: None, если корпуса легли
+    друг на друга, и 0…MIN_GAP_M, если борта разминулись, но встали ближе, чем
+    требует стенка. И то, и другое — отказ, но текст обязан быть разным: «лезет на
+    соседнее судно» и «стоит слишком близко» диспетчер лечит по-разному: во
+    втором случае часто достаточно отодвинуться на пару метров.
+    """
+    lengths: dict[int, int] = {}
+    memo: dict = {}
+    mine = occupancy(
+        berth_id=berth_id,
+        own_len=_len_of(db, berth_id, lengths),
+        offset_m=offset_m,
+        length_m=length_m,
+        spill_berth_id=spill_berth_id,
+        front=front_pairs(db, memo),
+    )
+    ids = sorted({bid for bid, _, _ in mine})
+    if not ids:
+        return None
+    near = None
+    for row in _candidates(db, berth_ids=ids, starts_at=starts_at, ends_at=ends_at,
+                           exclude_id=exclude_id):
+        theirs = segments_of_row(db, row, lengths, memo)
+        for (mb, ms, me) in mine:
+            for (ob, os_, oe) in theirs:
+                if mb != ob:
+                    continue
+                if ms < oe and os_ < me:
+                    return (row, mb, (ms, me), (os_, oe), None)
+                # борта разминулись: сколько между ними вдоль причала. спорить
+                # диспетчер будет с ближайшим соседом, поэтому из нескольких
+                # «ближних» берётся самого ближнего, а не первого, кого нашла база
+                gap = os_ - me if me <= os_ else ms - oe
+                if gap < MIN_GAP_M and (near is None or gap < near[4]):
+                    near = (row, mb, (ms, me), (os_, oe), gap)
+    return near
+
+
 def find_conflict(
     db: Session,
     *,
@@ -131,49 +396,73 @@ def find_conflict(
     ends_at: datetime,
     offset_m: int = 0,
     length_m: int | None = None,
+    spill_berth_id: int | None = None,
     exclude_id: int | None = None,
 ) -> VesselPlacement | None:
-    """Постановка, которая пересекает эту и по времени, и по длине причала."""
-    stmt = select(VesselPlacement).where(
-        VesselPlacement.berth_id == berth_id,
-        VesselPlacement.starts_at <= ends_at,
-        VesselPlacement.ends_at >= starts_at,
+    """Постановка, которая пересекает эту и по времени, и по метрам.
+
+    Метры считаются по всем причалам постановки: и по своему, и по тому, на
+    который она заходит.
+    """
+    clash = find_clash(
+        db, berth_id=berth_id, starts_at=starts_at, ends_at=ends_at, offset_m=offset_m,
+        length_m=length_m, spill_berth_id=spill_berth_id, exclude_id=exclude_id,
     )
-    if exclude_id is not None:
-        stmt = stmt.where(VesselPlacement.id != exclude_id)
-    mine_end = float("inf") if length_m is None else offset_m + length_m
-    for row in db.execute(stmt.order_by(VesselPlacement.starts_at)).scalars():
-        other_start, other_end = span_of(row)
-        if offset_m < other_end and other_start < mine_end:
-            return row
-    return None
+    return clash[0] if clash else None
 
 
 def first_free_offset(
     db: Session, *, berth_id: int, starts_at: datetime, ends_at: datetime, length_m: int
 ) -> int | None:
-    """Первая отметка (м), где судно такой длины встаёт без пересечений. None — мест нет."""
+    """Первая отметка (м), где судно встаёт без пересечений и с зазором. None — мест нет.
+
+    Занятыми считаются и те метры, которые зашли на этот причал чужим нахлёстом:
+    предложить отметку, с которой судно влезет в борт свисающему с соседа хвосту,
+    хуже, чем вообще ничего не предложить. По той же причине после каждого занятого
+    куска к отметке прибавляется `MIN_GAP_M`: подсказка свободного места обязана
+    предлагать то место, на котором не придётся ловить 409.
+    """
+    lengths: dict[int, int] = {}
+    memo: dict = {}
     busy = sorted(
-        (span_of(row) for row in find_all_conflicting(db, berth_id=berth_id, starts_at=starts_at, ends_at=ends_at)),
+        ((s, e) for row in find_all_conflicting(db, berth_id=berth_id, starts_at=starts_at, ends_at=ends_at)
+         for (bid, s, e) in segments_of_row(db, row, lengths, memo) if bid == berth_id),
         key=lambda span: span[0],
     )
     place = 0
     for start, end in busy:
-        if place + length_m <= start:
-            break
-        place = max(place, int(end))
+        if place + length_m + MIN_GAP_M <= start:
+            break  # влезает раньше этого судна, и до его борта ещё остаётся 10 м
+        place = max(place, int(end) + MIN_GAP_M)
     return place
 
 
 def find_all_conflicting(
     db: Session, *, berth_id: int, starts_at: datetime, ends_at: datetime
 ) -> list[VesselPlacement]:
-    stmt = select(VesselPlacement).where(
-        VesselPlacement.berth_id == berth_id,
-        VesselPlacement.starts_at <= ends_at,
-        VesselPlacement.ends_at >= starts_at,
-    )
-    return list(db.execute(stmt).scalars().all())
+    """Постановки, задевающие причал: стоящие на нём и любые с нахлёстом — чужой
+    корпус ложится вдоль фронта далеко за названный причал, и угадать это по ссылке
+    нельзя (см. `_candidates`)."""
+    return _candidates(db, berth_ids=[berth_id], starts_at=starts_at, ends_at=ends_at)
+
+
+def normalize_spill(
+    db: Session, *, berth_id: int, offset_m: int = 0, length_m: int | None = None,
+    spill_berth_id: int | None,
+) -> int | None:
+    """Снимает нахлёст, которого геометрия больше не требует.
+
+    Нужно для PATCH, где поле spill_berth_id не присылали: судно переехало в
+    середину причала, а ссылка на «соседа, куда оно выходит» осталась бы висеть
+    и продолжала бы занимать чужие метры.
+    """
+    if spill_berth_id is None:
+        return None
+    berth = db.get(Berth, berth_id)
+    if berth is None or berth.code == PARK_CODE or not berth.length_m:
+        return spill_berth_id
+    back, fwd = overhang(offset_m or 0, length_m, berth_length(berth))
+    return spill_berth_id if (back or fwd) else None
 
 
 def validate(
@@ -184,23 +473,43 @@ def validate(
     ends_at: datetime,
     offset_m: int = 0,
     length_m: int | None = None,
+    spill_berth_id: int | None = None,
     exclude_id: int | None = None,
+    spill_explicit: bool = True,
 ) -> Berth:
-    """Проверяет строку плана. Бросает ValueError с человеческим текстом."""
+    """Проверяет строку плана. Бросает ValueError с человеческим текстом.
+
+    Нахлёст на соседний причал (`spill_berth_id`) — не исключение из правил, а
+    отдельная ветка: метры, отданные соседу, обязаны быть видны там, где они
+    стоят, поэтому проверка конфликта идёт по обоим причалам (см. occupancy).
+
+    spill_explicit=False — «поле не трогали» (PATCH без spill_berth_id): тогда
+    нахлёст, которого геометрия больше не требует, — не ошибка, а устаревшие
+    данные, и их снимает normalize_spill ещё до проверки.
+
+    Причал нахлёста диспетчер выбирает сам, любым: порядок вывода причалов не
+    равен порядку участков у воды, так что «соседство» здесь не проверяется —
+    проверяются только метры (см. occupancy).
+    """
     berth = db.get(Berth, berth_id)
     if not berth:
         raise BadPlan("Причал не найден")
 
     starts_at, ends_at = normalize(starts_at), normalize(ends_at)
-    for err in (slot_error(starts_at), slot_error(ends_at)):
-        if err:
-            raise BadPlan(err)
+    # Время не обязано совпадать с началом слота: судно ставят и снимают тогда,
+    # когда оно реально пришло и ушло, — в 22:00 и в 06:30 тоже. Слот (6 часов)
+    # остался только как шкала: им меряют ширину полосы и длину стоянки. Раньше
+    # кабинет требовал «00:00, 06:00, 12:00 или 18:00», и диспетчер ставил судно
+    # «на ближайший слот», а живое время стоянки терялось прямо в окне постановки.
     if ends_at < starts_at:
         raise BadPlan("Конец раньше начала постановки")
     if slots_count(starts_at, ends_at) > MAX_SLOTS:
         raise BadPlan("Слишком длинная постановка: максимум один год")
 
-    offset_m = max(int(offset_m or 0), 0)
+    # Отметка швартовки бывает и отрицательной: нос встал раньше начала шкалы
+    # своего причала, то есть судно заходит на причал выше по фронту. Раньше
+    # здесь стоял max(..., 0), и такой случай молча превращался в «стоит с нуля».
+    offset_m = int(offset_m or 0)
     if length_m is not None:
         if length_m <= 0:
             raise BadPlan("Длина судна должна быть больше нуля")
@@ -211,33 +520,111 @@ def validate(
 
     # «Ожидание» — карман вне причалов: сколько угодно судов в одно время,
     # без метража и конфликтов. Физически у стенки их нет.
-    if berth.code != PARK_CODE:
-        # вписывается ли судно в причал по метражу
-        if berth.length_m:
-            if length_m and length_m > berth.length_m:
-                raise BadPlan(
-                    f"Судно {length_m} м не встанет у причала {berth.code}: длина причала {berth.length_m} м"
-                )
-            need = length_m or berth.length_m
-            if offset_m + need > berth.length_m:
-                raise BadPlan(
-                    f"Судно не влезает в причал {berth.code}: отметка {offset_m} м + {need} м "
-                    f"больше длины причала {berth.length_m} м"
-                )
+    if berth.code == PARK_CODE:
+        if spill_berth_id is not None:
+            raise BadPlan("В кармане «Ожидание» нет метража: нахлёст считать некуда")
+        return berth
 
-        clash = find_conflict(
-            db, berth_id=berth_id, starts_at=starts_at, ends_at=ends_at,
-            offset_m=offset_m, length_m=length_m, exclude_id=exclude_id,
-        )
-        if clash:
-            clash_start, clash_end = span_of(clash)
-            mine_end = float("inf") if length_m is None else offset_m + length_m
+    own_len = berth_length(berth)
+    back, fwd = overhang(offset_m, length_m, own_len)
+
+    target = None
+    if spill_berth_id is not None:
+        target = db.get(Berth, spill_berth_id)
+        if not target:
+            raise BadPlan("Причал, на который выходит судно, не найден")
+        if target.id == berth.id:
+            raise BadPlan("Судно не может выходить на тот же причал, у которого стоит")
+        if target.code == PARK_CODE:
+            raise BadPlan("«Ожидание» — карман вне стенки: своих метров у него нет")
+        if not target.is_active:
+            raise BadPlan(f"Причал {target.code} снят с линии: свои метры он не отдаёт")
+        if length_m is None:
+            raise BadPlan("Нахлёст на соседний причал возможен только с известной длиной судна")
+        if not berth.length_m:
+            raise BadPlan(f"У причала {berth.code} не задан метраж — не от чего считать нахлёст")
+
+    prev_b, next_b = neighbours(db, berth)
+
+    if target is None:
+        # Нахлёста нет — судно обязано влезть в свой причал целиком. Отказ обязан
+        # назвать соседа: диспетчер видит, что судно заходит за габарит, и текст
+        # без «куда именно» читается как поломка кабинета.
+        if berth.length_m:
+            need = length_m or berth.length_m
+            too_long = bool(length_m) and length_m > berth.length_m
+            if too_long or offset_m < 0 or offset_m + need > berth.length_m:
+                where = (
+                    f"нос стоит на {back} м раньше начала причала" if back and not fwd
+                    else f"хвост лезет за {own_len} м на {fwd} м"
+                )
+                expected = prev_b if back and not fwd else next_b
+                hint = (
+                    f"{where} — укажите причал, на который выходит судно"
+                    + (f" (по фронту за ним {expected.code})" if expected else "")
+                )
+                head = (
+                    f"Судно {length_m} м не встанет у причала {berth.code}: "
+                    f"длина причала {berth.length_m} м."
+                    if too_long
+                    else f"Судно не влезает в причал {berth.code}: отметка {offset_m} м + {need} м."
+                )
+                raise BadPlan(f"{head} {hint}")
+    else:
+        need = fwd or back
+        if not need:
+            if spill_explicit:
+                raise BadPlan(
+                    f"Судно стоит целиком у причала {berth.code}: причал, на который оно выходит, не нужен"
+                )
+            # Поле не трогали, а судно переехало в середину причала: висящий
+            # нахлёст — устаревшие данные, а не намерение диспетчера.
+            target = None
+        # Куда уходит корпус и сколько именно метров — решает диспетчер. Кабинет
+        # не может знать, что стоит у стенки дальше по фронту: между причалами
+        # бывают дамба, слип и просто свободная вода, поэтому ни «нахлёст длиннее
+        # соседа», ни «корпус лезет в обе стороны» здесь не запреты. Метры, которые
+        # некуда записать, просто не участвуют в проверке конфликта (см. occupancy).
+
+    clash = find_clash(
+        db, berth_id=berth_id, starts_at=starts_at, ends_at=ends_at,
+        offset_m=offset_m, length_m=length_m, spill_berth_id=spill_berth_id,
+        exclude_id=exclude_id,
+    )
+    if clash:
+        other, on_id, (ms, me), (os_, oe), gap = clash
+        on = db.get(Berth, on_id)
+        on_code = berth.code if on_id == berth.id else (on.code if on else "?")
+        # Назвать надо тот причал, ГДЕ именно встретились борта: если чужой хвост
+        # лежит на моём причале (или мой на чужом), текст «причал РП-3» без
+        # уточнения читается как ошибка в данных.
+        # Где именно встретились борта — важно назвать: «причал РП-1» при конфликте
+        # на РП-2 диспетчер читает как «кабинетпутается в терминах»
+        if on_id == berth.id:
+            note = ""
+            if other.spill_berth_id == on_id:
+                from_b = db.get(Berth, other.berth_id)
+                note = f" — сюда заходит его хвост с {from_b.code}" if from_b else ""
+            where = f"Причал {on_code}{note}"
+        else:
+            where = f"Причал {on_code} — сюда выходит корпус вашего судна"
+        if gap is not None:
+            # Зазор — не наезд: отказ обязан говорить, на сколько метров не
+            # дотянули, а не «места нет»: лечится тем же перемещением на пару метров
             raise Conflict(
-                f"Причал {berth.code}: уже стоит «{clash.vessel}» "
-                f"({clash.starts_at:%d.%m %H:%M} — {clash.ends_at:%d.%m %H:%M}, "
-                f"{_m(clash_start)}–{_m(clash_end)} м), пересечение по длине "
-                f"{_m(max(offset_m, clash_start))}–{_m(min(mine_end, clash_end))} м"
+                f"{where}: между бортами {int(gap)} м, а можно не ближе {MIN_GAP_M} м — "
+                f"стоит «{other.vessel}» ({other.starts_at:%d.%m %H:%M} — "
+                f"{other.ends_at:%d.%m %H:%M}, {_m(os_)}–{_m(oe)} м), "
+                f"ваш корпус {_m(ms)}–{_m(me)} м"
             )
+        # Показываем ПЕРЕСЕЧЕНИЕ, а не весь свой отрезок: диспетчеру важно, на
+        # каких метрах борта встретились, а не где стоит судно целиком
+        raise Conflict(
+            f"{where}: уже стоит «{other.vessel}» "
+            f"({other.starts_at:%d.%m %H:%M} — {other.ends_at:%d.%m %H:%M}, "
+            f"{_m(os_)}–{_m(oe)} м), пересечение по длине "
+            f"{_m(max(ms, os_))}–{_m(min(me, oe))} м"
+        )
     return berth
 
 
@@ -266,7 +653,12 @@ def placements_in_period(
         stmt = stmt.where(VesselPlacement.berth_id == berth_id)
     return list(
         db.execute(
-            stmt.join(Berth).order_by(Berth.sort_order, VesselPlacement.offset_m, VesselPlacement.starts_at)
+            # on указываем явно: между vessel_placements и berths теперь два
+            # внешних ключа (стоять у причала и выходить на него), и на
+            # «join(Berth)» SQLAlchemy отвечает AmbiguousForeignKeysError
+            stmt.join(Berth, VesselPlacement.berth_id == Berth.id).order_by(
+                Berth.sort_order, VesselPlacement.offset_m, VesselPlacement.starts_at
+            )
         )
         .scalars()
         .all()
@@ -373,7 +765,7 @@ __all__ = [
     "SLOT", "SLOT_HOURS", "DEFAULT_BERTHS", "BadPlan", "Conflict",
     "PARK_CODE", "PARK_SORT_ORDER", "ensure_park",
     "berth_length", "berths", "find_conflict", "first_free_offset", "length_cells", "M_PER_CELL",
-    "normalize", "period_of", "place_summary", "span_of",
+    "MIN_GAP_M", "normalize", "period_of", "place_summary", "span_of",
     "placements_in_period", "rights_for", "seed_berths", "slots_count", "slots_in_range",
     "validate", "VESSEL_RIGHTS",
 ]

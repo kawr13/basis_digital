@@ -12,13 +12,14 @@ import { useAuth } from "../auth";
 import { AppShell } from "../components/AppShell";
 import { AuditTab } from "../components/admin/AuditTab";
 import { BerthsTab } from "../components/admin/BerthsTab";
+import { DatabaseTab } from "../components/admin/DatabaseTab";
 import { OneCTab } from "../components/admin/OneCTab";
 import { SettingsTab } from "../components/admin/SettingsTab";
 import { UsersTab } from "../components/admin/UsersTab";
 import { WarehousesTab } from "../components/admin/WarehousesTab";
 import { useAdminSettings } from "../components/admin/useSettings";
 
-type TabId = "users" | "warehouses" | "berths" | "onec" | "settings" | "audit";
+type TabId = "users" | "warehouses" | "berths" | "onec" | "settings" | "database" | "audit";
 
 const TABS: { id: TabId; label: string }[] = [
   { id: "users", label: "Пользователи" },
@@ -26,6 +27,7 @@ const TABS: { id: TabId; label: string }[] = [
   { id: "berths", label: "Причалы" },
   { id: "onec", label: "1С и синхронизация" },
   { id: "settings", label: "Настройки" },
+  { id: "database", label: "База данных" },
   { id: "audit", label: "Журнал" },
 ];
 
@@ -68,6 +70,7 @@ export default function AdminPage() {
       {tab === "berths" && <BerthsTab />}
       {tab === "onec" && <OneCTab settings={settings} />}
       {tab === "settings" && <SettingsTab settings={settings} />}
+      {tab === "database" && <DatabaseTab />}
       {tab === "audit" && <AuditTab />}
 
       <p className="text-[11px] text-ink-300 leading-relaxed">

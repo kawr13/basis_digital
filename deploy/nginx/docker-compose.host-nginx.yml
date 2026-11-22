@@ -2,8 +2,12 @@
 #
 #   docker compose -f docker-compose.yml -f deploy/nginx/docker-compose.host-nginx.yml up -d
 #
-# Порт 8080 публикуется только на 127.0.0.1 — снаружи не виден,
-# весь внешний трафик идёт через хостовый nginx (deploy/nginx/statcab.vhost.conf).
+# Порт публикуется так же, как в базовом файле, — на $WEB_BIND:$WEB_PORT
+# (дефолт 127.0.0.1:8080): наружу не виден, весь внешний трафик идёт через
+# хостовый nginx (deploy/nginx/statcab.vhost.conf). Жёсткий `127.0.0.1:8080`
+# здесь ломал `./deploy.sh --port 9000 --with …этот файл`: compose поднимал
+# кабинет на 9000 (переменная из файла секретов), overlay возвращал его на 8080,
+# а цикл готовности deploy.sh ждал ответа на 9000 и отменял удачный выкат.
 #
 # Не забыть в .env:
 #   CORS_ORIGINS=https://cab.example.ru
@@ -12,4 +16,4 @@
 services:
   web:
     ports: !override
-      - "127.0.0.1:8080:80"
+      - "${WEB_BIND:-127.0.0.1}:${WEB_PORT:-8080}:80"

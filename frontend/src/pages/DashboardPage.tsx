@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  api, type Capacity, type CargoBalance, type DashboardLayout, type Dynamics,
+  api,
+  isAbortError,
+  type Capacity, type CargoBalance, type DashboardLayout, type Dynamics,
   type Summary, type WidgetState,
 } from "../api";
 import { useAuth } from "../auth";
@@ -13,8 +15,24 @@ import { KpiCard } from "../components/KpiCard";
 import { useLive } from "../live";
 import { WidgetGrid, mergeLayout, type WidgetDef } from "../components/WidgetGrid";
 import { asOf, nf, pct, signed } from "../format";
+import { errText } from "../components/admin/ui";
 
-type Data = { summary: Summary; cargo: CargoBalance; capacity: Capacity; dynamics: Dynamics };
+// Метрики дашборда грузятся независимо (TASKS2.md п.24): отказ одного эндпоинта
+// — ошибка своей плитки с переспросом, а не пустой дашборд целиком.
+type Metric = "summary" | "cargo" | "capacity" | "dynamics";
+type Data = { summary: Summary | null; cargo: CargoBalance | null; capacity: Capacity | null; dynamics: Dynamics | null };
+type DataErrors = Partial<Record<Metric, string>>;
+const EMPTY_DATA: Data = { summary: null, cargo: null, capacity: null, dynamics: null };
+
+/** Пустой ряд для графика: одна ссылка на всё приложение — свежий `[]` в пропсе снимал бы memo (TASKS2.md п.30). */
+const EMPTY_POINTS: Dynamics["points"] = [];
+
+/** Записать исход метрики: fulfilled — значение, rejected — сообщение в `errors`. */
+function settle<T>(res: PromiseSettledResult<T>, key: Metric, errors: DataErrors): T | null {
+  if (res.status === "fulfilled") return res.value;
+  errors[key] = errText(res.reason, "Данные не получены");
+  return null;
+}
 
 // Клик по столбцу графика (сутки) или строке ёмкости (склад) открывает панель
 // детализации; состояние живёт на странице — панель вне сетки виджетов.
@@ -35,6 +53,9 @@ export default function DashboardPage() {
   const [data, setData] = useState<Data | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  // ошибки по метрикам (TASKS2.md п.24): упавший эндпоинт — ошибка своей плитки
+  const [errors, setErrors] = useState<DataErrors>({});
+  const [retrying, setRetrying] = useState<Metric | null>(null);
   const [edit, setEdit] = useState(false);
   const [layout, setLayout] = useState<WidgetState[]>([]);
   const [savedAt, setSavedAt] = useState<string | null>(null);
@@ -96,23 +117,63 @@ export default function DashboardPage() {
   }, []);
 
   // ---- данные --------------------------------------------------------------
+  // Номер запроса (TASKS2.md п.24, эталон — DrilldownPanel): автообновление,
+  // `useLive` и «Повторить» на плитке могут пересечься в полёте — ответ
+  // отставшего пакета не имеет права перезатереть свежие данные.
+  const seq = useRef(0);
   // quiet = true: автообновление не показывает спиннер, иначе экран
   // подёргивался бы каждую минуту
   const load = useCallback(async (quiet = false) => {
+    const my = ++seq.current;
     if (!quiet) setBusy(true);
+    // TASKS2.md п.24: allSettled вместо all — мёртвый эндпоинт становится ошибкой
+    // своей плитки, остальные метрики и весь дашборд продолжают работать.
+    const [summary, cargo, capacity, dynamics] = await Promise.allSettled([
+      api.summary(),
+      api.cargo(),
+      api.capacity(),
+      api.dynamics(14),
+    ]);
+    if (my !== seq.current) return;
+    const errs: DataErrors = {};
+    setData({
+      summary: settle(summary, "summary", errs),
+      cargo: settle(cargo, "cargo", errs),
+      capacity: settle(capacity, "capacity", errs),
+      dynamics: settle(dynamics, "dynamics", errs),
+    });
+    setErrors(errs);
+    if (!quiet) setBusy(false);
+  }, []);
+
+  // «Повторить» на упавшей плитке: переспрашиваем только этот эндпоинт, не весь дашборд.
+  const reloadMetric = useCallback(async (key: Metric) => {
+    setRetrying(key);
+    // обязан поднять номер пакета (TASKS2.md п.24): идущее в этот момент
+    // автообновление становится отсталым, иначе его ответ вернёт ошибке
+    // восстановленной плитке жизнь и погасит `busy` посреди quiet-обновления
+    const my = ++seq.current;
     try {
-      const [summary, cargo, capacity, dynamics] = await Promise.all([
-        api.summary(),
-        api.cargo(),
-        api.capacity(),
-        api.dynamics(14),
-      ]);
-      setData({ summary, cargo, capacity, dynamics });
-      setError("");
+      // явные ветви — чтобы TS свил каждый эндпоинт со своим полем данных
+      let patch: Partial<Data>;
+      if (key === "summary") patch = { summary: await api.summary() };
+      else if (key === "cargo") patch = { cargo: await api.cargo() };
+      else if (key === "capacity") patch = { capacity: await api.capacity() };
+      else patch = { dynamics: await api.dynamics(14) };
+      if (my !== seq.current) return;
+      setData((d) => ({ ...(d ?? EMPTY_DATA), ...patch }));
+      setErrors((e) => {
+        const next = { ...e };
+        delete next[key];
+        return next;
+      });
     } catch (e) {
-      if (!quiet) setError(e instanceof Error ? e.message : "Не удалось загрузить данные");
+      // отмена — не ошибка (TASKS2.md п.24): плашка обязана молчать
+      if (isAbortError(e)) return;
+      if (my !== seq.current) return;
+      setErrors((prev) => ({ ...prev, [key]: errText(e, "Данные не получены") }));
     } finally {
-      if (!quiet) setBusy(false);
+      setRetrying(null);
     }
   }, []);
 
@@ -147,8 +208,15 @@ export default function DashboardPage() {
   }, [load, refreshMs]);
 
   const defs: WidgetDef[] = useMemo(
-    () => buildWidgets(data, { onSelectDay: selectDay, onSelectWarehouse: selectWarehouse, selectedDay, selectedWarehouseId }),
-    [data, selectDay, selectWarehouse, selectedDay, selectedWarehouseId],
+    () =>
+      buildWidgets(
+        data,
+        { onSelectDay: selectDay, onSelectWarehouse: selectWarehouse, selectedDay, selectedWarehouseId },
+        errors,
+        retrying,
+        reloadMetric,
+      ),
+    [data, selectDay, selectWarehouse, selectedDay, selectedWarehouseId, errors, retrying, reloadMetric],
   );
 
   const drilldown: DrilldownTarget | null = selectedDay
@@ -157,13 +225,13 @@ export default function DashboardPage() {
       ? {
           kind: "warehouse",
           warehouseId: selectedWarehouseId,
-          warehouseName: data?.capacity.rows.find((r) => r.warehouse_id === selectedWarehouseId)?.warehouse,
+          warehouseName: data?.capacity?.rows.find((r) => r.warehouse_id === selectedWarehouseId)?.warehouse,
         }
       : null;
 
   return (
     <AppShell
-      asOf={asOf(data?.summary.data_as_of ?? null)}
+      asOf={asOf(data?.summary?.data_as_of ?? null)}
       scopeLabel={user?.all_warehouses ? "все склады" : `${user?.warehouse_ids.length} склада(ов)`}
       live={live}
       actions={
@@ -221,10 +289,25 @@ export default function DashboardPage() {
 
       <p className="text-[11px] text-ink-400 leading-relaxed">
         Источник цифр — 1С, витрина кабинета обновляется автоматически (последняя загрузка:{" "}
-        {asOf(data?.summary.data_as_of ?? null)}). Если данные расходятся с 1С, сообщите
+        {asOf(data?.summary?.data_as_of ?? null)}). Если данные расходятся с 1С, сообщите
         администратору кабинета — проверим выгрузку.
       </p>
     </AppShell>
+  );
+}
+
+/** Собственное состояние отказа плитки (TASKS2.md п.24): вместо цифр — ошибка
+ *  своего эндпоинта и «повторить», переспрашивающий только эту метрику. */
+function MetricError({ text, busy, onRetry }: { text: string; busy: boolean; onRetry?: () => void }) {
+  return (
+    <div className="flex h-full flex-col items-start justify-center gap-2 p-1 text-xs text-crit" data-metric-error>
+      <span>{text}</span>
+      {onRetry && (
+        <button className="btn-ghost text-xs" onClick={onRetry} disabled={busy}>
+          {busy ? "Повтор…" : "повторить"}
+        </button>
+      )}
+    </div>
   );
 }
 
@@ -232,19 +315,38 @@ export default function DashboardPage() {
  * Виджеты описаны кодом, а не конфигом: рендер живёт рядом с данными.
  * Порядок и ширина — пользовательские, см. mergeLayout.
  * `sel` — состояние детализации: без него виджеты работают как раньше.
+ * `errors`/`onRetry` — ошибки по метрикам (TASKS2.md п.24): у плитки, чей
+ * эндпоинт упал, — собственная ошибка с переспросом вместо цифр.
  */
-function buildWidgets(data: Data | null, sel: Selection = {}): WidgetDef[] {
+function buildWidgets(
+  data: Data | null,
+  sel: Selection = {},
+  errors: DataErrors = {},
+  retrying: Metric | null = null,
+  onRetry?: (key: Metric) => void,
+): WidgetDef[] {
   const s = data?.summary;
+  // Пропсы графика должны быть стабильны по ссылке (TASKS2.md п.30): литерал `?? []`
+  // на каждый вызов `render` давал бы новый массив, и memo(DynamicsChart) не работал бы.
+  const dynPoints = data?.dynamics?.points ?? EMPTY_POINTS;
   const util = s?.utilization ?? 0;
   const utilTone = util >= 0.95 ? "crit" : util >= 0.85 ? "warn" : "ok";
   const delta = s?.delta_pct ?? null;
+
+  // упавшая метрика — на плитке ошибка вместо цифр; `??` держит проверку
+  // прямо у рендера виджета
+  const err = (key: Metric) => {
+    const text = errors[key];
+    if (!text) return null;
+    return <MetricError text={text} busy={retrying === key} onRetry={onRetry ? () => onRetry(key) : undefined} />;
+  };
 
   return [
     {
       id: "kpi_cargo",
       title: "Остаток грузов",
       defaultSpan: 3,
-      render: () => (
+      render: () => err("summary") ?? (
         <KpiCard
           label="Остаток на складах"
           value={nf(s?.cargo_weight_t ?? 0, 0)}
@@ -264,7 +366,7 @@ function buildWidgets(data: Data | null, sel: Selection = {}): WidgetDef[] {
       id: "kpi_load",
       title: "Загрузка складов",
       defaultSpan: 3,
-      render: () => (
+      render: () => err("summary") ?? (
         <KpiCard
           label="Средняя загрузка"
           value={pct(util, 1)}
@@ -277,13 +379,13 @@ function buildWidgets(data: Data | null, sel: Selection = {}): WidgetDef[] {
       id: "kpi_processed",
       title: "Обработка",
       defaultSpan: 3,
-      render: () => (
+      render: () => err("summary") ?? (
         <KpiCard
           label="Обработано за 7 суток"
           value={nf(s?.processed_7d_t ?? 0, 0)}
           unit="т"
           // спарклайн берём из того же среза, что и график рядом: цифры не разойдутся
-          spark={data ? data.dynamics.points.slice(-14).map((p) => p.processed_t) : undefined}
+          spark={data?.dynamics ? data.dynamics.points.slice(-14).map((p) => p.processed_t) : undefined}
           sub={
             delta === null ? (
               "нет данных за предыдущий период"
@@ -300,7 +402,7 @@ function buildWidgets(data: Data | null, sel: Selection = {}): WidgetDef[] {
       id: "kpi_dwell",
       title: "Хранение",
       defaultSpan: 3,
-      render: () => (
+      render: () => err("summary") ?? (
         <KpiCard
           label="Среднее время хранения"
           value={nf(s?.dwell_hours ?? 0, 1)}
@@ -314,10 +416,10 @@ function buildWidgets(data: Data | null, sel: Selection = {}): WidgetDef[] {
       title: "Динамика обработки · 14 суток",
       defaultSpan: 8,
       defaultHeight: 240,
-      hint: `всего ${nf(data?.dynamics.processed_total ?? 0, 0)} т`,
-      render: ({ height }) => (
+      hint: data?.dynamics ? `всего ${nf(data.dynamics.processed_total, 0)} т` : undefined,
+      render: ({ height }) => err("dynamics") ?? (
         <DynamicsChart
-          points={data?.dynamics.points ?? []}
+          points={dynPoints}
           height={height ?? 240}
           onSelectDay={sel.onSelectDay}
           selectedDay={sel.selectedDay ?? null}
@@ -329,9 +431,9 @@ function buildWidgets(data: Data | null, sel: Selection = {}): WidgetDef[] {
       title: "Ёмкость складов",
       defaultSpan: 4,
       defaultHeight: 300,
-      render: () => (
+      render: () => err("capacity") ?? (
         <CapacityPanel
-          rows={data?.capacity.rows ?? []}
+          rows={data?.capacity?.rows ?? []}
           onSelectWarehouse={sel.onSelectWarehouse}
           selectedWarehouseId={sel.selectedWarehouseId ?? null}
         />
@@ -342,8 +444,8 @@ function buildWidgets(data: Data | null, sel: Selection = {}): WidgetDef[] {
       title: "Остатки грузов по складам",
       defaultSpan: 12,
       defaultHeight: 320,
-      hint: `срез ${asOf(data?.cargo.snapshot_at ?? null)}`,
-      render: () => <CargoTable rows={data?.cargo.rows ?? []} />,
+      hint: data?.cargo ? `срез ${asOf(data.cargo.snapshot_at)}` : undefined,
+      render: () => err("cargo") ?? <CargoTable rows={data?.cargo?.rows ?? []} />,
     },
   ];
 }

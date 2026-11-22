@@ -71,14 +71,29 @@ export function useSize<T extends HTMLElement>(min = 240) {
     // Первое измерение — синхронное: с отложенным графики рисовали бы первый кадр
     // в ширину по умолчанию, и было бы видно, как они «усаживаются» в размер.
     setWidth(Math.max(min, el.clientWidth));
+    // rAF-троттл (TASKS2.md п.30): setState прямо из колбэка наблюдателя выполнял
+    // перерисовку графика в фазе layout — при перетаскивании плашки на каждый кадр
+    // находило по шторму. Свежая ширина копится в `pending`, а `setWidth` вызывается
+    // не чаще одного раза за кадр и уже вне колбэка.
+    let pending = 0;
+    let raf = 0;
     const ro = new ResizeObserver((entries) => {
       const w = entries[entries.length - 1]?.contentRect.width ?? 0;
       // 0 — значит контейнер скрыт (display:none, пропущенная content-visibility);
       // прошлое значение лучше, чем график шириной в ноль
-      if (w > 0) setWidth(Math.max(min, w));
+      if (w <= 0) return;
+      pending = w;
+      if (raf) return;
+      raf = requestAnimationFrame(() => {
+        raf = 0;
+        setWidth(Math.max(min, pending));
+      });
     });
     ro.observe(el);
-    return () => ro.disconnect();
+    return () => {
+      if (raf) cancelAnimationFrame(raf);
+      ro.disconnect();
+    };
   }, [min]);
   return { ref, width };
 }

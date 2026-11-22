@@ -72,7 +72,8 @@ export function OneCTab({ settings }: { settings: AdminSettings }) {
       await loadRuns();
       setNotice(
         res.status === "ok"
-          ? `Загрузка завершена: ${nf(res.rows)} строк.`
+          ? `Загрузка завершена: ${nf(res.rows)} строк.` +
+            (res.warnings ? " Внимание: часть строк 1С отдала неразборчиво — см. журнал." : "")
           : `Загрузка завершилась со статусом «${res.status}».`,
       );
     } catch (e) {
@@ -130,6 +131,11 @@ export function OneCTab({ settings }: { settings: AdminSettings }) {
               {run.finished_at ? ` — ${asOf(run.finished_at)}` : ""}
             </span>
             {run.error && <div className="mt-1 text-crit">{run.error}</div>}
+            {run.warnings && (
+              <div className="mt-1 text-warn" data-sync-warnings>
+                Разбор среза с предупреждениями: {run.warnings}
+              </div>
+            )}
           </div>
         )}
 
@@ -189,7 +195,7 @@ export function OneCTab({ settings }: { settings: AdminSettings }) {
                 <Th>Статус</Th>
                 <Th>Источник</Th>
                 <Th right>Строк</Th>
-                <Th>Ошибка</Th>
+                <Th>Замечания</Th>
               </tr>
             </thead>
             <tbody>
@@ -202,7 +208,15 @@ export function OneCTab({ settings }: { settings: AdminSettings }) {
                   </td>
                   <td className="py-2 pr-3 text-ink-300">{r.source}</td>
                   <td className="py-2 pr-3 num text-right">{nf(r.rows)}</td>
-                  <td className="py-2 text-crit">{r.error ?? ""}</td>
+                  <td className="py-2">
+                    {r.error && <div className="text-crit">{r.error}</div>}
+                    {r.warnings && (
+                      <div className="text-warn" data-sync-warnings={String(r.id)}>
+                        {r.warnings}
+                      </div>
+                    )}
+                    {!r.error && !r.warnings && <span className="text-ink-300">—</span>}
+                  </td>
                 </tr>
               ))}
               {!runs.length && <EmptyRow cols={6} text="Загрузок ещё не было" />}

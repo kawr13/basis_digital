@@ -1,5 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useState } from "react";
 import type { DynamicsPoint } from "../api";
+import { useSize } from "./chartKit";
 import { dayFull, dayLabel, nf } from "../format";
 
 /**
@@ -111,7 +112,10 @@ function barPath(x: number, y: number, w: number, h: number, r: number): string 
  *
  * Без onSelectDay график ведёт себя как раньше (только тултип).
  */
-export function DynamicsChart({
+// `memo` (TASKS2.md п.30): WidgetGrid перерисовывает все плитки на каждое своё
+// изменение (перетаскивание, режим правки); график с неизменными пропсами
+// перерисовывать не за чем — страница дашборда из этого и не дёргается.
+export const DynamicsChart = memo(function DynamicsChart({
   points,
   height = 220,
   onSelectDay,
@@ -124,8 +128,11 @@ export function DynamicsChart({
   /** выбранные сутки: столбец подсвечивается фирменным голубым (accent) */
   selectedDay?: string | null;
 }) {
-  const boxRef = useRef<HTMLDivElement>(null);
-  const [width, setWidth] = useState(760);
+  // ПОЧЕМУ useSize (TASKS2.md п.30): раньше ширину читали `el.clientWidth` в каждом
+  // колбэке ResizeObserver — это принудительная раскладка всей страницы на каждый
+  // кадр ресайза. Общий хук берёт ширину из записи наблюдателя и троттлит её одним
+  // rAF-кадром.
+  const { ref: boxRef, width } = useSize<HTMLDivElement>(320);
   /** индекс наведённой/сфокусированной колонки — под перекрестие и тултип */
   const [hover, setHover] = useState<number | null>(null);
   /** ряд, подсвеченный легендой; остальные приглушаются */
@@ -137,16 +144,6 @@ export function DynamicsChart({
    */
   const sig = `${points.length}:${points[0]?.bucket_date ?? ""}:${points[points.length - 1]?.bucket_date ?? ""}`;
   const [grown, setGrown] = useState(() => !reducedMotion());
-
-  useEffect(() => {
-    const el = boxRef.current;
-    if (!el) return;
-    const apply = () => setWidth(Math.max(320, el.clientWidth));
-    apply();
-    const ro = new ResizeObserver(apply);
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, []);
 
   useEffect(() => {
     if (reducedMotion()) {
@@ -455,4 +452,4 @@ export function DynamicsChart({
       </div>
     </div>
   );
-}
+});

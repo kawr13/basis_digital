@@ -69,23 +69,41 @@ def _get(url: str, token: str) -> bytes:
 
 
 def chain_steps(rows: list[dict]) -> dict[int, int]:
-    """Номера шагов, как их видит экран: корень — без связи или с битой ссылкой."""
+    """Номера шагов, как их считают экран и лист: обход в ширину от корня с общим
+    счётчиком на цепочку (`chainSteps` в frontend/src/vessels.ts и `_chain_steps`
+    в plan_pdf.py — эта функция обязана совпадать с ними до мелочей).
+
+    Формула «номер = номер оригинала + 1» расходилась с ними на развилке: когда от
+    одного оригинала идут две живые копии (диспетчер передумал и перешвартовал
+    судно второй раз — оригинал-то стоит), вторая ветка получает следующий номер,
+    а не тот же самый, и лист это печатает правильно. Врóде бы мелочь, но из-за неё
+    сверка кричала «расхождение» там, где экран и PDF были заодно.
+    """
     by_id = {p["id"]: p for p in rows}
     kids: dict[int, list[int]] = {}
-    roots: list[int] = []
     for p in rows:
         src = p.get("moved_from_id")
         if src and src in by_id:
             kids.setdefault(src, []).append(p["id"])
-        else:
-            roots.append(p["id"])
+    key = lambda i: (by_id[i]["starts_at"], i)  # noqa: E731 — тот же ключ, что в рисовальщике
     step: dict[int, int] = {}
-    order = sorted(roots)
-    while order:
-        cur = order.pop(0)
-        src = by_id[cur].get("moved_from_id")
-        step[cur] = 1 + (step.get(src, 0) if src in by_id else 0)
-        order += sorted(kids.get(cur, []), key=lambda i: (by_id[i]["starts_at"], i))
+    roots = sorted((p["id"] for p in rows
+                    if not (p.get("moved_from_id") and p["moved_from_id"] in by_id)), key=key)
+    for root in roots:
+        if root in step:
+            continue
+        seq, i, n = [root], 0, 0
+        while i < len(seq):
+            node = seq[i]
+            i += 1
+            if node in step:
+                continue
+            n += 1
+            step[node] = n
+            seq.extend(sorted(kids.get(node, []), key=key))
+    for p in rows:  # на случай цикла по moved_from_id — остаток тоже нумеруем
+        if p["id"] not in step:
+            step[p["id"]] = len(step) + 1
     return step
 
 

@@ -51,6 +51,9 @@ class Snapshot:
     cargo: list[CargoRec] = field(default_factory=list)
     capacity: list[CapacityRec] = field(default_factory=list)
     dynamics: list[DynamicsRec] = field(default_factory=list)
+    # Предупрешения разбора (пропущенные строки): последним полем и с дефолтом,
+    # чтобы существующие позиционные вызовы Snapshot(...) не сломались.
+    warnings: list[str] = field(default_factory=list)
 
 
 class StatsSource(Protocol):

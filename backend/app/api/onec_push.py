@@ -19,17 +19,21 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session
 
 from ..db import get_db
+from ..deps import client_ip
 from ..models import AuditLog, SyncRun, utcnow
 from ..onec.parse import snapshot_from_payload
-from ..onec.sync import apply_snapshot
+from ..onec.sync import apply_snapshot, warnings_text
 from ..schemas import PushOut
-from ..services import app_settings
+from ..services import app_settings, job_lock
 
 log = logging.getLogger("statcab.onec.push")
 
 router = APIRouter(prefix="/api/onec", tags=["onec"])
 
 TOKEN_HEADER = "X-OneC-Token"
+
+PUSH_BUSY = ("Кабинет сейчас пишет витрину — идёт загрузка из 1С или импорт отчёта "
+             "диспетчера. Повторите push позже: срез идемпотентен.")
 
 
 def _check_token(db: Session, request: Request) -> None:
@@ -48,7 +52,17 @@ def _check_token(db: Session, request: Request) -> None:
 def push_snapshot(payload: dict[str, Any], request: Request, db: Session = Depends(get_db)):
     """Принять срез от 1С. Идемпотентно: повторный тот же срез не множит строки."""
     _check_token(db, request)
+    # Витрину пишем по одному: push приходит ровно в тот момент, когда планировщик
+    # может тянуть срез сам, — два apply_snapshot одновременно плодят дубликаты
+    # (п. 8 TASKS2.md). 409 для 1С означает «повтори», а не «срез потерян».
+    with job_lock.held(db, job_lock.VITRINA, note="push из 1С") as free:
+        if not free:
+            raise HTTPException(status.HTTP_409_CONFLICT, PUSH_BUSY)
+        return _apply_push(db, request, payload)
 
+
+def _apply_push(db: Session, request: Request, payload: dict[str, Any]) -> PushOut:
+    """Разбор среза и запись в витрину. Аренда витрины к этому моменту взята."""
     run = SyncRun(source="push", status="running")
     db.add(run)
     db.commit()
@@ -58,20 +72,26 @@ def push_snapshot(payload: dict[str, Any], request: Request, db: Session = Depen
         counts = apply_snapshot(db, snap)
         rows = sum(counts.values())
         run.status, run.rows, run.finished_at = "ok", rows, utcnow()
+        run.warnings = warnings_text(snap.warnings)
         db.commit()
         log.info("Push из 1С: строк %d (%s)", rows, counts)
-        db.add(AuditLog(login="1c-push", action="onec.push", ip=request.client.host if request.client else None,
-                        detail=f"строк: {rows}, срез: {snap.snapshot_at.isoformat(sep=' ')}"))
+        if snap.warnings:
+            log.warning("Push из 1С: разбор с предупреждениями (%d) — %s",
+                        len(snap.warnings), run.warnings)
+        db.add(AuditLog(login="1c-push", action="onec.push", ip=client_ip(request),
+                        detail=f"строк: {rows}, срез: {snap.snapshot_at.isoformat(sep=' ')}"
+                               + (f", предупреждений: {len(snap.warnings)}" if snap.warnings else "")))
         db.commit()
         return PushOut(status="ok", source="push", run_id=run.id,
-                       snapshot_at=snap.snapshot_at, rows=rows, counts=counts)
+                       snapshot_at=snap.snapshot_at, rows=rows, counts=counts,
+                       warnings=snap.warnings)
     except Exception as exc:  # noqa: BLE001 — чужие данные: пишем в журнал и отдаём 400
         db.rollback()
         run.status, run.error, run.finished_at = "error", f"{type(exc).__name__}: {exc}"[:1000], utcnow()
         db.add(run)
         db.commit()
         db.add(AuditLog(login="1c-push", action="onec.push.error",
-                        ip=request.client.host if request.client else None,
+                        ip=client_ip(request),
                         detail=(run.error or "")[:500]))
         db.commit()
         log.warning("Push из 1С отклонён: %s", exc)

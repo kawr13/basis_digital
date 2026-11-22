@@ -7,7 +7,7 @@
  * анимация и поведение легенды одинаковые во всех виджетах, а новый график —
  * это массив данных + три пропса, а не новая компонента.
  */
-import { useState } from "react";
+import { memo, useState } from "react";
 import { dayLabel, nf } from "../format";
 import {
   CHART, ChartEmpty, ChartLegend, ChartTip, arcPath, barPath, colorAt, compact,
@@ -41,8 +41,14 @@ export type BarDatum = {
  * Столбцы + линии. `stack` — складывать серии в одну колонку, `percent` —
  * нормировать стек к 100 % (структура), `onSelectKey` — клик по колонке
  * (сутки) для детализации.
+ *
+ * ПОЧЕМУ ПОД `memo` (TASKS2.md п.30): WidgetGrid вызывает `def.render()` у всех
+ * виджетов на каждый свой рендер — перетаскивание плашки, режим правки, багжет
+ * размеров. Без memo это полная пересборка SVG каждого графика каждый кадр;
+ * с memo перерисовывается только тот, у кого реально поменялись пропсы
+ * (стабильность колбэков и рядов обеспечивают страницы, см. StatisticsPage).
  */
-export function BarsChart({
+export const BarsChart = memo(function BarsChart({
   data, series, height = 220, stack = false, percent = false, unit = "",
   onSelectKey, selectedKey, legendNote, ariaLabel,
 }: {
@@ -254,7 +260,7 @@ export function BarsChart({
       />
     </div>
   );
-}
+});
 
 /** 0 и NaN не должны уходить в шкалу. */
 function niceOf(v: number) {
@@ -266,7 +272,7 @@ function niceOf(v: number) {
 export type Slice = { label: string; value: number; color?: string };
 
 /** Кольцо структуры: доля груза/операции + наведение с цифрами. */
-export function DonutChart({
+export const DonutChart = memo(function DonutChart({
   items, height = 220, unit = "т", centerLabel = "всего", max = 8, onSelect,
 }: {
   items: Slice[];
@@ -365,7 +371,7 @@ export function DonutChart({
       )}
     </div>
   );
-}
+});
 
 /* ================================================================== HBars === */
 
@@ -375,7 +381,7 @@ export type HBarItem = { label: string; value: number; sub?: string; color?: str
  * Горизонтальные полосы — топы (суда, грузы, станции): подпись читается
  * целиком, порядок виден сверху вниз.
  */
-export function HBarsChart({
+export const HBarsChart = memo(function HBarsChart({
   items, unit = "", height = 220, max = 12, color, valueDigits = 0, showShare = true,
   onSelectKey, selectedKey,
 }: {
@@ -445,7 +451,7 @@ export function HBarsChart({
       </ul>
     </div>
   );
-}
+});
 
 /* ================================================================= Bullet === */
 
@@ -462,7 +468,7 @@ export type BulletItem = {
  * «Пистон»: план — светлая дорожка, факт — тёмная полоса, сверху процент.
  * Компактный ответ на вопрос «где не доработали», когда дней много.
  */
-export function BulletChart({
+export const BulletChart = memo(function BulletChart({
   items, height = 240, unit = "т", max = 14, onSelectKey, selectedKey,
 }: {
   items: BulletItem[];
@@ -528,12 +534,12 @@ export function BulletChart({
       </ul>
     </div>
   );
-}
+});
 
 /* ================================================================= Gauge ==== */
 
 /** Полукруговой «спидометр»: выполнение плана, явка, исправность. */
-export function GaugeChart({
+export const GaugeChart = memo(function GaugeChart({
   value, max = 100, label, sub, height = 150, thresholds = [80, 95], invert = false,
 }: {
   value: number | null;
@@ -580,11 +586,11 @@ export function GaugeChart({
       {sub && <div className="-mt-1 text-center text-[11px] text-ink-300">{sub}</div>}
     </div>
   );
-}
+});
 
 /* =============================================================== Heatmap ==== */
 
-export function HeatmapChart({
+export const HeatmapChart = memo(function HeatmapChart({
   rows, cols, value, format, height = 200, colorFor,
 }: {
   rows: string[];
@@ -632,14 +638,14 @@ export function HeatmapChart({
       </table>
     </div>
   );
-}
+});
 
 /* ============================================================== Scatter ===== */
 
 export type ScatterPoint = { x: number; y: number; size?: number; label: string; color?: string; tip?: string };
 
 /** Пузырьковая диаграмма: машинное время × производительность, размер = тоннаж. */
-export function ScatterChart({ points, height = 260, xLabel, yLabel, xUnit = "", yUnit = "" }: {
+export const ScatterChart = memo(function ScatterChart({ points, height = 260, xLabel, yLabel, xUnit = "", yUnit = "" }: {
   points: ScatterPoint[];
   height?: number;
   xLabel: string;
@@ -708,11 +714,11 @@ export function ScatterChart({ points, height = 260, xLabel, yLabel, xUnit = "",
       )}
     </div>
   );
-}
+});
 
 /* ================================================================ Radar ==== */
 
-export function RadarChart({
+export const RadarChart = memo(function RadarChart({
   axes, series, height = 260,
 }: {
   /** максимальная база каждой оси (100 = «лучшее значение периода») */
@@ -780,7 +786,7 @@ export function RadarChart({
       </div>
     </div>
   );
-}
+});
 
 /* ============================================================ DayLabels ==== */
 

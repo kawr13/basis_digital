@@ -4,6 +4,7 @@ from __future__ import annotations
 from fastapi import Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session
 
+from .config import get_settings
 from .db import get_db
 from .models import Role, User
 from .security import decode_access_token
@@ -30,6 +31,10 @@ def current_user(request: Request, db: Session = Depends(get_db)) -> User:
     user = db.get(User, int(payload["sub"]))
     if not user or not user.is_active:
         raise _UNAUTH
+    # Строка доступа (п. 25 TASKS2.md) пишет логин: в JWT его нет, а вторично
+    # расшифровывать токен и ходить в базу ради одной строки лога — работа для
+    # каждой ручки. Строка, а не объект: к моменту записи лога сессия закрыта.
+    request.state.login = user.login
     return user
 
 
@@ -64,7 +69,19 @@ def require_section(*keys: str):
 
 
 def client_ip(request: Request) -> str:
-    fwd = request.headers.get("X-Forwarded-For", "")
-    if fwd:
-        return fwd.split(",")[0].strip()
-    return request.client.host if request.client else "unknown"
+    """IP, с которого пришли. X-Forwarded-For принимаем только когда перед кабинетом
+    заведомо стоит наш прокси (TRUST_PROXY_HEADERS): заголовок дописывается клиентом
+    бесплатно, и без флага любой желающий вписывает себе адрес в AuditLog и обходит
+    ограничение подбора пароля по IP (п. 19–21 TASKS2.md).
+    """
+    direct = request.client.host if request.client else "unknown"
+    st = get_settings()
+    if not st.trust_proxy_headers:
+        return direct
+    hops = [h.strip() for h in request.headers.get("X-Forwarded-For", "").split(",") if h.strip()]
+    if not hops:
+        return direct
+    # Справа — адреса, добавленные нашими прокси; клиентский контроль заканчивается
+    # перед ними, поэтому берём запись отступив справа на число своих hops.
+    index = len(hops) - max(1, st.trust_proxy_hops)
+    return hops[index] if index >= 0 else hops[0]

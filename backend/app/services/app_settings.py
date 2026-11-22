@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.orm import Session
 
 from ..config import get_settings
@@ -28,7 +29,7 @@ from ..models import AppSetting, AuditLog, User, utcnow
 MASK = "***"
 
 # Секретные ключи: наружу не отдаём никогда, только флаг «задан».
-SECRET_KEYS = ("onec.password", "onec.push_token")
+SECRET_KEYS = ("onec.password", "onec.push_token", "service.readyz_token", "db.password")
 
 
 @dataclass(frozen=True)
@@ -73,6 +74,14 @@ SPEC: dict[str, Spec] = {
                                   label="Интервал синхронизации, мин"),
     "sync.window_days": Spec("int", 30, minimum=7, maximum=366,
                              label="За какой период тянуть динамику, суток"),
+    # Сколько витрина может жить без успешной загрузки, чтобы /readyz ещё отвечал
+    # 200 (п. 19 TASKS2.md). 5400 = шесть интервалов синхронизации по умолчанию:
+    # три подряд не удавшихся загрузки — уже сигнал оператору, но одиночный
+    # ночной перезапуск 1С — ещё не авария.
+    "sync.age_limit_sec": Spec("int", 5400, minimum=60, maximum=604800,
+                               label="Максимальный возраст витрины для /readyz, сек",
+                               hint="свежее последней успешной загрузки — иначе /readyz отвечает 503; "
+                                    "на работу кабинета не влияет"),
     # --- что видит пользователь ---------------------------------------------
     "ui.dynamics_days": Spec("int", 14, minimum=7, maximum=90,
                              label="Динамика на дашборде, суток"),
@@ -126,6 +135,36 @@ SPEC: dict[str, Spec] = {
                                        label="Неудачных входов до блокировки"),
     "security.lockout_minutes": Spec("int", 15, env="lockout_minutes", minimum=1, maximum=1440,
                                      label="На сколько минут блокировать учётку"),
+    # --- готовность сервиса (/readyz, п. 19 TASKS2.md) ------------------------
+    # Из .env в этот ключ не переезжает: токен администратора живёт в БД. Но
+    # /readyz принимает и значение переменной READY_TOKEN (env) как равноценное:
+    # оператор мог завести токен только в секретах, а healthcheck контейнера
+    # вообще проходит без токена (403 для него — «приложение живо»), так что
+    # дублировать токен из UI в env не нужно (дефект D3, п. 19 TASKS2.md).
+    "service.readyz_token": Spec("str", "", secret=True,
+                                 label="Токен пробы готовности /readyz",
+                                 hint="пусто — проба открыта (в ответе token_required: false); "
+                                      "задан — доступ только с ?token=…"),
+    # --- база данных кабинета (п. 26–28 TASKS2.md) ---------------------------
+    # Точкой отката остаётся `DATABASE_URL` из окружения: пока админ не сохранил
+    # свою базу (или нажал «вернуть ENV»), кабинет живёт ровно там же, где и до
+    # появления этой вкладки. Флаг `db.use_settings` — единственный выключатель,
+    # его ставят кнопки вкладки «База данных»; руками в общих настройках его
+    # трогать не нужно.
+    "db.use_settings": Spec("bool", False,
+                            label="База из настроек кабинета",
+                            hint="выключено — DATABASE_URL из окружения; вкладка «База данных»"),
+    "db.dialect": Spec("choice", "postgresql", choices=("postgresql", "sqlite"),
+                       label="Диалект базы",
+                       hint="postgresql — серверная база, sqlite — файл на диске кабинета"),
+    "db.host": Spec("str", "", label="Хост сервера PostgreSQL",
+                    hint="например 10.0.0.12 или db.internal; для sqlite не используется"),
+    "db.port": Spec("int", 5432, minimum=1, maximum=65535, label="Порт PostgreSQL"),
+    "db.user": Spec("str", "", label="Пользователь базы"),
+    "db.password": Spec("str", "", secret=True, label="Пароль базы",
+                        hint="наружу не отдаётся; маска *** означает «пароль не меняли»"),
+    "db.database": Spec("str", "", label="Имя базы",
+                        hint="для sqlite — путь к файлу, например D:\\tmp\\statcab.db"),
 }
 
 # Публичный набор: любой авторизованный пользователь (менеджеру — пороги и
@@ -141,6 +180,13 @@ ROLE_TOKENS = ("admin", "top", "manager")
 DEFAULTS: dict[str, Any] = {key: spec.default for key, spec in SPEC.items()}
 
 _MAX_STR_LEN = 500
+
+# Диалекты, на которых `insert(...).on_conflict_do_update` родной: проект
+# поддерживает SQLite и PostgreSQL (п. 24 TASKS2.md), оба умеют
+# `ON CONFLICT (key) DO UPDATE` по уникальному индексу `key`. Для прочих
+# годится лишь запасной ORM-путь в `apply` — врать про поддержку upsert
+# хуже, чем медленный, но честный путь.
+_UPSERT_INSERT = {"sqlite": sqlite.insert, "postgresql": postgresql.insert}
 
 
 # --------------------------------------------------------------------- чтение ----
@@ -351,7 +397,9 @@ def _validate_together(values: dict[str, Any]) -> None:
 def apply(db: Session, patch: dict[str, Any], actor: User | None = None) -> dict[str, Any]:
     """Сохранить частичный набор настроек. Возвращает все эффективные значения.
 
-    Пишем только те ключи, значение которых действительно изменилось.
+    Пишем только те ключи, значение которых действительно изменилось; запись
+    идёт одной командой `INSERT ... ON CONFLICT (key) DO UPDATE` (п. 32
+    TASKS2.md) — вместо «SELECT, потом INSERT/UPDATE» на каждый ключ.
     Ошибки — ValueError с русским текстом (эндпоинт превращает их в 422).
     """
     if not isinstance(patch, dict):
@@ -383,16 +431,33 @@ def apply(db: Session, patch: dict[str, Any], actor: User | None = None) -> dict
     merged = {**current, **changed}
     _validate_together(merged)
 
-    for key, value in changed.items():
-        rec = db.scalar(select(AppSetting).where(AppSetting.key == key))
-        payload = json.dumps(value, ensure_ascii=False)
-        if rec:
-            rec.value = payload
-            rec.updated_at = utcnow()
-            rec.updated_by = actor.id if actor else None
-        else:
-            db.add(AppSetting(key=key, value=payload,
-                              updated_by=actor.id if actor else None))
+    now = utcnow()
+    rows = [{"key": key, "value": json.dumps(value, ensure_ascii=False),
+             "updated_at": now, "updated_by": actor.id if actor else None}
+            for key, value in changed.items()]
+    insert_ = _UPSERT_INSERT.get(db.get_bind().dialect.name)
+    if insert_ is not None:
+        # Одна команда вместо SELECT+INSERT/UPDATE: нет лишнего круга к БД на
+        # ключ и нет гонки «проверили — вставили» между двумя запросами.
+        # `updated_at` ставим явно: Core-вставка обходит ORM-овский onupdate.
+        stmt = insert_(AppSetting).values(rows)
+        db.execute(stmt.on_conflict_do_update(
+            index_elements=[AppSetting.key],
+            set_={"value": stmt.excluded.value,
+                  "updated_at": stmt.excluded.updated_at,
+                  "updated_by": stmt.excluded.updated_by},
+        ))
+    else:
+        # Запасной путь для третьего диалекта (в проекте их нет): тот же
+        # результат через ORM, но с классическим «SELECT, потом INSERT».
+        for row in rows:
+            rec = db.scalar(select(AppSetting).where(AppSetting.key == row["key"]))
+            if rec:
+                rec.value = row["value"]
+                rec.updated_at = row["updated_at"]
+                rec.updated_by = row["updated_by"]
+            else:
+                db.add(AppSetting(**row))
 
     db.add(AuditLog(user_id=actor.id if actor else None, login=actor.login if actor else None,
                     action="admin.settings_update",

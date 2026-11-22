@@ -11,20 +11,35 @@
 * `period.requested_from/requested_to` — мутация payload'а в эндпоинте, поэтому
   разные сырые параметры обязаны давать разные записи кэша, а не «чужие» даты;
 * LRU на 8 записей и `invalidate()` — границы того, что кэш обещает.
+* single-flight: параллельные одинаковые запросы считают агрегат один раз, а
+  байтовый потолок `MAX_BYTES` ограничивает RAM кэша (п. 32 TASKS2.md).
 
 Данные заводим свои (декабрь 2025) и убираем за собой: файл отчёта диспетчера в
 тесты не тянем, а витрина на весь прогон одна.
 """
 from __future__ import annotations
 
+import threading
+import time
 from datetime import date
 
 import pytest
 from sqlalchemy import delete, event
 
-from app.db import SessionLocal, engine
+from app import db as app_db
 from app.models import FactDispatcherShift, FactVesselOperation
 from app.services import data_cache
+
+
+def SessionLocal():  # noqa: N802 — имя фабрики сохранено намеренно
+    """Сессия ТЕКУЩЕЙ базы.
+
+    `from app.db import SessionLocal` связывает с фабрикой, а не с базой: тесты
+    переезда (test_dbconfig) ставят новый движок на ходу, и импорт на уровне
+    модуля остался бы смотреть в прежнюю базу.
+    """
+    return app_db.SessionLocal()
+
 
 PERIOD = {"from": "2025-12-01", "to": "2025-12-03"}
 URL = "/api/dispatcher/overview"
@@ -61,11 +76,11 @@ def fact_queries():
         if "fact_" in statement.lower():
             calls.append(statement)
 
-    event.listen(engine, "before_cursor_execute", listener)
+    event.listen(app_db.engine, "before_cursor_execute", listener)
     try:
         yield calls
     finally:
-        event.remove(engine, "before_cursor_execute", listener)
+        event.remove(app_db.engine, "before_cursor_execute", listener)
 
 
 @pytest.fixture(scope="module")
@@ -228,7 +243,7 @@ def test_lru_keeps_only_eight_entries():
     data_cache.invalidate()
     for i in range(12):
         assert data_cache.put(("ключ", i), "v1", {"i": i})
-    assert data_cache.info()["entries"] == data_cache.MAX_ENTRIES == 8
+    assert data_cache.stats()["entries"] == data_cache.MAX_ENTRIES == 8
     assert data_cache.get(("ключ", 0), "v1") is None, "самые старые вытеснены"
     assert data_cache.get(("ключ", 11), "v1") == b'{"i":11}'
 
@@ -255,7 +270,7 @@ def test_invalidate_forces_recount(client, admin_hdr, vitrine, fact_queries):
     assert fact_queries == []
 
     data_cache.invalidate()
-    assert data_cache.info()["entries"] == 0
+    assert data_cache.stats()["entries"] == 0
     assert client.get(URL, params=PERIOD, headers=admin_hdr).status_code == 200
     assert fact_queries, "после invalidate() ответ обязан быть пересобран"
 
@@ -284,3 +299,121 @@ def test_import_resets_cache(client, admin_hdr, vitrine, monkeypatch):
                     headers=admin_hdr)
     assert r.status_code == 200, r.text
     assert reset, "после импорта кэш обязан быть сброшен"
+
+
+# ------------------------------------------------ single-flight и байтовый пол ----
+
+def test_single_flight_body_computed_once():
+    """Две нитки и один ключ: считает первая, вторая забирает её байты (п. 32 TASKS2.md).
+
+    Эмулируем путь эндпоинта `get → посчитали → put`: первая нитка «считает»
+    медленно, вторая стартует, когда полёт уже зарегистрирован, и обязана
+    получить те же байты, ни разу не считая.
+    """
+    data_cache.invalidate()
+    key, started = ("single", "flight"), threading.Event()
+    computed: list[int] = []
+    got: list[bytes] = []
+
+    def worker() -> None:
+        body = data_cache.get(key, "v1")
+        if body is not None:              # считали не мы — забрали чужой результат
+            got.append(body)
+            return
+        started.set()
+        time.sleep(0.3)                   # «долгий» расчёт агрегата
+        computed.append(1)
+        got.append(data_cache.put(key, "v1", {"ok": 1}))
+
+    t1 = threading.Thread(target=worker)
+    t1.start()
+    assert started.wait(2), "лидер не стартовал"
+    t2 = threading.Thread(target=worker)
+    t2.start()
+    t1.join(5)
+    t2.join(5)
+    assert not t1.is_alive() and not t2.is_alive(), "single-flight не имеет права вешать потоки"
+    assert len(computed) == 1, "агрегат обязан считаться один раз"
+    assert got == [b'{"ok":1}', b'{"ok":1}']
+    assert data_cache.stats()["inflight_joined"] >= 1
+    data_cache.invalidate()
+
+
+def test_single_flight_cached_value_built_once():
+    """`cached_value`: медленный build выполняется один раз на параллельные вызовы."""
+    data_cache.invalidate()
+    calls: list[int] = []
+    started = threading.Event()
+
+    def build() -> str:
+        calls.append(1)
+        started.set()
+        time.sleep(0.3)
+        return "v-1"
+
+    out: list[str] = []
+    t1 = threading.Thread(target=lambda: out.append(data_cache.cached_value(("k",), 60.0, build)))
+    t1.start()
+    assert started.wait(2), "лидер не стартовал"
+    t2 = threading.Thread(target=lambda: out.append(data_cache.cached_value(("k",), 60.0, build)))
+    t2.start()
+    t1.join(5)
+    t2.join(5)
+    assert not t1.is_alive() and not t2.is_alive(), "ожидание не имеет права вешать потоки"
+    assert sorted(out) == ["v-1", "v-1"]
+    assert len(calls) == 1, "значение обязано считаться один раз"
+    data_cache.invalidate()
+
+
+def test_dead_leader_does_not_hang_waiter(monkeypatch):
+    """Лидер умер до `put` — ждущий ждёт не дольше `INFLIGHT_TTL` и становится лидером.
+
+    Потолок уменьшаем: проверяем механизм стража, а не то, что ждать приходится
+    десять секунд реального времени.
+    """
+    data_cache.invalidate()
+    monkeypatch.setattr(data_cache, "INFLIGHT_TTL", 0.2)
+    key = ("ключ", "сбой")
+    assert data_cache.get(key, "v1") is None       # лидер-призрак: put не позовём
+    out: list = []
+    t0 = time.monotonic()
+    t = threading.Thread(target=lambda: out.append(data_cache.get(key, "v1")))
+    t.start()
+    t.join(5)
+    assert not t.is_alive(), "смерть лидера не имеет права вешать ждущего"
+    assert out == [None], "переждав дедлайн, поток обязан стать лидером сам"
+    assert time.monotonic() - t0 < 3.0, "ждать обязаны ~INFLIGHT_TTL, а не вечно"
+    data_cache.invalidate()
+
+
+def test_byte_cap_evicts_oldest(monkeypatch):
+    """Потолок по суммарным байтам (п. 32 TASKS2.md): переполнение вытесняет старое.
+
+    `MAX_BYTES` уменьшаем — гонять мегабайты payload'ов ради теста незачем,
+    проверяется порядок вытеснения, а не величина цифры.
+    """
+    data_cache.invalidate()
+    monkeypatch.setattr(data_cache, "MAX_BYTES", 1500)
+    big = {"x": "0" * 900}                          # ~907 байт в JSON
+    assert data_cache.put(("байт", 1), "v1", big)
+    assert data_cache.put(("байт", 2), "v1", big)   # вдвоём не влезают — первая ушла
+    assert data_cache.get(("байт", 1), "v1") is None, "старая запись вытеснена по байтам"
+    assert data_cache.get(("байт", 2), "v1") is not None
+    st = data_cache.stats()
+    assert st["entries"] == 1 and st["bytes"] <= data_cache.MAX_BYTES
+    data_cache.invalidate()
+
+
+def test_oversized_single_entry_survives(monkeypatch):
+    """Единственный ответ больше потолка — всё равно живёт.
+
+    Иначе единственный годовой `overview` (~740 КБ по замерам TASKS2.md)
+    вытеснялся бы в момент добавления: кэш «ограничивал» бы RAM ценой
+    собственной бесполезности.
+    """
+    data_cache.invalidate()
+    monkeypatch.setattr(data_cache, "MAX_BYTES", 100)
+    body = data_cache.put(("байт", "гигант"), "v1", {"x": "1" * 500})
+    assert data_cache.get(("байт", "гигант"), "v1") == body
+    assert data_cache.stats()["entries"] == 1
+    data_cache.invalidate()

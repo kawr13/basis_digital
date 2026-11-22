@@ -46,17 +46,20 @@
 #    --no-auto-fix отключает починку. Хелсчек `pg_isready` индикатором не является:
 #    для него «сервер ответил» уже равно «healthy», даже если аутентификация не прошла.
 #
-# 5. Рядом ищутся тома pgdata из ДРУГИХ папок проекта. Имя compose-проекта = имя
-#    папки, поэтому запуск из соседней директории поднимает пустую базу и выглядит
-#    как потеря данных.
+# 5. Рядом ищутся тома pgdata от прошлой жизни проекта. Имя compose-проекта
+#    зафиксировано в docker-compose.yml (name: statcab), том — statcab_pgdata:
+#    запуск из соседней папки переиспользует тот же том, а не поднимает пустую
+#    базу. Остались тома старых выкатов (до фиксации имени том назывался
+#    `<имя_папки>_pgdata`) — данные могут лежать там, а не в текущем томе.
 #
 # 6. После запуска ждёт зелёного /healthz через nginx (то есть проверяется вся
 #    цепочка web → backend → PostgreSQL), а не просто «контейнеры в Up».
 #
-# 7. Сверяет POSTGRES_PASSWORD внутри работающего контейнера backend с секретом:
-#    compose считает контейнер актуальным, пока не изменилось описание сервиса, а
-#    переменная из --env-file в нём могла остаться от прошлой жизни. Расхождение —
-#    пересоздаём контейнер, а не подгоняем пароль базы под него.
+# 7. Сверяет окружение работающего контейнера backend с секретом: DATABASE_URL
+#    (в неё compose собирает пароль БД — отдельной переменной POSTGRES_PASSWORD
+#    в контейнере нет) и SECRET_KEY. Compose считает контейнер актуальным, пока
+#    не изменилось описание сервиса, а значение из --env-file в нём могло
+#    остаться от прошлой жизни. Расхождение — пересоздаём контейнер.
 #
 # .env в репозитории не появляется никогда: файл секретов лежит вне репозитория.
 #
@@ -226,16 +229,18 @@ warn_foreign_volumes() {
     dir="$(docker volume inspect "$v" --format '{{ index .Labels "com.docker.compose.project.working_dir" }}' 2>/dev/null || true)"
     [ -n "$dir" ] || continue
     dir="$(readlink -f "$dir" 2>/dev/null || printf '%s' "$dir")"
-    # свой том и том проекта из уже удалённой папки не интересуют: во первом
-    # мы и так живём, второго на диске нет — предупреждение было бы шумом
-    if [ "$dir" != "$here" ] && [ -d "$dir" ]; then
+    # свой том (statcab_pgdata) и том проекта из уже удалённой папки не
+    # интересуют: во первом мы и так живём — имя проекта зафиксировано, том
+    # один на все папки, — второго на диске нет, предупреждение было бы шумом
+    if [ "$v" != "statcab_pgdata" ] && [ "$dir" != "$here" ] && [ -d "$dir" ]; then
       warn "⚠ Том $v создан проектом из $dir"
       found=1
     fi
   done
   if [ "$found" = 1 ]; then
-    warn "  Если кабинет раньше работал из той папки — данные там, а не здесь."
-    warn "  Имя compose-проекта = имя папки, от него зависит имя тома pgdata."
+    warn "  Имя compose-проекта зафиксировано (name: statcab), рабочий том — statcab_pgdata."
+    warn "  Если кабинет работал до фиксации имени, его данные могут лежать в томе"
+    warn "  выше (он назывался по имени папки) — сверьте working_dir перед `down -v`."
   fi
 }
 warn_foreign_volumes
@@ -286,19 +291,41 @@ db_fix_via_socket() {
 }
 
 # Запасной путь: local тоже под паролем. Временно ставим свою строку trust в начало
-# pg_hba, меняем пароль, конфиг возвращаем — обратный ход безусловен, иначе
-# оставим сервер с trust.
+# pg_hba, меняем пароль, конфиг возвращаем. Обратный ход висит на trap: обрыв по
+# Ctrl+C, потеря SSH или падающее `docker exec` между шагами не должны оставить
+# сервер с `local all all trust` — это вход в базу без пароля изнутри хоста.
+HBA_CONF=""
+hba_revert() {
+  [ -n "$HBA_CONF" ] || return 0
+  compose exec -T db sh -c \
+    "if [ -f '$HBA_CONF.deploybak' ]; then mv -f '$HBA_CONF.deploybak' '$HBA_CONF'; fi; kill -HUP 1" \
+    >/dev/null 2>&1 || true
+  HBA_CONF=""
+}
+
 db_fix_via_pghba() {
-  local conf rc=1
-  conf="$(compose exec -T -e PGUSER="$PG_USER" db psql -w -tAc 'show hba_file' 2>/dev/null | tr -d '\r\n' || true)"
-  case "$conf" in /*) : ;; *) conf="/var/lib/postgresql/data/pg_hba.conf";; esac
+  local rc=1 left="0"
+  HBA_CONF="$(compose exec -T -e PGUSER="$PG_USER" db psql -w -tAc 'show hba_file' 2>/dev/null | tr -d '\r\n' || true)"
+  case "$HBA_CONF" in /*) : ;; *) HBA_CONF="/var/lib/postgresql/data/pg_hba.conf";; esac
+  conf="$HBA_CONF"
   say "▶ local в pg_hba.conf под паролем — временно включаю trust, меняю пароль, возвращаю конфиг…"
-  compose exec -T db sh -c "cp -p '$conf' '$conf.deploybak' && { printf 'local all all trust\n'; cat '$conf'; } > '$conf.tmp' && mv '$conf.tmp' '$conf'" || return 1
+  compose exec -T db sh -c "cp -p '$conf' '$conf.deploybak' && { printf 'local all all trust\n'; cat '$conf'; } > '$conf.tmp' && mv '$conf.tmp' '$conf'" \
+    || { HBA_CONF=""; return 1; }
+  trap 'hba_revert; exit 130' INT TERM
+  trap 'hba_revert' EXIT
   compose exec -T db sh -c 'kill -HUP 1' >/dev/null 2>&1 || true
   sleep 2
   if db_fix_via_socket; then rc=0; fi
-  compose exec -T db sh -c "mv -f '$conf.deploybak' '$conf'; kill -HUP 1" >/dev/null 2>&1
-  sleep 1
+  hba_revert
+  # Пост-проверка: временной trust не имеет права пережить запуск — его не видит
+  # ни db_password_ok, ни --check (они смотрят пароль, а не pg_hba).
+  left="$(compose exec -T db sh -c "grep -c '^local all all trust' '$conf' 2>/dev/null || echo 0" \
+          | tr -dc '0-9')"
+  if [ "${left:-0}" != "0" ]; then
+    warn "⚠ В $conf осталась строка «local all all trust» — автоматический возврат не удался."
+    warn "  Удалите её вручную и перезапустите базу: docker compose exec db kill -HUP 1"
+    return 1
+  fi
   return $rc
 }
 
@@ -365,27 +392,52 @@ export WEB_PORT COOKIE_SECURE
 compose up -d --build
 
 # env внутри работающего контейнера мог достаться от прошлой жизни: compose считает
-# контейнер актуальным, пока не изменилось описание сервиса. Сравниваем пароль,
-# который реально внутри, с секретом, и при расхождении пересоздаём контейнер.
+# контейнер актуальным, пока не изменилось описание сервиса. POSTGRES_PASSWORD в
+# окружение backend не кладётся — compose подставляет пароль в DATABASE_URL, поэтому
+# сравниваем с секретом то, что в контейнере реально есть: собранную DATABASE_URL и
+# SECRET_KEY. При расхождении пересоздаём контейнер (базу не трогаем).
 BACKEND_ID="$(compose ps -q backend 2>/dev/null || true)"
 if [ -n "$BACKEND_ID" ]; then
-  BACKEND_PW="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$BACKEND_ID" 2>/dev/null | sed -n 's/^POSTGRES_PASSWORD=//p' | head -n 1 || true)"
-  if [ -n "$BACKEND_PW" ] && [ "$BACKEND_PW" != "$PG_PW" ]; then
-    say "▶ В работающем контейнере backend другой POSTGRES_PASSWORD — пересоздаю…"
+  BACKEND_ENV="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$BACKEND_ID" 2>/dev/null || true)"
+  BACKEND_DB_URL="$(printf '%s\n' "$BACKEND_ENV" | sed -n 's/^DATABASE_URL=//p' | tail -n 1)"
+  BACKEND_SECRET="$(printf '%s\n' "$BACKEND_ENV" | sed -n 's/^SECRET_KEY=//p' | tail -n 1)"
+  SECRET_KEY_WANT="$(secret_get SECRET_KEY)"
+  # сборка строки совпадает с docker-compose.yml: postgresql+psycopg2://user:pw@db:5432/db
+  DB_URL_WANT="postgresql+psycopg2://${PG_USER}:${PG_PW}@db:5432/${PG_DB}"
+  if { [ -n "$BACKEND_DB_URL" ] && [ "$BACKEND_DB_URL" != "$DB_URL_WANT" ]; } ||
+     { [ -n "$SECRET_KEY_WANT" ] && [ -n "$BACKEND_SECRET" ] && [ "$BACKEND_SECRET" != "$SECRET_KEY_WANT" ]; }; then
+    say "▶ В работающем контейнере backend окружение от прошлой сборки — пересоздаю…"
     compose up -d --force-recreate backend
   fi
 fi
 
 # --- 7. Ждём живой кабинет, а не «контейнеры в Up» ---------------------------
-probe() {
+probe_http() {
   if command -v curl >/dev/null 2>&1; then curl -fsS -o /dev/null "$1" 2>/dev/null
   else wget -q -O /dev/null "$1" 2>/dev/null; fi
 }
-HEALTH_URL="http://127.0.0.1:$WEB_PORT/healthz"
+# Проба идёт туда, где кабинет действительно доступен (п. 21 TASKS2.md). С
+# Caddy-оверлеем web не публикует порт вообще, а снаружи только TLS на 443:
+# прежний http://127.0.0.1:$WEB_PORT падал бы даже при удачном выкате. При Caddy
+# стучимся изнутри compose-сети — проверяется вся цепочка TLS → nginx → backend,
+# а не только «контейнер поднялся».
+case "$OVERRIDES" in
+  *caddy*)
+    HEALTH_URL="https://127.0.0.1/healthz (из контейнера caddy)"
+    probe_ready() {
+      compose exec -T caddy sh -c \
+        'wget -q -O /dev/null --no-check-certificate https://127.0.0.1/healthz' >/dev/null 2>&1
+    }
+    ;;
+  *)
+    HEALTH_URL="http://127.0.0.1:$WEB_PORT/healthz"
+    probe_ready() { probe_http "$HEALTH_URL"; }
+    ;;
+esac
 # число попыток можно уменьшить переменной HEALTH_TRIES (по умолчанию 45 × 2 с)
 HEALTH_OK=0
 for i in $(seq 1 "${HEALTH_TRIES:-45}"); do
-  if probe "$HEALTH_URL"; then HEALTH_OK=1; break; fi
+  if probe_ready; then HEALTH_OK=1; break; fi
   sleep 2
 done
 if [ "$HEALTH_OK" != 1 ]; then
@@ -393,14 +445,25 @@ if [ "$HEALTH_OK" != 1 ]; then
   compose logs --tail=30 backend 2>&1 || true
   warn "--- статус ---"
   compose ps 2>&1 || true
-  die "Кабинет не ответил на $HEALTH_URL за 90 секунд"
+  die "Кабинет не ответил на $HEALTH_URL за $(( ${HEALTH_TRIES:-45} * 2 )) секунд"
 fi
 
 # --- 8. Куда смотреть --------------------------------------------------------
 IP="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
 if [ -z "$IP" ]; then IP="<IP-сервера>"; fi
 say ""
-say "✔ Готово, /healthz отвечает. Кабинет: http://$IP:$WEB_PORT"
+# Ссылка в конце — та, по которой в кабинет реально заходят. С TLS-терминатором
+# (Caddy или хостовый nginx) это https без порта: прежний http://IP:8080 вёл в
+# publish-порт, которого при Caddy-оверлее не существует (п. 21 TASKS2.md).
+CAB_SCHEME=http; CAB_PORT=":$WEB_PORT"
+if [ "$HTTPS" = "1" ]; then CAB_SCHEME=https; CAB_PORT=""; fi
+case "$OVERRIDES" in
+  *caddy*) CAB_SCHEME=https; CAB_PORT="" ;;
+esac
+say "✔ Готово, /healthz отвечает. Кабинет: ${CAB_SCHEME}://$IP${CAB_PORT}"
+case "$OVERRIDES" in
+  *caddy*) say "  Caddy: сертификат на домен из deploy/caddy/Caddyfile — заходить по домену, не по IP." ;;
+esac
 say "  Логин: $ADMIN_LOGIN"
 if [ "$CREATED_SECRETS" = 1 ] || [ "$SHOW_PASSWORD" = 1 ]; then
   say "  Пароль: $ADMIN_PASSWORD"
@@ -409,7 +472,10 @@ else
   say "  Пароль: sed -n 's/^ADMIN_PASSWORD=//p' $SECRET_FILE"
 fi
 say ""
-say "  Проверка:  docker compose ps && curl -I http://localhost:$WEB_PORT/"
+case "$OVERRIDES" in
+  *caddy*) say "  Проверка:  docker compose exec caddy wget -qO- --no-check-certificate https://127.0.0.1/healthz";;
+  *) say "  Проверка:  docker compose ps && curl -I http://localhost:$WEB_PORT/";;
+esac
 say "  Логи:      docker compose logs -f backend"
 say "  Стоп:      docker compose stop      (данные останутся в томах)"
 say "  ВНИМАНИЕ:  docker compose down -v удалит тома вместе с данными"

@@ -65,10 +65,11 @@ from .vessels import (
     PARK_CODE,
     SLOT_HOURS,
     apply_reberthing_state,
+    berth_length,
     length_cells,
     placements_in_period,
-    slots_in_range,
     span_of,
+    spill_segments,
 )
 
 # Палитра грузов обязана совпадать с фронтендом (frontend/src/vessels.ts):
@@ -180,24 +181,126 @@ def _chain_steps(items: list[VesselPlacement]) -> dict[int, int]:
     return order
 
 
+# Минимальная ширина полосы — час (1/6 слота): нулевую стоянку нельзя ни увидеть
+# на бумаге, ни поймать глазом. Столько же оставляет себе экран (`barGeometry`).
+MIN_BAR_SLOTS = 1 / 6
+# Кегль подписи стрелки: 5.8 pt на плотной сетке читался только с лупой, а
+# «шаг 2→3» и «лист 2» — единственное, чем стрелки связываются в цепочку.
+ARROW_PT = 6.2
+# Геометрия острия и линии. Линия не доезжает до кончика ровно `ARROW_GAP` pt,
+# остальное дорисовывает треугольник (`ARROW_HEAD` — длина, `ARROW_WING` —
+# полуразлёт перьев). Тесты обязаны брать числа отсюда, а не повторять их:
+# подправил остриё — проверка геометрии не должна за это мстить.
+ARROW_HEAD = 8.4
+ARROW_WING = 3.7
+ARROW_GAP = 7.0
+ARROW_W = 1.7
+ARROW_DOT = 2.1
+
+
+def _ink(color: str) -> str:
+    """Краска стрелки по цвету полосы: тот же оттенок, но затемнённый до читаемого.
+
+    Зеркало `arrowInk` из frontend/src/vessels.ts — экран и лист обязаны спорить
+    одними словами и одними цветами. Оттенок бережём (по нему читают, чья это
+    цепочка), светлоту убавляем ровно до контраста 4.5:1 к белому: «стало
+    читаемее» мнением не проверить, числом — можно. Светлоту HSL мерой
+    читаемости быть не может (она не перцептивная: у янтарного и бирюзового
+    она одинаковая, а видны они по-разному), поэтому крутим её, пока контраст
+    не станет достаточным, но не ниже 16% — там уже чёрный. Принимает
+    `#rrggbb`, `#rgb` и `0xrrggbb` (то, что возвращает `reportlab.hexval()`).
+    """
+    s = color[2:] if color[:2].lower() == "0x" else color
+    if s[:1] == "#":
+        s = s[1:]
+    if len(s) == 3:
+        s = "".join(ch * 2 for ch in s)
+    if len(s) != 6:
+        return color
+    try:
+        r, g, b = (int(s[i:i + 2], 16) / 255 for i in (0, 2, 4))
+    except ValueError:
+        return color
+    mx, mn = max(r, g, b), min(r, g, b)
+    d = mx - mn
+    if not d:
+        h = 0.0
+    elif mx == r:
+        h = ((g - b) / d) % 6 * 60
+    elif mx == g:
+        h = ((b - r) / d + 2) * 60
+    else:
+        h = ((r - g) / d + 4) * 60
+    if h < 0:
+        h += 360
+
+    def at(l: float) -> tuple[float, float, float]:
+        # d — «сколько краски»: при затемнении он сохраняется, поэтому
+        # тёмно-янтарный груз остаётся янтарным, а не грязным
+        sat = min(d / (1 - abs(2 * l - 1)), 1.0) if d else 0.0
+        cc = (1 - abs(2 * l - 1)) * sat
+        x = cc * (1 - abs((h / 60) % 2 - 1))
+        m = l - cc / 2
+        if h < 60:
+            r1, g1, b1 = cc, x, 0.0
+        elif h < 120:
+            r1, g1, b1 = x, cc, 0.0
+        elif h < 180:
+            r1, g1, b1 = 0.0, cc, x
+        elif h < 240:
+            r1, g1, b1 = 0.0, x, cc
+        elif h < 300:
+            r1, g1, b1 = x, 0.0, cc
+        else:
+            r1, g1, b1 = cc, 0.0, x
+        return (r1 + m, g1 + m, b1 + m)
+
+    def on_white(rgb: tuple[float, float, float]) -> float:
+        rel = lambda v: v / 12.92 if v <= 0.03928 else ((v + 0.055) / 1.055) ** 2.4
+        lum = 0.2126 * rel(rgb[0]) + 0.7152 * rel(rgb[1]) + 0.0722 * rel(rgb[2])
+        return 1.05 / (lum + 0.05)
+
+    l = min((mx + mn) / 2, 0.6)   # осветляем неумеем: только темнеем
+    rgb = at(l)
+    for _ in range(24):
+        if l <= 0.16 or on_white(rgb) >= 4.5:
+            break
+        l = max(l - 0.03, 0.16)
+        rgb = at(l)
+    # округление «в большую сторону», как в JS: `round()` в Python округляет
+    # до чётного, и одна и та же краска на экране и на бумаге различалась бы на
+    # единицу в канале — ровно на ту, что видно на плоском цвете
+    def ch(v: float) -> int:
+        return min(255, max(0, int(v * 255 + 0.5)))
+
+    return "#{:02x}{:02x}{:02x}".format(*(ch(v) for v in rgb))
+
+
 def _bar_clip(p: VesselPlacement, origin: datetime, day_from: int, day_to: int
-             ) -> tuple[int, int, bool, bool] | None:
-    """Слоты полосы внутри кадра: (левый, правый) либо None, если в кадр она не попала.
+              ) -> tuple[float, float, bool, bool] | None:
+    """Границы полосы в слотах (дробные) либо None, если в кадр она не попала.
 
     Тот же расчёт, что делает `draw_block`, — по нему лист решает, напечатана ли
     полоса вообще. Расхождение означало бы либо стрелку в никуда, либо стрелку,
     которая исчезла, хотя полоса на листе стоит. Возвращает (левый, правый,
     обрезан ли левый край, обрезан ли правый).
+
+    Слоты дробные: стоянка «до 21:00» занимает половину ячейки 18:00, а не всю
+    ячейку. Округление до целых слотов дорисовывало лишние шесть часов — и на
+    бумаге два судна «ушло в 21:00» и «встало в 21:00» выглядели наехавшими друг
+    на друга, хотя стояли вплотную: проверка конфликта всегда считала моменты
+    времени, врал именно рисунок. Экран режет так же (`barGeometry`).
     """
-    times = slots_in_range(p.starts_at, p.effective_ends_at or p.ends_at)
-    if not times:
+    t_end = p.effective_ends_at or p.ends_at
+    if t_end < p.starts_at:
         return None
-    first_slot = int((times[0] - origin).total_seconds() // 3600 // 6)
-    left = max(first_slot, day_from * len(SLOT_HOURS))
-    right = min(first_slot + len(times), (day_to + 1) * len(SLOT_HOURS))
+    first = (p.starts_at - origin).total_seconds() / 3600 / 6
+    last = max(first + MIN_BAR_SLOTS, (t_end - origin).total_seconds() / 3600 / 6)
+    left = max(first, day_from * len(SLOT_HOURS))
+    right = min(last, (day_to + 1) * len(SLOT_HOURS))
     if right <= left:
         return None
-    return left, right, first_slot < left, first_slot + len(times) > right
+    return left, right, first < left, last > right
 
 
 def _berth_closure(rows: list[VesselPlacement], selected: set[int], park_id: int) -> set[int]:
@@ -382,6 +485,39 @@ def build_plan_pdf(
     for p in placements:
         by_berth.setdefault(p.berth_id, []).append(p)
 
+    # Чужие корпуса на этих метрах. Бумага обязана рисовать их так же, как экран:
+    # причал, отдавший соседу 30 м стенки, обязан это видеть, иначе две полосы
+    # встанут в одни метры (у каждой «свои» были свободны). Считает `spill_segments`
+    # — та же функция, чем пользуется проверка конфликта: корпус лежит вдоль фронта
+    # непрерывно, и если его хвост переехал через соседа дальше, на листе он обязан
+    # лежать так же.
+    berth_by_id = {b.id: b for b in all_berths}
+    spill_front = [
+        (b.id, berth_length(b))
+        for b in sorted(
+            (x for x in all_berths if x.code != PARK_CODE),
+            key=lambda x: (x.sort_order, x.id),
+        )
+    ]
+    by_spill: dict[int, list[tuple[VesselPlacement, float, float, str]]] = {}
+    for p in placements:
+        own = berth_by_id.get(p.berth_id)
+        if not own or not own.length_m or p.length_m is None:
+            continue
+        for bid, m_from, m_to, side in spill_segments(
+            offset_m=p.offset_m or 0,
+            length_m=p.length_m,
+            own_id=p.berth_id,
+            own_len=berth_length(own),
+            spill_berth_id=p.spill_berth_id,
+            front=spill_front,
+        ):
+            if m_to <= m_from:
+                continue
+            by_spill.setdefault(bid, []).append(
+                (p, m_from, m_to, "нос" if side == "bow" else "хвост")
+            )
+
     # ── раскладка: альбом A4, поля по 8 мм, лист сжат по высоте ─────────────
     # Листы печатают по одному, а стрелка, чьи концы разъехались по листам,
     # превращается в огрызки «лист N» и читается хуже. Поэтому вертикаль
@@ -553,9 +689,13 @@ def build_plan_pdf(
         подпись «шаг N→M …». `dot=False` — когда у стрелки нет своей полосы-источника
         (приход с другого листа), иначе над ней висел бы бесхозный кружок."
         """
-        c.setStrokeColor(color)
-        c.setFillColor(color)
-        c.setLineWidth(1.2)
+        # линия — тёмная версия цвета полосы (см. `_ink`); сама полоса судна
+        # остаётся светлой, иначе стрелка переставала быть «продолжением»
+        # конкретной постановки. Белой подложки, как на экране, здесь нет:
+        # бумага белая, на ней тёмной линии хватает, а подложка второй стрелки
+        # затирала бы линию первой там, где они пересекаются.
+        hexs = color.hexval() if hasattr(color, "hexval") else None
+        ink = HexColor(_ink(hexs)) if hexs else color
         dx, dy = x1 - x0, y1 - y0
         ln = math.hypot(dx, dy)
         if ln < 0.5:  # начало и конец слились — рисовать нечего
@@ -563,12 +703,19 @@ def build_plan_pdf(
         ux, uy = dx / ln, dy / ln          # куда смотрит стрелка
         px, py = -uy, ux                   # перпендикуляр: на него разводим перья
         if dot:
-            c.circle(x0, y0, 1.6, stroke=0, fill=1)          # «откуда» — как на экране
-        c.line(x0, y0, x1 - ux * 5.5, y1 - uy * 5.5)         # до острия не доезжаем
+            # «откуда» — как на экране: светлая метка в белом кольце
+            c.setFillColor(color)
+            c.setStrokeColor(HexColor("#ffffff"))
+            c.setLineWidth(0.5)
+            c.circle(x0, y0, ARROW_DOT, stroke=1, fill=1)
+        c.setStrokeColor(ink)
+        c.setFillColor(ink)
+        c.setLineWidth(ARROW_W)
+        c.line(x0, y0, x1 - ux * ARROW_GAP, y1 - uy * ARROW_GAP)   # до острия не доезжаем
         head = c.beginPath()
         head.moveTo(x1, y1)
-        head.lineTo(x1 - ux * 6.5 + px * 3.0, y1 - uy * 6.5 + py * 3.0)
-        head.lineTo(x1 - ux * 6.5 - px * 3.0, y1 - uy * 6.5 - py * 3.0)
+        head.lineTo(x1 - ux * ARROW_HEAD + px * ARROW_WING, y1 - uy * ARROW_HEAD + py * ARROW_WING)
+        head.lineTo(x1 - ux * ARROW_HEAD - px * ARROW_WING, y1 - uy * ARROW_HEAD - py * ARROW_WING)
         head.close()
         c.drawPath(head, stroke=0, fill=1)
 
@@ -584,16 +731,17 @@ def build_plan_pdf(
     def arrow_label(text: str, x: float, y: float, color: str, align: str = "left") -> None:
         """Подпись у наконечника стрелки: цвет стрелки + белая подложка.
 
-        Бумага — это сетка, серые выходные и полосы судов: подпись 5.8 pt без
-        подложки в них тонет, а именно «лист 2» и «шаг 2→3» связывают стрелки
-        через границы листов в читаемую цепочку.
+        Бумага — это сетка, серые выходные и полосы судов: подпись без подложки
+        в них тонет, а именно «лист 2» и «шаг 2→3» связывают стрелки через
+        границы листов в читаемую цепочку. Сама краска — тёмная версия цвета
+        полосы (`_ink`), тем же цветом линию рисует экран.
         """
-        c.setFont(f, 5.8)
-        w = pdfmetrics.stringWidth(text, f, 5.8)
+        c.setFont(f, ARROW_PT)
+        w = pdfmetrics.stringWidth(text, f, ARROW_PT)
         x0 = x - w if align == "right" else x
         c.setFillColor(HexColor("#ffffff"))
-        c.rect(x0 - 1.2, y - 1.4, w + 2.4, 7.8, stroke=0, fill=1)
-        c.setFillColor(HexColor(color))
+        c.rect(x0 - 1.2, y - 1.4, w + 2.4, ARROW_PT + 2.4, stroke=0, fill=1)
+        c.setFillColor(HexColor(_ink(color)))
         c.drawString(x0, y, text)
 
     def arrow_label_at_bar(text: str, x: float, y: float, color: str, br,
@@ -607,7 +755,7 @@ def build_plan_pdf(
         НАД полосой, над её верхней гранью: там чужих подписей не бывает вовсе,
         и полоса остаётся полосой. `br` — прямоугольник полосы-цели.
         """
-        w = pdfmetrics.stringWidth(text, f, 5.8)
+        w = pdfmetrics.stringWidth(text, f, ARROW_PT)
         left, right = margin + left_col, page_w_pt - margin
         if rightward:  # остриё в левый торец копии — текст влево от наконечника
             if x - 3 - w >= left:
@@ -714,7 +862,7 @@ def build_plan_pdf(
         else:               # полоса → чип: остриё в верхнюю грань чипа
             arrow_straight(x0, br[3], cx, cr[4], col)
         x, y = cx + 4, cr[4] + (16 if first_row else 10) + 9 * n
-        w = pdfmetrics.stringWidth(text, f, 5.8)
+        w = pdfmetrics.stringWidth(text, f, ARROW_PT)
         for _ in range(len(bar_rect) + 1):  # подъём может открыть следующую полосу
             hit = max((o[4] for o in bar_rect.values()
                        if o[0] == page_no and o[1] <= x + w + 1.2 and o[2] >= x - 1.2
@@ -794,6 +942,34 @@ def build_plan_pdf(
             # на сжатом листе шаг подписей растёт (ruler_step), сами отметки — нет
             if m % ruler_step == 0 and m < cells * 10:
                 c.drawRightString(margin + left_col - 3, y - 2, str(m))
+
+        # Чужие суда, стоящие на метрах этого причала: штриховка + пунктир,
+        # цвет — цвет судна, чтобы было видно, ЧЕЙ это корпус. Своя полоса
+        # рисуется поверх и остаётся сплошной: путать «кто здесь хозяин» нельзя.
+        for p, m_from, m_to, side in by_spill.get(b.id, []):
+            clip = _bar_clip(p, origin, day_from, day_to)
+            if clip is None:
+                continue
+            left, right, _, _ = clip
+            top = y_top - (max(0.0, min(m_from, cells * 10)) / 10) * cell_h
+            bottom = y_top - (max(0.0, min(m_to, cells * 10)) / 10) * cell_h
+            if top - bottom < 1:
+                continue
+            x = margin + left_col + (left - day_from * len(SLOT_HOURS)) * slot_w
+            w = (right - left) * slot_w - 1.5
+            color = bar_color(p)
+            c.setFillColor(HexColor(color))
+            c.setFillAlpha(0.30)
+            c.rect(x, bottom, w, top - bottom - 1, stroke=0, fill=1)
+            c.setFillAlpha(1)
+            c.setStrokeColor(HexColor(color))
+            c.setLineWidth(0.6)
+            c.setDash(1.6, 1.2)
+            c.rect(x, bottom, w, top - bottom - 1, stroke=1, fill=0)
+            c.setDash()
+            if top - bottom >= 8:
+                c.setFont(f, 5)
+                c.drawString(x + 2, bottom + 3.2, _clip(f"{side} «{p.vessel}»", w - 3, 5))
 
         # полосы судов
         for p in by_berth.get(b.id, []):

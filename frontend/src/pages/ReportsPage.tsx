@@ -1,6 +1,8 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  api, type CargoReport, type CapacityTrendReport, type ProcessingReport, type ReportWarehouse,
+  api,
+  isAbortError,
+  type CargoReport, type CapacityTrendReport, type ProcessingReport, type ReportWarehouse,
 } from "../api";
 import { useAuth } from "../auth";
 import { AppShell } from "../components/AppShell";
@@ -62,22 +64,53 @@ export default function ReportsPage() {
     [filters],
   );
 
+  // Номер запроса (TASKS2.md п.24, эталон — DrilldownPanel): при быстрой смене
+  // периода или вкладки отсталый ответ прежнего окна не должен показаться в
+  // таблице — проверяем «это ещё мой запрос» перед каждым setState.
+  const seq = useRef(0);
+  // Отмена вместо «дождётся и перетрёт» (TASKS2.md п.24): переключение
+  // вкладок/периода и возврат на вкладку (`visibilitychange`) не копят
+  // отчёты на бэкенде — прежний запрос отменяется следующим и при
+  // размонтировании страницы.
+  const ctrl = useRef<AbortController | null>(null);
+
   const load = useCallback(async () => {
+    const my = ++seq.current;
+    ctrl.current?.abort();
+    const ac = new AbortController();
+    ctrl.current = ac;
     setBusy(true);
     try {
-      if (tab === "daily" || tab === "per_warehouse") setDaily(await api.reportProcessing(params));
-      else if (tab === "cargo") setCargo(await api.reportCargo(params));
-      else setCapacity(await api.reportCapacity(params));
+      if (tab === "daily" || tab === "per_warehouse") {
+        const report = await api.reportProcessing(params, ac.signal);
+        if (my !== seq.current) return;
+        setDaily(report);
+      } else if (tab === "cargo") {
+        const report = await api.reportCargo(params, ac.signal);
+        if (my !== seq.current) return;
+        setCargo(report);
+      } else {
+        const report = await api.reportCapacity(params, ac.signal);
+        if (my !== seq.current) return;
+        setCapacity(report);
+      }
       setError("");
     } catch (e) {
+      // отмена — не ошибка (TASKS2.md п.24): плашка обязана молчать
+      if (isAbortError(e)) return;
+      if (my !== seq.current) return;
       setError(e instanceof Error ? e.message : "Не удалось получить отчёт");
     } finally {
-      setBusy(false);
+      if (my === seq.current) setBusy(false);
     }
   }, [tab, params]);
 
   useEffect(() => {
     load();
+    return () => {
+      // размонтирование (или пересоздание `load`): летящий отчёт больше не нужен
+      ctrl.current?.abort();
+    };
   }, [load]);
 
   // Отчёты смотрят реже, чем дашборд, но при возврате на вкладку цифры
@@ -115,6 +148,7 @@ export default function ReportsPage() {
     try {
       await api.downloadCsv(meta.path, params, `${meta.name}_${filters.from}_${filters.to}.csv`);
     } catch (e) {
+      if (isAbortError(e)) return;
       setError(e instanceof Error ? e.message : "Выгрузка не удалась");
     }
   };

@@ -12,6 +12,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { createPortal } from "react-dom";
 import {
   api,
+  isAbortError,
   type Berth,
   type Placement,
   type PlacementInput,
@@ -24,9 +25,11 @@ import { Field, FormError, Modal, Notice, errText } from "../components/admin/ui
 import { dmy } from "../format";
 import { resolveVesselRights, roleListLabel, usePublicSettings } from "../settings";
 import {
-  addDays, addSlots, arrowCaption, barColor, barGeometry, barText, cargoColor, chainLinks, chainSteps,
-  daysInRange, displayed, isWeekend, isoLocal, lengthGeometry, lengthLabel, M_PER_CELL, PALETTE,
-  parseLocal, periodLabel, rulerMarks, slotLabel, slotsCount, SLOT_HOURS, textColorOn, ymd,
+  addDays, addHours, arrowCaption, barColor, barGeometry, barText, cargoColor, chainLinks, chainSteps,
+  daysInRange, displayed, foreignSpills, isWeekend, isoLocal, lengthGeometry, lengthLabel, M_PER_CELL,
+  HOUR_MS, PARK_CODE, PALETTE,
+  parseLocal, periodLabel, pxPerHour, rulerMarks, slotLabel, slotsCount, SLOT_HOURS, spillChoices,
+  spillMeters, spillNeighbour, spillSide, textColorOn, timeAtX, ymd,
 } from "../vessels";
 import { arrowGeometry, arrowLabel, type ArrowAnchor } from "../vesselArrows";
 
@@ -40,12 +43,51 @@ const SLOT_W_MIN = 22;
 const SLOT_W_MAX = 64;
 /** Левая липкая колонка с причалом. */
 const LEFT_W = 168;
+/**
+ * Правая часть той же колонки — линейка метров. Она отделена чертой от подписи
+ * причала: цифры шкалы и название лежат в одной колонке, и без черты глаз не
+ * понимает, где кончается название и начинается шкала (числа висели ровно над
+ * текстом «осадка …»). Разделка обязана продолжаться в шапке «причал / метры»,
+ * иначе линия обрывается на первом же ряду.
+ */
+const RULER_W = 46;
+
+/** Запас, в котором перетаскивание прилипает к краю соседа на том же причале.
+ *  Два часа — это ~12 px: палец ещё чувствует промах, но «впритык к 22:00» уже
+ *  попадается руками, а не по часам на глаз. Магнит только выбирает момент, он
+ *  ничего не запрещает и полосу за курсор не утаскивает. */
+const SNAP_HOURS = 2;
+
 /** Высота одной ячейки вертикальной шкалы = 10 метров длины причала; режим крутится кнопкой. */
 const CELL_STEPS = [12, 9, 6];
 const CELL_H_DEFAULT = 12;
+/**
+ * Линии поля — «миллиметровка» плана: 1 клетка = 6 часов × 10 метров.
+ *
+ * Рисует их background поля, а не div-и: месяц — это 124 слота на каждый причал,
+ * и узлы на каждую клетку стоили бы нескольких тысяч DOM-элементов (см. TASKS.md
+ * про длинные задачи на главной). Порядок слоёв важен: первый слой рисуется поверх
+ * остальных, поэтому сутки — первыми, а слоты последними (на границе суток их
+ * перекрывает суточная линия).
+ *
+ * Линия ставится в КОНЕЦ периода, а не в начало: иначе у поля появлялась бы
+ * граница сверху и слева, удваивающаяся с рамкой блока.
+ *
+ * Палитра — в index.css (--vp-*), там же объяснено, почему она плотнее листовой.
+ */
+const gridBackground = (slotW: number, cellH: number) => {
+  const step = (color: string, period: number, dir: string) =>
+    `repeating-linear-gradient(${dir}, transparent 0 ${period - 1}px, var(${color}) ${
+      period - 1
+    }px ${period}px)`;
+  return [
+    step("--vp-grid-day", slotW * SLOT_HOURS.length, "to right"),
+    step("--vp-grid-meter", cellH, "to bottom"),
+    step("--vp-grid-slot", slotW, "to right"),
+  ].join(", ");
+};
 
 /** Код виртуального причала «Ожидание»: карман для судов вне причалов (заводит бэкенд). */
-const PARK_CODE = "ОЖИДАНИЕ";
 
 // Геометрия стрелки (прямая «из А в Б», наконечник, кружок старта и
 // место подписи) лежит в src/vesselArrows.ts, рисует их src/components/
@@ -65,19 +107,63 @@ type Form = {
   length_m: string;
   /** отметка швартовки в метрах от начала причала */
   offset_m: string;
+  /** причал, на который судно выходит корпусом; "" — стоит целиком у своего */
+  spill_berth_id: string;
   vessel: string;
   volume: string;
   cargo: string;
   note: string;
   startDate: string;
-  startHour: number;
+  /** «ЧЧ:ММ» — любое время, не только начало слота */
+  startTime: string;
   endDate: string;
-  endHour: number;
+  endTime: string;
   color: string;
   at_other_terminal: boolean;
 };
 
-const toIso = (d: string, hour: number) => `${d}T${String(hour).padStart(2, "0")}:00:00`;
+/** Время из `<input type=time>` (`«ЧЧ:ММ»`) → «ЧЧ:ММ:00»; пусто — полночь. */
+const hhmmss = (t: string) => `${(t || "00:00").padStart(5, "0").slice(0, 5)}:00`;
+
+/** Дата + время из формы → «2026-05-03T22:00:00», то, что понимает бэкенд. */
+const toIso = (d: string, time: string) => `${d}T${hhmmss(time)}`;
+
+/** Date → «ЧЧ:ММ» для `<input type=time>`: минуты постановки терять некуда. */
+const hhmm = (d: Date) =>
+  `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+
+/** Срок по-человечески: «2 сут 8 ч», а не «56 ч» и не «4760 минут». */
+function hoursBetween(a: Date, b: Date): string {
+  const h = Math.max(0, Math.round((b.getTime() - a.getTime()) / HOUR_MS));
+  const d = Math.floor(h / 24);
+  const r = h % 24;
+  if (!d) return `${h} ч`;
+  return r ? `${d} сут ${r} ч` : `${d} сут`;
+}
+
+/** Быстрые «00 06 12 18» рядом со свободным полем времени: слоты никуда не
+ *  делись — это шкала плана, и поставить судно ровно на слот по-прежнему нужно
+ *  чаще всего. Но теперь это подсказка, а не единственный выбор. */
+function SlotHints({ value, onPick }: { value: string; onPick: (t: string) => void }) {
+  return (
+    <div className="mt-1 flex items-center gap-1">
+      {SLOT_HOURS.map((h) => {
+        const t = `${String(h).padStart(2, "0")}:00`;
+        return (
+          <button
+            key={h}
+            type="button"
+            className={`btn btn-ghost px-1.5 py-0 text-[10px] ${value === t ? "text-brand-sky" : ""}`}
+            onClick={() => onPick(t)}
+            title={`поставить на слот ${slotLabel(h)}`}
+          >
+            {t}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
 
 function formFrom(p: Placement | null, berths: Berth[]): Form {
   const today = ymd(new Date());
@@ -86,14 +172,15 @@ function formFrom(p: Placement | null, berths: Berth[]): Form {
       berth_id: berths[0]?.id ?? 0,
       length_m: "",
       offset_m: "0",
+      spill_berth_id: "",
       vessel: "",
       volume: "",
       cargo: "",
       note: "",
       startDate: today,
-      startHour: 0,
+      startTime: "00:00",
       endDate: today,
-      endHour: 6,
+      endTime: "06:00",
       at_other_terminal: false,
       color: "",
     };
@@ -105,14 +192,15 @@ function formFrom(p: Placement | null, berths: Berth[]): Form {
     berth_id: p.berth_id,
     length_m: p.length_m == null ? "" : String(p.length_m),
     offset_m: String(p.offset_m ?? 0),
+    spill_berth_id: p.spill_berth_id == null ? "" : String(p.spill_berth_id),
     vessel: p.vessel,
     volume: p.volume ?? "",
     cargo: p.cargo ?? "",
     note: p.note ?? "",
     startDate: ymd(s),
-    startHour: s.getHours(),
+    startTime: hhmm(s),
     endDate: ymd(e),
-    endHour: e.getHours(),
+    endTime: hhmm(e),
     at_other_terminal: p.at_other_terminal ?? false,
     color: p.color ?? "",
   };
@@ -157,15 +245,32 @@ export default function VesselsPage() {
   // причала под курсором = целевой причал, поэтому судно переезжает с РП-2 на
   // РП-3 одним движением
   const [drag, setDrag] = useState<{
-    id: number; startX: number; dx: number; grabY: number; ownTop: number;
+    id: number; startX: number; dx: number; grabY: number; grabX: number; ownTop: number;
+    /** Момент начала при текущем курсоре: час + магнит к чужому краю. Им живёт
+     *  предпросмотр и им же сохраняется: шаг предпросмотра обязан совпадать с
+     *  шагом сохранения, иначе в момент отпускания полоса «уплывёт». */
+    startAt: Date;
+    /** Курсор: под ним подсказка со сроком. */
+    cx: number; cy: number;
     blocks: { id: number; left: number; top: number; height: number }[];
     berthId: number; offsetM: number; topInBlock: number;
   } | null>(null);
-  // перешвартовка по правой кнопке: меню у курсора + призрак с целью
+  // правая кнопка: меню у курсора; «Временное перемещение» — копия за курсором
   const [menu, setMenu] = useState<{ x: number; y: number; p: Placement } | null>(null);
+  // «судно у мышки» по правой кнопке: полупрозрачная копия ездит за курсором,
+  // стрелка тянется из оригинала, по отпусканию кнопки копия встаёт в точку
   const [ghost, setGhost] = useState<{
     p: Placement; x: number; y: number; cx: number; cy: number;
-    berthId: number; offsetM: number; slot: number;
+    berthId: number; offsetM: number; start: Date;
+  } | null>(null);
+  // окно «Временное перемещение»: куда поставить (причал, нахлёст, отметка) и срок
+  const [move, setMove] = useState<Placement | null>(null);
+  const [moveForm, setMoveForm] = useState<Form | null>(null);
+  const [moveError, setMoveError] = useState("");
+  // рука на левом/правом краю полосы: срок правится часом, а не слотом
+  const [edge, setEdge] = useState<{
+    p: Placement; side: "start" | "end"; id: number;
+    start: Date; end: Date; x: number; y: number; scaleLeft: number; moved: boolean;
   } | null>(null);
   // после перетаскивания клик по полосе не должен открывать карточку
   const suppressClick = useRef(false);
@@ -182,20 +287,43 @@ export default function VesselsPage() {
       return next;
     });
 
+  // Номер запроса + отмена (TASKS2.md п.24, эталон — DrilldownPanel): смена
+  // «с»/«по» или пресета во время медленного `/placements` — тот самый
+  // сценарий проверки п.24: опоздавший ответ не должен перекрашивать сетку
+  // старым планом и гасить спиннер нового. Один контроллер на страницу:
+  // отменяем прежний запрос в начале загрузки и при уходе со страницы.
+  const seq = useRef(0);
+  const ctrl = useRef<AbortController | null>(null);
   const load = useCallback(async () => {
+    const my = ++seq.current;
+    ctrl.current?.abort();
+    const ac = new AbortController();
+    ctrl.current = ac;
     setBusy(true);
     try {
-      setPlan(await api.vesselPlan(from, to));
+      const p = await api.vesselPlan(from, to, undefined, ac.signal);
+      if (my !== seq.current) return;
+      setPlan(p);
       setError("");
     } catch (e) {
+      // отмена — не ошибка (TASKS2.md п.24): плашка обязана молчать
+      if (isAbortError(e)) return;
+      if (my !== seq.current) return;
       setError(errText(e, "Не удалось загрузить план"));
     } finally {
-      setBusy(false);
+      // спиннер гасит только последний запрос: отменённый не имеет права
+      // снять его у того, что ещё летит
+      if (my === seq.current) setBusy(false);
     }
   }, [from, to]);
 
   useEffect(() => {
     void load();
+    return () => {
+      // смена периода/пресета (пересборка `load`) или уход со страницы:
+      // летящий `/placements` больше не нужен (TASKS2.md п.24)
+      ctrl.current?.abort();
+    };
   }, [load]);
 
   // График сдвигается каждый день: перестановка «состоится» на границе слота,
@@ -204,8 +332,8 @@ export default function VesselsPage() {
   // призрака или сохранения не лезем — чтобы не вырвать полосу из-под курсора.
   const interactive = useRef(false);
   useEffect(() => {
-    interactive.current = !!drag || !!ghost || busy;
-  }, [drag, ghost, busy]);
+    interactive.current = !!drag || !!edge || !!move || !!ghost || busy;
+  }, [drag, edge, move, ghost, busy]);
   useEffect(() => {
     const refresh = () => {
       if (document.visibilityState === "visible" && !interactive.current) void load();
@@ -315,13 +443,13 @@ export default function VesselsPage() {
   /** Полоса под drag'ом: стрелка едет за целью, а не за старым местом. */
   const previewOf = (p: Placement): Placement => {
     if (!drag || drag.id !== p.id) return p;
-    const slots = Math.round(drag.dx / slotW);
+    const dur = parseLocal(p.ends_at).getTime() - parseLocal(p.starts_at).getTime();
     return {
       ...p,
       berth_id: drag.berthId,
       offset_m: drag.offsetM,
-      starts_at: isoLocal(addSlots(parseLocal(p.starts_at), slots)),
-      ends_at: isoLocal(addSlots(parseLocal(p.ends_at), slots)),
+      starts_at: isoLocal(drag.startAt),
+      ends_at: isoLocal(new Date(drag.startAt.getTime() + dur)),
     };
   };
 
@@ -400,24 +528,23 @@ export default function VesselsPage() {
             : "dim",
       });
     }
+    // «Судно у мышки»: стрелка тянется из оригинала к курсору — откуда уедет
+    // копия, видно ещё до того, как отпустили кнопку. Подписи у неё нет: вести
+    // ей пока некуда, шаг N→М появится, когда копия станет копией.
     if (ghost) {
       const a = anchorOf(ghost.p);
-      // призрак под курсором — та же прямая, что и остальные стрелки: она живёт
-      // столько, сколько тянут мышью, и путаться под курсором она не должна
-      if (a)
+      if (a) {
         out.push({
           id: -1,
-          d: `M ${a.right} ${a.y} L ${ghost.cx} ${ghost.cy}`,
-          startX: a.right,
-          startY: a.y,
-          tipX: ghost.cx,
-          tipY: ghost.cy,
-          rightward: ghost.cx >= a.right,
+          srcId: ghost.p.id,
+          ...arrowGeometry(a, { left: ghost.cx, right: ghost.cx, y: ghost.cy }),
           color: barColor(ghost.p),
           caption: "",
           label: { x: 0, y: 0, anchor: "start" },
           draft: true,
+          tone: "focus",
         });
+      }
     }
     return out;
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -481,6 +608,7 @@ export default function VesselsPage() {
       }
       setTplRows([...last.values()].sort((a, b) => (a.starts_at < b.starts_at ? 1 : -1)));
     } catch (e) {
+      if (isAbortError(e)) return;
       setTplError(errText(e));
     }
   };
@@ -493,14 +621,15 @@ export default function VesselsPage() {
       // ставим на сегодня: шаблон затем и нужен, чтобы дата была новая.
       const dur = Math.max(parseLocal(p.ends_at).getTime() - parseLocal(p.starts_at).getTime(), 0);
       const end = new Date(Date.now() + dur);
-      const endHour = SLOT_HOURS.filter((h) => h >= end.getHours())[0] ?? 18;
+      // Время шаблон тащит за собой целиком, вместе с минутами: цикл «стоит с 22:00
+      // по 06:30» повторяется таким же, а не «округлённым до слота».
       return {
         ...t,
         id: undefined,
         startDate: ymd(new Date()),
-        startHour: 0,
+        startTime: "00:00",
         endDate: ymd(end),
-        endHour,
+        endTime: hhmm(end),
       };
     });
     setTplOpen(false);
@@ -514,12 +643,15 @@ export default function VesselsPage() {
       lane: 1,
       length_m: form.length_m.trim() ? Number(form.length_m) : null,
       offset_m: form.offset_m.trim() ? Number(form.offset_m) : 0,
+      // поле отправляем всегда: «пусто» здесь — осознанное «не выходит», а не
+      // «не трогали». Иначе снятый нахлёст молча остался бы в базе
+      spill_berth_id: form.spill_berth_id.trim() ? Number(form.spill_berth_id) : null,
       vessel: form.vessel.trim(),
       volume: form.volume.trim() || null,
       cargo: form.cargo.trim() || null,
       note: form.note.trim() || null,
-      starts_at: toIso(form.startDate, form.startHour),
-      ends_at: toIso(form.endDate, form.endHour),
+      starts_at: toIso(form.startDate, form.startTime),
+      ends_at: toIso(form.endDate, form.endTime),
       at_other_terminal: form.at_other_terminal,
       color: form.color || null,
     };
@@ -531,6 +663,7 @@ export default function VesselsPage() {
       window.setTimeout(() => setSaved(""), 6000);
       await load();
     } catch (e) {
+      if (isAbortError(e)) return;
       // 409 — на этом отрезке причала уже стоит судно: текст бэкенда объясняет,
       // какое именно и где именно пересекаются метры
       setFormError(errText(e, "Не удалось сохранить"));
@@ -549,8 +682,8 @@ export default function VesselsPage() {
     try {
       const spot = await api.freeOffset(
         form.berth_id,
-        toIso(form.startDate, form.startHour),
-        toIso(form.endDate, form.endHour),
+        toIso(form.startDate, form.startTime),
+        toIso(form.endDate, form.endTime),
         len,
       );
       if (spot.offset_m === null || !spot.fits) {
@@ -560,6 +693,7 @@ export default function VesselsPage() {
       setForm({ ...form, offset_m: String(spot.offset_m) });
       setFreeHint(`свободно с ${spot.offset_m} м`);
     } catch (e) {
+      if (isAbortError(e)) return;
       setFormError(errText(e, "Не удалось подобрать место"));
     }
   };
@@ -567,7 +701,7 @@ export default function VesselsPage() {
   /* -------------------------- WYSIWYG: судно мышью -------------------------- */
 
   /** Поле шкалы под курсором; в шапке причала (между полями) — ближайший по центру. */
-  const pickBlock = (blocks: { id: number; top: number; height: number }[], y: number) => {
+  const pickBlock = (blocks: { id: number; left: number; top: number; height: number }[], y: number) => {
     if (!blocks.length) return null;
     const hit = blocks.find((b) => y >= b.top && y < b.top + b.height);
     if (hit) return hit;
@@ -587,7 +721,8 @@ export default function VesselsPage() {
     if (e.button !== 0) return;  // правая кнопка — контекстное меню, не drag
     const bar = e.currentTarget as HTMLElement;
     bar.setPointerCapture?.(e.pointerId);
-    const barTop = bar.getBoundingClientRect().top;
+    const barRect = bar.getBoundingClientRect();
+    const barTop = barRect.top;
     // мериим поля шкалы, а не блоки: у блока сверху строка с названием причала,
     // и отсчёт метров от неё съехал бы на полтора десятка метров
     const blocks = [...document.querySelectorAll<HTMLElement>("[data-berth-scale]")]
@@ -601,7 +736,11 @@ export default function VesselsPage() {
       startX: e.clientX,
       dx: 0,
       grabY: e.clientY - barTop,
+      grabX: e.clientX - barRect.left,
       ownTop: blocks.find((b) => b.id === p.berth_id)?.top ?? barTop,
+      startAt: parseLocal(p.starts_at),
+      cx: e.clientX,
+      cy: e.clientY,
       blocks,
       berthId: p.berth_id,
       offsetM: p.offset_m ?? 0,
@@ -609,44 +748,103 @@ export default function VesselsPage() {
     });
   };
 
+  /**
+   * Куда встанет полоса под курсором: причал под курсором и отметка на его шкале,
+   * без всякого «а разрешаю ли я тебе туда встать».
+   *
+   * Граница причала — не стена: это метры соседа, и корпус обязан проходить через
+   * неё рукой. Любая проверка «тут тебе не влезть» внутри перетаскивании даёт ровно
+   * то, что диспетчер называет «примагничивается к границам»: кабинет отвечает 400,
+   * план перезагружается, полоса возвращается на место, а судно длиннее своего
+   * причала вообще нельзя сдвинуть ни на метр. Про метры и пересечения спросим
+   * бэкенд при сохранении — он для этого и существует.
+   *
+   * Отметка свободна в обе стороны: минус — нос ушёл на причал выше по фронту,
+   * больше длины причала — хвост ушёл ниже. Судно без длины занимает причал
+   * целиком, «Ожидание» — карман без метража: там всегда «с нуля».
+   */
+  const dropAt = (
+    p: Placement,
+    target: Berth | undefined,
+    rawTarget: number,
+  ): { berthId: number; offsetM: number } | null => {
+    if (!target) return null;
+    if (!p.length_m || target.code === PARK_CODE) return { berthId: target.id, offsetM: 0 };
+    return { berthId: target.id, offsetM: Math.round(rawTarget / 5) * 5 };
+  };
+
+  /**
+   * Магнит к чужому краю. Придвинуть судно вплотную к соседу, уходящему в 22:00,
+   * глазом по часовой сетке тяжело: час — это ~6 px. А «впритык» и есть рабочий
+   * случай разгрузки: ушло в 22:00 — пришло в 22:00. Прилипает в пределах двух
+   * часов к краю соседа на том же причале. Ничего не запрещает и сам ничего не
+   * передвигает: магнит выбирает ближайший кандидат, а не ближайшее разрешённое
+   * место — промахнулся мимо всех краёв, значит встаёт туда, куда привёл курсор.
+   */
+  const snapStart = (p: Placement, want: Date, berthId: number): Date => {
+    const dur = parseLocal(p.ends_at).getTime() - parseLocal(p.starts_at).getTime();
+    let best = want.getTime();
+    let bestD = SNAP_HOURS * HOUR_MS;
+    for (const o of plan?.placements ?? []) {
+      if (o.id === p.id || o.berth_id !== berthId) continue;
+      const shown = displayed(o);  // край соседа — тот, что видно на плане
+      if (!shown) continue;
+      for (const cand of [
+        parseLocal(shown.ends_at).getTime(),          // следом за соседом
+        parseLocal(shown.starts_at).getTime() - dur,  // прямо перед соседом
+      ]) {
+        if (Math.abs(cand - want.getTime()) < bestD) {
+          bestD = Math.abs(cand - want.getTime());
+          best = cand;
+        }
+      }
+    }
+    return new Date(best);
+  };
+
   const moveDrag = (e: React.PointerEvent, p: Placement) => {
     if (!drag || drag.id !== p.id) return;
     const block = pickBlock(drag.blocks, e.clientY);
-    if (!block) {
-      setDrag({ ...drag, dx: e.clientX - drag.startX });
-      return;
+    const base = { dx: e.clientX - drag.startX, cx: e.clientX, cy: e.clientY };
+    let spot = { berthId: drag.berthId, offsetM: drag.offsetM };
+    if (block) {
+      const raw = ((e.clientY - block.top - drag.grabY) / cellH) * M_PER_CELL;
+      spot = dropAt(p, berths.find((b) => b.id === block.id), raw) ?? spot;
     }
-    const berth = berths.find((b) => b.id === block.id);
-    // судно без длины занимает причал целиком — двигать его по метрам нельзя
-    const room = berth?.length_m && p.length_m ? Math.max(berth.length_m - p.length_m, 0) : 0;
-    const raw = ((e.clientY - block.top - drag.grabY) / cellH) * M_PER_CELL;
-    const offsetM = Math.min(Math.max(Math.round(raw / 5) * 5, 0), room);
-    setDrag({ ...drag, dx: e.clientX - drag.startX, berthId: block.id, offsetM });
+    // начало берётся по левому краю полосы, а не по курсору: тащить за середину
+    // — не значит тащить начало
+    const scaleLeft = block?.left ?? drag.blocks[0]?.left ?? 0;
+    const want = timeAtX(e.clientX - drag.grabX, scaleLeft, pxPerHour(slotW), from);
+    setDrag({
+      ...drag, ...base, berthId: spot.berthId, offsetM: spot.offsetM,
+      startAt: snapStart(p, want, spot.berthId),
+    });
   };
 
   const endDrag = async (p: Placement) => {
     if (!drag) return;
-    const { dx, berthId, offsetM } = drag;
+    const { startAt, berthId, offsetM } = drag;
     setDrag(null);
-    const slots = Math.round(dx / slotW);
     const same =
-      !slots && berthId === p.berth_id && offsetM === (p.offset_m ?? 0);
+      +startAt === +parseLocal(p.starts_at) &&
+      berthId === p.berth_id &&
+      offsetM === (p.offset_m ?? 0);
     if (same) return;
     suppressClick.current = true;
     window.setTimeout(() => (suppressClick.current = false), 0);
     // перетаскивание из «Ожидания» к причалу — копия со стрелкой, оригинал
     // ждёт в кармане, пока судно физически не придёт: как в Excel у диспетчера.
-    // Дату копия берёт не «свою» (в кармане она формальность), а слот под курсором
+    // Дату копия берёт не «свою» (в кармане она формальность), а час под курсором
     if (parkId && p.berth_id === parkId && berthId !== parkId) {
-      const scaleLeft = drag.blocks[0]?.left ?? 0;
-      const absoluteSlot = Math.max(0, Math.floor((drag.startX + dx - scaleLeft) / slotW));
-      await reberthingCopy(p, { slots: 0, berthId, offsetM, absoluteSlot });
+      const dur = parseLocal(p.ends_at).getTime() - parseLocal(p.starts_at).getTime();
+      const end = new Date(startAt.getTime() + (dur || HOUR_MS));
+      await reberthingCopy(p, { berthId, offsetM, start: startAt, end });
       return;
     }
-    await movePlacement(p, { slots, berthId, offsetM });
+    await movePlacement(p, { start: startAt, berthId, offsetM });
   };
 
-  /** Клавиатура вместо мыши: стрелки — слот по времени и 5 м по причалу. */
+  /** Клавиатура вместо мыши: стрелки — час по времени (Shift — слот) и 5 м по причалу. */
   const nudge = async (p: Placement, e: React.KeyboardEvent) => {
     const step: Record<string, [number, number]> = {
       ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -5], ArrowDown: [0, 5],
@@ -654,31 +852,49 @@ export default function VesselsPage() {
     const move = step[e.key];
     if (!move) return;
     e.preventDefault();
-    await movePlacement(p, { slots: move[0], berthId: p.berth_id, offsetM: (p.offset_m ?? 0) + move[1] });
+    // шаг — час, как у мыши; слот (6 ч) остаётся на Shift, чтобы перекидывать
+    // судно через сутки не двадцатью нажатиями
+    const hours = move[0] * (e.shiftKey ? SLOT_HOURS.length : 1);
+    await movePlacement(p, {
+      start: addHours(parseLocal(p.starts_at), hours),
+      berthId: p.berth_id,
+      offsetM: (p.offset_m ?? 0) + move[1],
+    });
   };
 
-  /** Переставить: на N слотов по времени, на причал `berthId` и на отметку `offsetM`. */
+  /** Переставить: начало в `start`, на причал `berthId` и на отметку `offsetM`. */
   const movePlacement = async (
     p: Placement,
-    dest: { slots: number; berthId: number; offsetM: number },
+    dest: { start: Date; berthId: number; offsetM: number },
   ) => {
     const berth = berths.find((b) => b.id === dest.berthId);
-    const start = addSlots(parseLocal(p.starts_at), dest.slots);
-    const end = addSlots(parseLocal(p.ends_at), dest.slots);
+    const dur = parseLocal(p.ends_at).getTime() - parseLocal(p.starts_at).getTime();
+    const start = dest.start;
+    const end = new Date(start.getTime() + dur);
     if (start < new Date(`${from}T00:00:00`) || end > new Date(`${to}T23:59:59`)) {
       setError("Судно нельзя вынести за границы выбранного периода");
       return;
     }
-    const offset =
-      berth?.length_m && p.length_m
-        ? Math.min(Math.max(dest.offsetM, 0), Math.max(berth.length_m - p.length_m, 0))
-        : Math.max(dest.offsetM, 0);
+    // Отметку держим внутри причала (начать судно обязано у своей стенки), а вот
+    // конец корпуса — нет: 120-метровый теплоход у 100-метрового причала встаёт
+    // хвостом на соседний. Раньше полосу «втискивали» обратным клампом, и план
+    // врал: судно выглядело вставшим в свои метры, а по факту мешало соседу.
+    // «Ожидание» — карман без метража: отметка там не имеет смысла, а курсор,
+    // уехавший за нижний край сетки, попадает именно в него (ближайший блок)
+    // отметка свободная, в обе стороны: минус — нос ушёл на причал выше по фронту
+    const offset = p.length_m && berth?.code !== PARK_CODE ? dest.offsetM : 0;
+    const side = spillSide(p.length_m, offset, berth?.length_m ?? null);
+    const spill = spillNeighbour(berths, berth, side);
     try {
       await api.updatePlacement(p.id, {
         starts_at: isoLocal(start),
         ends_at: isoLocal(end),
         offset_m: offset,
         berth_id: dest.berthId,
+        // null сюда идёт открыто: «не выходит». Если поле не прислать вовсе,
+        // бэкенд оставил бы старый нахлёст и судно продолжало бы занимать метры
+        // причала, с которого его уже увели
+        spill_berth_id: spill?.id ?? null,
       });
       setError("");
       const moved = dest.berthId !== p.berth_id ? ` → ${berth?.code}` : "";
@@ -686,6 +902,7 @@ export default function VesselsPage() {
       window.setTimeout(() => setSaved(""), 5000);
       await load();
     } catch (e) {
+      if (isAbortError(e)) return;
       // 409 — наехали на другое судно: откат и текст бэкенда, где именно засада.
       // сначала перезагрузка (она чистит error), потом сообщение
       await load();
@@ -695,50 +912,32 @@ export default function VesselsPage() {
 
   /* ---------------------------- перешвартовка ---------------------------- */
 
-  /** Абсолютный индекс слота (от начала периода), с которого начинается постановка. */
-  const slotIndexOf = (p: Placement): number => {
-    const s = parseLocal(p.starts_at);
-    const i = days.indexOf(ymd(s));
-    if (i < 0) return 0;
-    return i * SLOT_HOURS.length + Math.max(0, SLOT_HOURS.indexOf(s.getHours()));
-  };
-
-  /** Абсолютный слот → Date: границы копии считают именно так. */
-  const slotToDate = (i: number): Date => {
-    const day = days[Math.min(Math.max(Math.floor(i / SLOT_HOURS.length), 0), days.length - 1)] ?? from;
-    return new Date(`${day}T${String(SLOT_HOURS[i % SLOT_HOURS.length] ?? 0).padStart(2, "0")}:00:00`);
-  };
-
   /** Копия постановки со стрелкой: оригинал остаётся на месте, копия — пунктиром. */
   const reberthingCopy = async (
     p: Placement,
-    dest: { slots: number; berthId: number; offsetM: number; absoluteSlot?: number },
+    dest: {
+      berthId: number; offsetM: number;
+      /** точные границы: час под курсором либо срок из окна «Временное перемещение» */
+      start: Date; end: Date;
+    },
   ) => {
     const berth = berths.find((b) => b.id === dest.berthId);
     if (!berth) return;
-    let start: Date;
-    let end: Date;
-    if (dest.absoluteSlot !== undefined) {
-      start = slotToDate(dest.absoluteSlot);
-      end = slotToDate(Math.min(dest.absoluteSlot + slotsCount(p) - 1, totalSlots - 1));
-    } else {
-      start = addSlots(parseLocal(p.starts_at), dest.slots);
-      end = addSlots(parseLocal(p.ends_at), dest.slots);
-    }
+    const { start, end } = dest;
     if (start < new Date(`${from}T00:00:00`) || end > new Date(`${to}T23:59:59`)) {
       setError("Нельзя вынести перешвартовку за границы выбранного периода");
       return;
     }
-    const offset =
-      berth.length_m && p.length_m
-        ? Math.min(Math.max(dest.offsetM, 0), Math.max(berth.length_m - p.length_m, 0))
-        : Math.max(dest.offsetM, 0);
+    const offset = p.length_m && berth.code !== PARK_CODE ? dest.offsetM : 0;
+    const side = spillSide(p.length_m, offset, berth.length_m);
+    const spill = spillNeighbour(berths, berth, side);
     try {
       await api.createPlacement({
         berth_id: dest.berthId,
         lane: 1,
         length_m: p.length_m,
         offset_m: offset,
+        spill_berth_id: spill?.id ?? null,
         vessel: p.vessel,
         volume: p.volume,
         cargo: p.cargo,
@@ -752,12 +951,88 @@ export default function VesselsPage() {
       window.setTimeout(() => setSaved(""), 6000);
       await load();
     } catch (e) {
+      if (isAbortError(e)) return;
       await load();
       setError(errText(e, "Не удалось перешвартовать"));
     }
   };
 
-  /** Правая кнопка → «Временное перемещение»: призрак за курсором, по клику — копия в точку. */
+  /**
+   * Правая кнопка → «Временное перемещение»: окно, а не «судно у мышки».
+   *
+   * Ручной вариант (тащим полупрозрачную копию за курсором) заказчик попросил
+   * убрать: им нельзя сказать ни «вот на этот причал, хвостом на соседа», ни
+   * «вот с 22:00». В окне есть и причал, и нахлёст, и срок — то, что человек
+   * всё равно досказывал руками после «приземления» копии.
+   */
+  const openMove = (p: Placement) => {
+    setMenu(null);
+    setMove(p);
+    setMoveError("");
+    setMoveForm(formFrom(p, berths));
+  };
+
+  const moveBerth = berths.find((b) => b.id === moveForm?.berth_id);
+  const moveSpillChoices = spillChoices(berths, moveBerth);
+  const moveSide = moveForm ? spillSide(moveForm.length_m ? Number(moveForm.length_m) : null, Number(moveForm.offset_m || 0), moveBerth?.length_m ?? null) : null;
+  const moveNeighbour = spillNeighbour(berths, moveBerth, moveSide);
+
+  /** Окно «Временное перемещение»: копия со стрелкой в выбранную точку и срок. */
+  const submitMove = async () => {
+    if (!move || !moveForm) return;
+    const berth = berths.find((b) => b.id === moveForm.berth_id);
+    if (!berth) {
+      setMoveError("Выберите причал");
+      return;
+    }
+    const start = new Date(`${moveForm.startDate}T${hhmmss(moveForm.startTime)}`);
+    const end = new Date(`${moveForm.endDate}T${hhmmss(moveForm.endTime)}`);
+    if (end < start) {
+      setMoveError("Конец раньше начала стоянки");
+      return;
+    }
+    const offset = Number(moveForm.offset_m || 0);
+    // Нахлёст окно называет прямо: «выйдет на РП-2» — это не догадка кабинета,
+    // а слово диспетчера. Для «Ожидания» метража нет, там отметка и нахлёст не нужны.
+    const spill = berth.code === PARK_CODE ? null : (moveForm.spill_berth_id ? Number(moveForm.spill_berth_id) : null);
+    setMoveError("");
+    try {
+      await api.createPlacement({
+        berth_id: berth.id,
+        lane: 1,
+        length_m: moveForm.length_m ? Number(moveForm.length_m) : null,
+        offset_m: berth.code === PARK_CODE ? 0 : offset,
+        spill_berth_id: spill,
+        vessel: move.vessel,
+        volume: move.volume,
+        cargo: move.cargo,
+        note: move.note,
+        color: move.color,
+        starts_at: isoLocal(start),
+        ends_at: isoLocal(end),
+        moved_from_id: move.id,
+      });
+      setMove(null);
+      setMoveForm(null);
+      setSaved(`«${move.vessel}» → ${berth.code}: копия со стрелкой, оригинал на месте`);
+      window.setTimeout(() => setSaved(""), 6000);
+      await load();
+    } catch (e) {
+      if (isAbortError(e)) return;
+      await load();
+      setMoveError(errText(e, "Не удалось переместить"));
+    }
+  };
+
+  /**
+   * Правая кнопка → «Временное перемещение» мышью: полупрозрачная копия ездит за
+   * курсором, по отпусканию кнопки она становится копией со стрелкой (`moved_from_id`),
+   * оригинал стоит. Причал — тот, над чьим полем шкалы стоит курсор, отметка — метр
+   * под курсором (шаг 5 м), срок — час под курсором с тем же магнитом к чужому краю,
+   * что и у левого перетаскивания. Запретов здесь нет: законность скажет бэкенд, а
+   * его 409 будет прочитан текстом. Точный срок и «хвостом на соседний причал» —
+   * окном, оно живёт в карточке судна (кнопка по левой кнопке).
+   */
   const startReberthing = (p: Placement, at: { clientX: number; clientY: number }) => {
     const scales = [...document.querySelectorAll<HTMLElement>("[data-berth-scale]")].map((el) => {
       const r = el.getBoundingClientRect();
@@ -765,9 +1040,10 @@ export default function VesselsPage() {
     });
     const print = document.querySelector<HTMLElement>("[data-vp-print]");
     if (!scales.length || !print) return;
+    const dur = parseLocal(p.ends_at).getTime() - parseLocal(p.starts_at).getTime();
     const cur = {
       p, x: at.clientX, y: at.clientY, cx: 0, cy: 0,
-      berthId: p.berth_id, offsetM: p.offset_m ?? 0, slot: slotIndexOf(p),
+      berthId: p.berth_id, offsetM: p.offset_m ?? 0, start: parseLocal(p.starts_at),
     };
     const paint = (e: { clientX: number; clientY: number }) => {
       const pr = print.getBoundingClientRect();
@@ -777,18 +1053,19 @@ export default function VesselsPage() {
       cur.cy = e.clientY - pr.top;
       setGhost({ ...cur });
     };
-    paint(at);
     const move = (e: PointerEvent) => {
       const block = pickBlock(scales, e.clientY);
+      let scaleLeft = scales[0].left;
       if (block) {
-        const berth = berths.find((b) => b.id === block.id);
-        const room = berth?.length_m && p.length_m ? Math.max(berth.length_m - p.length_m, 0) : 0;
-        cur.berthId = block.id;
-        const raw = ((e.clientY - block.top - 8) / cellH) * M_PER_CELL;
-        cur.offsetM = Math.min(Math.max(Math.round(raw / 5) * 5, 0), room);
+        scaleLeft = block.left;
+        const where = dropAt(p, berths.find((b) => b.id === block.id),
+          ((e.clientY - block.top - 8) / cellH) * M_PER_CELL);
+        if (where) {
+          cur.berthId = where.berthId;
+          cur.offsetM = where.offsetM;
+        }
       }
-      const s = Math.floor((e.clientX - scales[0].left) / slotW);
-      cur.slot = Math.min(Math.max(s, 0), Math.max(0, totalSlots - slotsCount(p)));
+      cur.start = snapStart(p, timeAtX(e.clientX, scaleLeft, pxPerHour(slotW), from), cur.berthId);
       paint(e);
     };
     const detach = () => {
@@ -798,19 +1075,119 @@ export default function VesselsPage() {
     };
     const up = () => {
       detach();
-      const target = { ...cur };
+      const t = { ...cur };
       setGhost(null);
-      void reberthingCopy(p, { slots: 0, berthId: target.berthId, offsetM: target.offsetM, absoluteSlot: target.slot });
+      void reberthingCopy(p, {
+        berthId: t.berthId,
+        offsetM: t.offsetM,
+        start: t.start,
+        end: new Date(t.start.getTime() + dur),
+      });
     };
     const esc = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
       detach();
       setGhost(null);
     };
+    paint(at);
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
     window.addEventListener("keydown", esc);
   };
+
+  /* ---------------------------- срок за край полосы ---------------------------- */
+
+  /**
+   * Потянуть за левый или правый край полосы — поправить срок.
+   *
+   * Шаг — час, а не слот: слот в 6 ч для срока слишком крупный, диспетчер правит
+   * «до 15:00», а не «до следующего столбца». Курсор считается от левого края
+   * шкалы времени того же причала, поэтому линейка и прокрутка не сбивают счёт.
+   */
+  const startResize = (e: React.PointerEvent, p: Placement, side: "start" | "end") => {
+    if (e.button !== 0 || !wysiwyg || !canEdit || busy) return;
+    e.stopPropagation();
+    e.preventDefault();
+    // тянем край — карточку по завершении открывать не надо
+    suppressClick.current = true;
+    window.setTimeout(() => (suppressClick.current = false), 0);
+    const scale = document.querySelector<HTMLElement>(`[data-berth-scale="${p.berth_id}"]`);
+    (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
+    setEdge({
+      p, side, id: p.id,
+      start: parseLocal(p.starts_at), end: parseLocal(p.ends_at),
+      x: e.clientX, y: e.clientY,
+      scaleLeft: scale?.getBoundingClientRect().left ?? 0,
+      moved: false,
+    });
+  };
+
+  const moveResize = (e: React.PointerEvent) => {
+    setEdge((cur) => {
+      if (!cur) return cur;
+      // пикселей в час: слот делится на 6 часов (SLOT_HOURS.length — это 4,
+      // перепутать их значит считать курсор в 1,5 раза левее, чем он есть)
+      const t = timeAtX(e.clientX, cur.scaleLeft, pxPerHour(slotW), from);
+      const lo = new Date(`${from}T00:00:00`);
+      const hi = new Date(`${to}T23:59:59`);
+      let start = cur.start;
+      let end = cur.end;
+      if (cur.side === "start") start = new Date(Math.min(Math.max(t.getTime(), lo.getTime()), end.getTime()));
+      else end = new Date(Math.max(Math.min(t.getTime(), hi.getTime()), start.getTime()));
+      if (
+        start.getTime() === cur.start.getTime() &&
+        end.getTime() === cur.end.getTime() &&
+        e.clientX === cur.x
+      )
+        return cur;
+      return { ...cur, start, end, x: e.clientX, y: e.clientY, moved: true };
+    });
+  };
+
+  /** Отпустили край — срок уходит на бэкенд; он скажет, если эти часы уже заняты. */
+  const endResize = async () => {
+    const cur = edge;
+    setEdge(null);
+    if (!cur || !cur.moved) return;
+    try {
+      await api.updatePlacement(cur.p.id, { starts_at: isoLocal(cur.start), ends_at: isoLocal(cur.end) });
+      setError("");
+      setSaved(`«${cur.p.vessel}»: ${isoLocal(cur.start)} — ${isoLocal(cur.end)}`);
+      window.setTimeout(() => setSaved(""), 6000);
+      await load();
+    } catch (e) {
+      if (isAbortError(e)) return;
+      await load();
+      setError(errText(e, "Не удалось изменить срок"));
+    }
+  };
+
+  /** Ручки по краям полосы: слева — начало стоянки, справа — окончание. */
+  const edgeHandles = (p: Placement, canDrag: boolean, height: number) =>
+    canDrag && height > 14 ? (
+      <>
+        <span
+          data-vp-edge="start"
+          className="absolute left-0 top-0 h-full w-2 cursor-ew-resize rounded-l-md hover:bg-white/30"
+          title="Потянуть: начало стоянки, шаг — час"
+          onPointerDown={(e) => startResize(e, p, "start")}
+          onPointerMove={moveResize}
+          onPointerUp={() => void endResize()}
+          onPointerCancel={() => setEdge(null)}
+          onClick={(e) => e.stopPropagation()}
+        />
+        <span
+          data-vp-edge="end"
+          className="absolute right-0 top-0 h-full w-2 cursor-ew-resize rounded-r-md hover:bg-white/30"
+          title="Потянуть: окончание стоянки, шаг — час"
+          onPointerDown={(e) => startResize(e, p, "end")}
+          onPointerMove={moveResize}
+          onPointerUp={() => void endResize()}
+          onPointerCancel={() => setEdge(null)}
+          onClick={(e) => e.stopPropagation()}
+        />
+      </>
+    ) : null;
 
   /** Красная рамка: судно сейчас на другом терминале; без рамки — в проливе. */
   const toggleTerminal = async (p: Placement) => {
@@ -819,6 +1196,7 @@ export default function VesselsPage() {
       setDetail((d) => (d && d.id === p.id ? { ...d, at_other_terminal: !p.at_other_terminal } : d));
       await load();
     } catch (e) {
+      if (isAbortError(e)) return;
       setError(errText(e, "Не удалось обновить отметку"));
     }
   };
@@ -831,11 +1209,49 @@ export default function VesselsPage() {
       window.setTimeout(() => setSaved(""), 6000);
       await load();
     } catch (e) {
+      if (isAbortError(e)) return;
       setError(errText(e, "Не удалось удалить"));
     }
   };
 
   const formBerth = berths.find((b) => b.id === form?.berth_id);
+  /* Нахлёст на соседний причал. Окно постановки обязано показывать его сразу при
+     выборе причала: «судно длиннее причала» — не ошибка ввода, а рабочий случай,
+     и диспетчер решает, чьи метры он для этого занимает. Направление задаёт фронт
+     (sort_order), поэтому выбор здесь ограничен одним соседом. */
+  const formSide = form
+    ? spillSide(form.length_m.trim() ? Number(form.length_m) : null,
+        Number(form.offset_m) || 0, formBerth?.length_m ?? null)
+    : null;
+  const formOverhang = form
+    ? spillMeters(form.length_m.trim() ? Number(form.length_m) : null,
+        Number(form.offset_m) || 0, formBerth?.length_m ?? null)
+    : 0;
+  /* Причал нахлёста выбирает человек, а не порядок сортировки: `sort_order`
+     показывает блоки на экране, а не то, что стоит у стенки по факту. Соседей
+     подписываем («выше/ниже по фронту») и подсказываем тот, куда лезет корпус по
+     геометрии, но список не ограничен ими — и предыдущий, и следующий, и любой
+     живой причал фронта. */
+  const formSpillChoices = spillChoices(berths, formBerth);
+  const formNeighbour = spillNeighbour(berths, formBerth, formSide);
+  const formSpillId = form?.spill_berth_id.trim() ? Number(form.spill_berth_id) : null;
+  const formSpillBerth = berths.find((b) => b.id === formSpillId);
+  const spillHint = (() => {
+    if (!form) return "";
+    if (!formBerth?.length_m) return "задайте длину судна и причала — тогда будет видно, хватает ли метров";
+    if (!formSide) {
+      if (formSpillBerth) return `судно встаёт целиком у ${formBerth.code} — причал для нахлёста не нужен`;
+      return "судно стоит целиком у своего причала";
+    }
+    if (formSpillBerth?.length_m && formOverhang > formSpillBerth.length_m)
+      return `${formSpillBerth.code}: его длина ${formSpillBerth.length_m} м, а нахлёсту нужно ${formOverhang} м`;
+    const side = formSide === "bow" ? "нос" : "хвост";
+    if (!formSpillBerth)
+      return `${side} выходит за ${formBerth.code} на ${formOverhang} м` +
+        (formNeighbour ? ` — по фронту это ${formNeighbour.code}` : " — выберите, какой причал принимает корпус");
+    const where = formSpillBerth.id === formNeighbour?.id ? "" : ` (по фронту здесь ${formNeighbour?.code ?? "никто"})`;
+    return `${side} стоит на ${formSpillBerth.code}${where}: ${formOverhang} м его стенки заняты`;
+  })();
   const gridWidth = LEFT_W + totalSlots * slotW;
 
   /* ---------------------------------- PDF ---------------------------------- */
@@ -884,6 +1300,7 @@ export default function VesselsPage() {
       setSaved(`PDF готов: ${dEnd - d0 + 1} сут · ${berthIds.length} причалов`);
       window.setTimeout(() => setSaved(""), 6000);
     } catch (e) {
+      if (isAbortError(e)) return;
       setError(errText(e, "PDF не получился"));
     } finally {
       setPdfBusy(false);
@@ -991,11 +1408,14 @@ export default function VesselsPage() {
 
         {wysiwyg && canEdit && (
           <p className="mt-2 text-[11px] text-ink-300" data-wysiwyg-hint>
-            Режим перетаскивания: тяните полосу мышью — горизонталь это слоты (шаг 6 часов),
-            вертикаль — место у причала (шаг 5 м). Отпустили — сохранилось. Стрелки двигают
-            полосу под фокусом. Правая кнопка по судну — «Временное перемещение»: полупрозрачная
-            копия прицепится к курсору, встанет в нужную ячейку, и от оригинала к ней сама
-            протянётся стрелка перешвартовки.
+            Режим перетаскивания: тяните полосу мышью — горизонталь это время (шаг
+            час, у края соседа полоса прилипает к нему), вертикаль — место у причала
+            (шаг 5 м). Отпустили — сохранилось. Стрелки двигают полосу под фокусом
+            (час, с Shift — слот). Правая кнопка по судну — «Временное перемещение»
+            мышью: полупрозрачная копия прицепится к курсору, а от оригинала к ней
+            сама протянется стрелка перешвартовки. Точный срок и «хвостом на соседний
+            причал» — кнопка «Временное перемещение» в карточке судна (левая кнопка
+            по полосе).
           </p>
         )}
 
@@ -1017,20 +1437,27 @@ export default function VesselsPage() {
         )}
 
         {/* Сетка: горизонтальная прокрутка обязательна — месяц это 124 слота */}
-        <div ref={gridRef} className="mt-4 overflow-auto max-h-[68vh] border border-ink-700 rounded-md" data-vp-grid>
+        <div ref={gridRef} className="mt-4 overflow-auto max-h-[68vh] border vp-frame rounded-md" data-vp-grid>
           <div style={{ width: gridWidth }} className="relative" data-vp-print>
             {/* шапка: сутки + подписи слотов */}
-            <div className="flex sticky top-0 z-20 bg-white/90 backdrop-blur border-b border-ink-700">
+            <div className="flex sticky top-0 z-20 bg-white/90 backdrop-blur border-b-2 vp-frame-strong">
               <div
-                className="sticky left-0 z-30 bg-white/95 border-r border-ink-700 text-[11px] uppercase tracking-wider text-ink-400 px-2 py-1"
+                className="sticky left-0 z-30 bg-white/95 border-r vp-frame flex items-stretch text-[11px] uppercase tracking-wider text-ink-400"
                 style={{ width: LEFT_W }}
               >
-                Причал / метры
+                <div className="flex-1 px-2 py-1">Причал</div>
+                {/* те же RULER_W и та же черта, что в полосах причалов ниже */}
+                <div
+                  className="border-l vp-frame text-right pr-2 py-1 text-[9px]"
+                  style={{ width: RULER_W }}
+                >
+                  метры
+                </div>
               </div>
               {days.map((d) => (
                 <div
                   key={d}
-                  className={`border-r border-ink-700 ${isWeekend(d) ? "bg-ink-800" : ""}`}
+                  className={`border-r vp-line-day ${isWeekend(d) ? "bg-ink-800" : ""}`}
                   style={{ width: slotW * 4 }}
                   data-day={d}
                 >
@@ -1039,7 +1466,7 @@ export default function VesselsPage() {
                     {SLOT_HOURS.map((h) => (
                       <div
                         key={h}
-                        className="text-[9px] text-center text-ink-400 border-l border-ink-700 first:border-l-0"
+                        className="text-[9px] text-center text-ink-400 border-l vp-line-slot first:border-l-0"
                         style={{ width: slotW }}
                       >
                         {String(h).padStart(2, "0")}
@@ -1051,36 +1478,36 @@ export default function VesselsPage() {
             </div>
 
             {/* один блок на причал: заголовок, затем шкала длины 10 м на ячейку */}
-            {blocks.map(({ berth, cells, items }) => (
+            {blocks.map(({ berth, cells, items }) => {
+              /* чужие корпуса, вставшие на метры этого причала (см. foreignSpills) */
+              const foreignOf = foreignSpills(plan?.placements ?? [], berths, berth.id);
+              return (
               <div
                 key={berth.id}
-                className={`border-b border-ink-700 ${berth.code === PARK_CODE ? "bg-ink-800/20" : ""} ${drag && drag.berthId === berth.id && drag.berthId !== items[0]?.berth_id ? "ring-2 ring-inset ring-brand-sky" : ""}`}
+                className={`border-b-2 vp-frame-strong ${berth.code === PARK_CODE ? "bg-ink-800/20" : ""} ${drag && drag.berthId === berth.id && drag.berthId !== items[0]?.berth_id ? "ring-2 ring-inset ring-brand-sky" : ""}`}
                 data-berth-block={berth.code}
                 data-berth-id={berth.id}
                 data-drop-target={drag && drag.berthId === berth.id ? "1" : "0"}
               >
-                <div className="flex bg-ink-900/5">
-                  <div
-                    className="sticky left-0 z-10 bg-white/95 border-r border-ink-700 px-2 py-0.5 text-xs"
-                    style={{ width: LEFT_W }}
-                  >
-                    <span className="font-medium">{berth.code === PARK_CODE ? "Ожидание" : berth.code}</span>
-                    {berth.code === PARK_CODE ? (
+                {/* Шапка-строка осталась только у кармана: у него нет шкалы, и
+                     подписать «что это за склад» больше негде. У обычных причалов
+                     подпись переехала внутрь полосы (см. ниже): строка-шапка
+                     отнимала ~20 px на каждый причал, и на экран влезало три
+                     причала вместо шести — при том что читают план по горизонтали. */}
+                {berth.code === PARK_CODE ? (
+                  <div className="flex bg-ink-900/5">
+                    <div
+                      className="sticky left-0 z-10 bg-white/95 border-r vp-frame px-2 py-0.5 text-xs"
+                      style={{ width: LEFT_W }}
+                    >
+                      <span className="font-medium">Ожидание</span>
                       <span className="text-[10px] text-ink-400"> · суда вне причалов</span>
-                    ) : berth.depth ? (
-                      <span className="text-[10px] text-ink-400">
-                        {" "}· осадка {String(berth.depth).replace(".", ",")} м
-                      </span>
-                    ) : null}
+                    </div>
+                    <div className="text-[10px] text-ink-400 px-2 py-0.5" style={{ width: totalSlots * slotW }}>
+                      ждут черёды, груза · дата не важна · тяни чип к причалу — копия встанет на дату под курсором
+                    </div>
                   </div>
-                  <div className="text-[10px] text-ink-400 px-2 py-0.5" style={{ width: totalSlots * slotW }}>
-                    {berth.code === PARK_CODE
-                      ? "ждут черёды, груза · дата не важна · тяни чип к причалу — копия встанет на дату под курсором"
-                      : berth.length_m
-                        ? `${berth.length_m} м длины · ${cells} ячеек по ${10} м`
-                        : "метраж причала не задан · показываем 100 м"}
-                  </div>
-                </div>
+                ) : null}
 
                 {berth.code === PARK_CODE ? (
                   /* карман: шкалы времени нет — дата в «Ожидании» не важна.
@@ -1088,7 +1515,7 @@ export default function VesselsPage() {
                      а стрелка перешвартовки стартует прямо от чипа */
                   <div className="flex items-stretch">
                     <div
-                      className="sticky left-0 z-10 bg-white/95 border-r border-ink-700 text-[9px] uppercase tracking-wider text-ink-400 px-2 py-1.5"
+                      className="sticky left-0 z-10 bg-white/95 border-r vp-frame text-[9px] uppercase tracking-wider text-ink-400 px-2 py-1.5"
                       style={{ width: LEFT_W }}
                     >
                       склад · без привязки к дате
@@ -1163,36 +1590,120 @@ export default function VesselsPage() {
                 ) : (
                 <div className="flex">
                   {/* линейка длины: подпись каждой ячейки в метрах */}
-                  <div className="sticky left-0 z-10 bg-white/95 border-r border-ink-700" style={{ width: LEFT_W }}>
-                    {rulerMarks(cells).map((m) => (
-                      <div
-                        key={m}
-                        className="num text-right pr-2 text-[9px] text-ink-400 border-t border-ink-700/50"
-                        style={{ height: cellH, lineHeight: `${cellH}px` }}
-                        data-ruler={m}
-                      >
-                        {m % (cellH < 14 ? 20 : 10) === 0 ? m : ""}
+                  <div
+                    className="sticky left-0 z-10 bg-white/95 border-r vp-frame flex items-stretch"
+                    style={{ width: LEFT_W }}
+                    data-berth-col={berth.id}
+                  >
+                    {/* Колонка разделена чертой на две зоны: слева подпись причала,
+                         справа — шкала метров. sticky — уже позиционированный предок,
+                         высота колонки равна высоте поля, поэтому ряды шкалы сидят
+                         ровно на своих десятках метров и ни одна клетка поля не
+                         съезжает. */}
+                    <div className="flex-1 self-center pl-2 leading-tight">
+                      <div className="text-xs font-medium">{berth.code}</div>
+                      <div className="text-[9px] text-ink-400">
+                        {berth.length_m
+                          ? berth.length_m +
+                            " м" +
+                            (berth.depth
+                              ? " · осадка " + String(berth.depth).replace(".", ",") + " м"
+                              : "")
+                          : "метраж не задан · 100 м"}
                       </div>
-                    ))}
+                    </div>
+                    <div className="border-l vp-frame" style={{ width: RULER_W }}>
+                      {rulerMarks(cells).map((m) => (
+                        <div
+                          key={m}
+                          className="num text-right pr-2 text-[9px] text-ink-400 border-t vp-line-meter"
+                          style={{ height: cellH, lineHeight: `${cellH}px` }}
+                          data-ruler={m}
+                        >
+                          {m % (cellH < 14 ? 20 : 10) === 0 ? m : ""}
+                        </div>
+                      ))}
+                    </div>
                   </div>
 
-                  <div className="relative" style={{ width: totalSlots * slotW, height: cells * cellH }} data-berth-scale={berth.id}>
-                    {/* фоновые колонки: выходные подсвечены */}
-                    {days.map((d) => (
-                      <div
-                        key={d}
-                        className={`absolute top-0 bottom-0 border-r border-ink-700 ${isWeekend(d) ? "bg-ink-800/70" : ""}`}
-                        style={{ left: days.indexOf(d) * slotW * 4, width: slotW * 4 }}
-                      />
+                  <div
+                    className="relative"
+                    style={{
+                      width: totalSlots * slotW,
+                      height: cells * cellH,
+                      backgroundImage: gridBackground(slotW, cellH),
+                    }}
+                    data-berth-scale={berth.id}
+                  >
+                    {/* Выходные — серые полосы. Подложка полупрозрачная:
+                       линии сетки лежат в background поля и обязаны читаться
+                       сквозь закрашенный столбец; раньше столбец был непрозрачным
+                       и съедал их целиком. Границу суток столбец больше не рисует
+                       — её рисует background, иначе линия вставала вдвое. */}
+                    {days
+                      .filter((d) => isWeekend(d))
+                      .map((d) => (
+                        <div
+                          key={d}
+                          className="absolute top-0 bottom-0 vp-weekend"
+                          style={{ left: days.indexOf(d) * slotW * 4, width: slotW * 4 }}
+                        />
                     ))}
-                    {/* горизонтальная шкала: граница каждой десятки метров */}
-                    {Array.from({ length: cells - 1 }, (_, i) => (
+
+                    {/* Конец причала. Когда метраж кратен 10 м он совпадает с нижней
+                       рамкой блока; когда нет (135 м) — поле дорисовано до полной
+                       ячейки, и без этой линии не было бы видно, где причал кончается
+                       на самом деле: судно в таком «хвосте» уже стоит на берегу. */}
+                    {berth.length_m && berth.length_m % M_PER_CELL !== 0 ? (
                       <div
-                        key={i}
-                        className="absolute left-0 right-0 border-t border-ink-700/40"
-                        style={{ top: (i + 1) * cellH }}
+                        className="pointer-events-none absolute left-0 right-0 vp-berth-end"
+                        style={{ top: (berth.length_m / M_PER_CELL) * cellH }}
+                        data-berth-end={berth.length_m}
                       />
-                    ))}
+                    ) : null}
+
+                    {/* Чужие корпуса на этих метрах. Причал отдаёт соседу часть
+                        своей стенки — фронт обязан показывать занятые метры и у
+                        хозяина, и у гостя: иначе два борта встанут в одни и те же
+                        10 метров, потому что у каждого «свои» были свободны. */}
+                    {foreignOf.map(({ p, from: mFrom, to: mTo, side }) => {
+                      const d = displayed(p);
+                      const geo = d ? barGeometry(d, from, totalSlots) : null;
+                      if (!geo) return null;
+                      const color = barColor(p);
+                      const top = (Math.max(0, mFrom) / M_PER_CELL) * cellH;
+                      const bottom = ((mTo == null ? cells * M_PER_CELL : Math.min(mTo, cells * M_PER_CELL))) / M_PER_CELL * cellH;
+                      if (bottom - top < 2) return null;
+                      return (
+                        <div
+                          key={`spill-${p.id}`}
+                          className="pointer-events-none absolute overflow-hidden rounded-sm vp-spill"
+                          style={{
+                            left: geo.left * slotW,
+                            width: geo.width * slotW - 1.5,
+                            top,
+                            height: bottom - top,
+                            background: `repeating-linear-gradient(135deg, ${color}66 0 4px, ${color}22 4px 8px)`,
+                            borderColor: color,
+                          }}
+                          title={`«${p.vessel}» стоит корпусом на этом причале: ${Math.round(mFrom)}–${mTo == null ? "конец" : Math.round(mTo)} м заняты`}
+                          data-spill={p.id}
+                        >
+                          {/* Подпись та же, что печатает лист: без неё штриховка
+                              выглядит случайным пятном, и у окна приходится
+                              угадывать, чей это борт и сколько метров */}
+                          {bottom - top >= 14 && geo.width * slotW >= 110 && (
+                            <span
+                              className="absolute left-1 top-0 block max-w-[calc(100%-6px)] truncate text-[10px] font-semibold leading-[14px] text-ink-900"
+                              data-spill-label={p.id}
+                            >
+                              {side === "bow" ? "нос" : "хвост"} «{p.vessel}» ·{" "}
+                              {Math.round((mTo == null ? cells * M_PER_CELL : mTo) - Math.max(0, mFrom))} м
+                            </span>
+                          )}
+                        </div>
+                      );
+                    })}
 
                     {items.map((p) => {
                       const d = displayed(p);
@@ -1200,30 +1711,60 @@ export default function VesselsPage() {
                       if (!geo) return null;
                       const color = barColor(p);
                       const v = lengthGeometry(p, cellH);
-                      // длину не задали — полоса идёт до конца причала; за блок не выходим
-                      const height = Math.max(10, Math.min(v.height, cells * cellH - v.top) - 2);
                       const dragging = drag?.id === p.id;
+                      // За свой блок полоса не заходит ни снизу, ни сверху: метры выше
+                      // начала шкалы лежат у причала выше по фронту, ниже конца — у
+                      // следующего, и там они уже нарисованы штриховкой чужого корпуса.
+                      // Иначе одна и та же часть борта показалась бы дважды — полосой
+                      // поверх чужого блока и штриховкой в нём. Пока тянут (dragging),
+                      // не ограничиваем: корпус обязан идти за курсором через границу.
+                      const topPx = dragging ? v.top : Math.max(0, v.top);
+                      const height = Math.max(
+                        10,
+                        (dragging
+                          ? Math.min(v.height, cells * cellH - v.top)
+                          : Math.min(v.top + v.height, cells * cellH) - topPx) - 2,
+                      );
                       const canDrag = wysiwyg && canEdit && !busy;
                       const ring = ringOf.get(p.id); // обводка, если это цепочка под курсором
                       // пока тащим, полоса едет за курсором с тем же шагом, с каким
-                      // потом сохранится: слот по горизонтали, 5 м по вертикали
-                      const shiftX = dragging ? Math.round(drag.dx / slotW) * slotW : 0;
+                      // потом сохранится: час по горизонтали, 5 м по вертикали
+                      const shiftX = dragging
+                        ? ((drag.startAt.getTime() - parseLocal(p.starts_at).getTime()) / HOUR_MS)
+                          * pxPerHour(slotW)
+                        : 0;
                       // вертикаль считаем от блока-цели: если это другой причал,
                       // полоса доезжает до него и встаёт на его отметку
+                      // Полоса идёт за курсором через границу блока: то, что
+                      // часть корпуса лежит в чужом ряду, и есть нахлёст — рисовать
+                      // его «внутри» своего причала значило бы врать.
                       const shiftY = dragging
                         ? (drag.blocks.find((b) => b.id === drag.berthId)?.top ?? drag.ownTop) -
                           drag.ownTop +
                           (drag.offsetM / M_PER_CELL) * cellH -
                           drag.topInBlock
                         : 0;
+                      // Пока тянут за край, полоса показывается почасово: сетка рисует
+                      // слоты, а срок человек правит часом, и рисовать ему «прыжок на
+                      // столбец» вместо тех двух часов, что он отмеряет, — значит
+                      // врать в момент, когда он выбирает значение.
+                      const rz = edge && edge.id === p.id ? edge : null;
+                      const pxH = pxPerHour(slotW);
+                      const originT = new Date(`${from}T00:00:00`).getTime();
+                      const left = rz
+                        ? ((rz.start.getTime() - originT) / HOUR_MS) * pxH
+                        : geo.left * slotW;
+                      const width = rz
+                        ? Math.max(pxH, ((rz.end.getTime() - rz.start.getTime()) / HOUR_MS) * pxH)
+                        : geo.width * slotW - 3;
                       return (
                         <button
                           key={p.id}
                           className={`absolute rounded-md text-left text-[11px] px-1.5 text-white shadow-sm hover:brightness-110 focus:outline-none focus:ring-2 focus:ring-brand-sky ${canDrag ? "cursor-move touch-none" : ""} ${dragging ? "z-40 ring-2 ring-brand-sky" : ""}`}
                           style={{
-                            left: geo.left * slotW,
-                            width: geo.width * slotW - 3,
-                            top: v.top + 1,
+                            left,
+                            width,
+                            top: topPx + 1,
                             height,
                             transform: shiftX || shiftY ? `translate(${shiftX}px, ${shiftY}px)` : undefined,
                             background: `linear-gradient(180deg, ${color}f0, ${color}cc)`,
@@ -1276,6 +1817,7 @@ export default function VesselsPage() {
                             </span>
                           ) : null}
                           {geo.clippedEnd ? <span className="block text-[10px]">…</span> : null}
+                          {edgeHandles(p, canDrag, height)}
                         </button>
                       );
                     })}
@@ -1283,7 +1825,8 @@ export default function VesselsPage() {
                 </div>
                 )}
               </div>
-            ))}
+            );
+            })}
 
             {/* Стрелки перешвартовок: один SVG поверх холста в координатах полос.
                 Якоря считаются теми же barGeometry/lengthGeometry, что и сами
@@ -1294,22 +1837,78 @@ export default function VesselsPage() {
           </div>
         </div>
 
+      {/* Правка срока за край полосы: подпись у курсора. Полоса на сетке рисует
+          слоты, а живёт — часы, поэтому без подписи «по 13.11 15:00» человек не
+          видит, что реально сохранится. Портал в body: у .panel стоит
+          backdrop-filter, и fixed-потомок лепился бы к панели, а не к окну. */}
+      {/* Подсказка при перетаскивании: срок, который получится при текущем
+          курсоре. Шаг — час, и без точного времени человек не видит, куда
+          реально ставит полосу, и не поймёт, встал ли он вплотную к соседу. */}
+      {drag ? createPortal(
+        <div
+          className="fixed z-50 pointer-events-none select-none rounded-md border border-ink-700 bg-white px-2 py-1 text-[11px] text-ink-100 shadow-lg"
+          style={{ left: drag.cx + 12, top: drag.cy + 18 }}
+          data-vp-drag-hint
+        >
+          <b>с {drag.startAt.toLocaleString("ru-RU")}</b>
+          <span className="block text-[10px] text-ink-400" data-vp-drag-hint-end>
+            {(() => {
+              const d = (plan?.placements ?? []).find((x) => x.id === drag.id);
+              if (!d) return "";
+              const dur = parseLocal(d.ends_at).getTime() - parseLocal(d.starts_at).getTime();
+              const end = new Date(drag.startAt.getTime() + dur);
+              return `по ${end.toLocaleString("ru-RU")} · весь срок ${hoursBetween(drag.startAt, end)}`;
+            })()}
+          </span>
+          <span className="block text-[10px] text-ink-400">шаг — час, у края соседа липнет</span>
+        </div>,
+        document.body,
+      ) : null}
+
+      {edge ? createPortal(
+        <div
+          className="fixed z-50 pointer-events-none select-none rounded-md border border-ink-700 bg-white px-2 py-1 text-[11px] text-ink-100 shadow-lg"
+          style={{ left: edge.x + 12, top: edge.y + 18 }}
+          data-vp-resize-hint
+        >
+          <b>{edge.side === "start" ? "с" : "по"}</b>{" "}
+          {(edge.side === "start" ? edge.start : edge.end).toLocaleString("ru-RU")}
+          <span className="block text-[10px] text-ink-400">
+            весь срок: {hoursBetween(edge.start, edge.end)}
+          </span>
+          <span className="block text-[10px] text-ink-400">шаг — час, слоты на сетке не указ</span>
+        </div>,
+        document.body,
+      ) : null}
+
       {/* «Судно у мышки» и контекстное меню — порталом в body: у .panel стоит
           backdrop-filter, он создаёт containing block, и fixed-потомок лепился
-          бы к панели, а не к окну — призрак уезжал от курсора */}
+          бы к панели, а не к окну — копия уезжала бы от курсора */}
       {ghost ? createPortal(
+        // Подсказка у курсора. У правого и нижнего края окна она разворачивается
+        // на другую сторону курсора, а не упирается в стену: без этого «судно у
+        // мышки» сжималось в узкую колонну на пол-экрана (текст не влезал в
+        // остаток ширины и переносился по слову).
         <div
           className="fixed z-50 pointer-events-none select-none rounded-md px-2 py-1 text-[11px] text-white shadow-lg"
           style={{
             left: ghost.x + 12,
             top: ghost.y + 12,
+            transform: [
+              ghost.x > window.innerWidth - 340 ? "translateX(calc(-100% - 24px))" : "",
+              ghost.y > window.innerHeight - 90 ? "translateY(calc(-100% - 24px))" : "",
+            ].filter(Boolean).join(" ") || undefined,
+            whiteSpace: "nowrap",
             background: barColor(ghost.p),
-            opacity: 0.75,
+            opacity: 0.8,
             border: "2px dashed rgba(255,255,255,.95)",
           }}
           data-vp-ghost={ghost.p.id}
         >
-          {ghost.p.vessel} · {berths.find((b) => b.id === ghost.berthId)?.code ?? "?"}
+          {ghost.p.vessel} · {berthCode(ghost.berthId)} · {ghost.offsetM} м
+          <span className="block text-[10px] opacity-90">
+            с {hhmm(ghost.start)} · копия со стрелкой, оригинал стоит
+          </span>
         </div>,
         document.body,
       ) : null}
@@ -1335,8 +1934,8 @@ export default function VesselsPage() {
                 startReberthing(m.p, { clientX: m.x, clientY: m.y });
               }}
             >
-              ⇄ Временное перемещение
-              <span className="block text-[10px] text-ink-400">полупрозрачная копия + стрелка от оригинала</span>
+              ⇄ Временное перемещение мышью
+              <span className="block text-[10px] text-ink-400">полупрозрачная копия едет за курсором, стрелка — от оригинала; точный срок — в карточке судна</span>
             </button>
             <button
               className="block w-full px-3 py-1.5 text-left hover:bg-ink-800/5"
@@ -1405,6 +2004,25 @@ export default function VesselsPage() {
               <dt className="panel-title">Слотов в плане</dt>
               <dd className="num">{slotsCount(detail)}</dd>
             </div>
+            {detail.spill_berth_id ? (
+              <div className="col-span-2">
+                <dt className="panel-title">Корпус на соседнем причале</dt>
+                <dd data-detail-spill>
+                  {(() => {
+                    const own = berths.find((b) => b.id === detail.berth_id);
+                    const to = berths.find((b) => b.id === detail.spill_berth_id);
+                    const m = spillMeters(detail.length_m, detail.offset_m ?? 0, own?.length_m ?? null);
+                    return (
+                      <>
+                        {detail.offset_m < 0 ? "нос" : "хвост"} стоит на {to?.code ?? "?"}
+                        {m ? `: ${m} м его стенки заняты этим судном` : ": метры соседа заняты этим судном"}
+                        {" — на плане они заштрихованы у хозяина и у гостя"}
+                      </>
+                    );
+                  })()}
+                </dd>
+              </div>
+            ) : null}
             {detail.moved_from_id ? (
               <div className="col-span-2">
                 <dt className="panel-title">Перешвартовка</dt>
@@ -1434,6 +2052,19 @@ export default function VesselsPage() {
             {canEdit && (
               <button className="btn-primary text-sm" onClick={() => openEdit(detail)} data-admin-action="edit-placement">
                 Править
+              </button>
+            )}
+            {canEdit && (
+              <button
+                className="btn-ghost text-sm"
+                onClick={() => {
+                  const d = detail;
+                  setDetail(null);
+                  openMove(d);
+                }}
+                data-admin-action="move-placement"
+              >
+                ⇄ Временное перемещение
               </button>
             )}
             {canEdit && (
@@ -1508,7 +2139,7 @@ export default function VesselsPage() {
               <select
                 className="field"
                 value={form.berth_id}
-                onChange={(e) => setForm({ ...form, berth_id: Number(e.target.value), offset_m: "0" })}
+                onChange={(e) => setForm({ ...form, berth_id: Number(e.target.value), offset_m: "0", spill_berth_id: "" })}
                 data-field="berth"
               >
                 {berths.map((b) => (
@@ -1517,6 +2148,36 @@ export default function VesselsPage() {
                     {b.length_m ? ` · ${b.length_m} м` : ""}
                   </option>
                 ))}
+              </select>
+            </Field>
+            <Field label="Выходит на соседний причал" hint={spillHint}>
+              <select
+                className="field"
+                value={form.spill_berth_id}
+                onChange={(e) => setForm({ ...form, spill_berth_id: e.target.value })}
+                data-field="spill-berth"
+              >
+                <option value="">— не выходит —</option>
+                {[formSpillChoices.prev, formSpillChoices.next]
+                  .filter((b): b is Berth => !!b)
+                  .map((b) => (
+                    <option key={b.id} value={b.id}>
+                      {b.code}
+                      {b.length_m ? ` · ${b.length_m} м` : ""} ·{" "}
+                      {b.id === formSpillChoices.prev?.id ? "выше по фронту" : "ниже по фронту"}
+                      {b.id === formNeighbour?.id ? " ←" : ""}
+                    </option>
+                  ))}
+                {formSpillChoices.others.length ? (
+                  <optgroup label="другие причалы">
+                    {formSpillChoices.others.map((b) => (
+                      <option key={b.id} value={b.id}>
+                        {b.code}
+                        {b.length_m ? ` · ${b.length_m} м` : ""}
+                      </option>
+                    ))}
+                  </optgroup>
+                ) : null}
               </select>
             </Field>
             <Field
@@ -1535,12 +2196,15 @@ export default function VesselsPage() {
                 data-field="length-m"
               />
             </Field>
-            <Field label="Место у причала, м" hint="отметка от начала причала, кратно 10 м">
+            <Field
+              label="Место у причала, м"
+              hint="отметка от начала причала, кратно 10 м; минус — нос встанет на причал выше по фронту"
+            >
               <div className="flex gap-2">
                 <input
                   className="field num"
                   type="number"
-                  min={0}
+                  min={-500}
                   step={10}
                   value={form.offset_m}
                   onChange={(e) => setForm({ ...form, offset_m: e.target.value })}
@@ -1619,32 +2283,202 @@ export default function VesselsPage() {
               </label>
             </Field>
 
-            <Field label="Начало" hint="слот 00 / 06 / 12 / 18">
+            <Field label="Начало стоянки" hint="любое время: судно встаёт, когда пришло, а не когда слот">
               <div className="flex gap-2">
                 <input type="date" className="field" value={form.startDate} onChange={(e) => setForm({ ...form, startDate: e.target.value })} data-field="start-date" />
-                <select className="field w-24" value={form.startHour} onChange={(e) => setForm({ ...form, startHour: Number(e.target.value) })} data-field="start-hour">
-                  {SLOT_HOURS.map((h) => (
-                    <option key={h} value={h}>{slotLabel(h)}</option>
-                  ))}
-                </select>
+                <input type="time" step={60} className="field w-28" value={form.startTime} onChange={(e) => setForm({ ...form, startTime: e.target.value })} data-field="start-hour" />
               </div>
+              <SlotHints value={form.startTime} onPick={(t) => setForm({ ...form, startTime: t })} />
             </Field>
-            <Field label="Окончание" hint="последний занятый слот, включительно">
+            <Field label="Окончание стоянки" hint="когда судно ушло; слоты на сетке — только шкала, не ограничение">
               <div className="flex gap-2">
                 <input type="date" className="field" value={form.endDate} onChange={(e) => setForm({ ...form, endDate: e.target.value })} data-field="end-date" />
-                <select className="field w-24" value={form.endHour} onChange={(e) => setForm({ ...form, endHour: Number(e.target.value) })} data-field="end-hour">
-                  {SLOT_HOURS.map((h) => (
-                    <option key={h} value={h}>{slotLabel(h)}</option>
-                  ))}
-                </select>
+                <input type="time" step={60} className="field w-28" value={form.endTime} onChange={(e) => setForm({ ...form, endTime: e.target.value })} data-field="end-hour" />
               </div>
+              <SlotHints value={form.endTime} onPick={(t) => setForm({ ...form, endTime: t })} />
             </Field>
           </div>
-          <Notice text="Два судна мешают друг другу, только если пересекаются и по времени, и по метрам: 100 м причала — это 10 ячеек по 10 м. Кабинет не даст поставить судно так, чтобы оно вылезло за край причала или наехало на уже стоящее, и скажет, какое именно и где именно." />
+          <Notice text="Два судна мешают друг другу, только если пересекаются и по времени, и по метрам: 100 м причала — это 10 ячеек по 10 м. Кабинет не даст поставить судно наехавшим на уже стоящее и скажет, какое именно и где именно. Судно длиннее причала встать может — но только если указано, на какой соседний причал выходит корпус: эти метры соседнего причала считаются занятыми." />
             </>
           )}
         </Modal>
       )}
+      {move && moveForm ? (
+        <Modal
+          title={`Временное перемещение · ${move.vessel}`}
+          onClose={() => {
+            setMove(null);
+            setMoveForm(null);
+          }}
+          testId="move-form"
+          footer={
+            <>
+              <button className="btn btn-primary" onClick={() => void submitMove()} data-admin-action="save-move">
+                Переместить
+              </button>
+              <button
+                className="btn btn-ghost text-sm"
+                onClick={() => {
+                  setMove(null);
+                  setMoveForm(null);
+                }}
+              >
+                Отмена
+              </button>
+            </>
+          }
+        >
+          <p className="text-[11px] leading-snug text-ink-300">
+            Оригинал остаётся на месте, копия встанет сюда и получит стрелку. Причал, соседний
+            причал под корпус и срок называется здесь же: прежнее «судно у мышки» умело только
+            тыкать мышью, а досказывать причал и время всё равно приходилось руками.
+          </p>
+          {moveError ? <FormError text={moveError} /> : null}
+          <div className="mt-3 grid grid-cols-2 gap-3">
+            <Field
+              label="Причал"
+              hint={
+                moveBerth?.code === PARK_CODE
+                  ? "в кармане «Ожидание» нет метража: судно ждёт очереди, а не стоит у стенки"
+                  : moveBerth?.length_m
+                    ? `${moveBerth.code} — ${moveBerth.length_m} м`
+                    : "метраж причала не задан"
+              }
+            >
+              <select
+                className="field"
+                value={moveForm.berth_id}
+                onChange={(e) => setMoveForm({ ...moveForm, berth_id: Number(e.target.value), spill_berth_id: "" })}
+                data-field="move-berth"
+              >
+                {berths.map((b) => (
+                  <option key={b.id} value={b.id}>
+                    {b.code}
+                    {b.length_m ? ` · ${b.length_m} м` : ""}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            <Field
+              label="Выходит на соседний причал"
+              hint={
+                moveBerth?.code === PARK_CODE
+                  ? "у кармана нет стенки — корпус выходит некуда"
+                  : moveNeighbour
+                    ? `${moveSide === "bow" ? "нос" : "хвост"} выходит за ${moveBerth?.code ?? "?"} — по фронту это ${moveNeighbour.code}`
+                    : "корпус встаёт целиком у своего причала"
+              }
+            >
+              <select
+                className="field"
+                value={moveForm.spill_berth_id}
+                onChange={(e) => setMoveForm({ ...moveForm, spill_berth_id: e.target.value })}
+                data-field="move-spill"
+              >
+                <option value="">— не выходит —</option>
+                {[moveSpillChoices.prev, moveSpillChoices.next]
+                  .filter((b): b is Berth => !!b)
+                  .map((b) => (
+                    <option key={b.id} value={b.id}>
+                      {b.code}
+                      {b.length_m ? ` · ${b.length_m} м` : ""} ·{" "}
+                      {b.id === moveSpillChoices.prev?.id ? "выше по фронту" : "ниже по фронту"}
+                      {b.id === moveNeighbour?.id ? " ←" : ""}
+                    </option>
+                  ))}
+                {moveSpillChoices.others.length ? (
+                  <optgroup label="другие причалы">
+                    {moveSpillChoices.others.map((b) => (
+                      <option key={b.id} value={b.id}>
+                        {b.code}
+                        {b.length_m ? ` · ${b.length_m} м` : ""}
+                      </option>
+                    ))}
+                  </optgroup>
+                ) : null}
+              </select>
+            </Field>
+            <Field
+              label="Место у причала, м"
+              hint="отметка от начала причала, шаг 5 м; минус — нос ушёл на причал выше по фронту"
+            >
+              <input
+                className="field num"
+                type="number"
+                step={5}
+                value={moveForm.offset_m}
+                onChange={(e) => setMoveForm({ ...moveForm, offset_m: e.target.value })}
+                data-field="move-offset"
+              />
+            </Field>
+            <Field
+              label="Длина судна, м"
+              hint="с длиной видно, сколько метров уходит соседу; пусто — причал занят до конца"
+            >
+              <input
+                className="field num"
+                type="number"
+                min={1}
+                max={500}
+                step={5}
+                value={moveForm.length_m}
+                onChange={(e) => setMoveForm({ ...moveForm, length_m: e.target.value })}
+                data-field="move-length"
+              />
+            </Field>
+            <Field label="Начало стоянки" hint="любое время: судно встаёт, когда пришло">
+              <div className="flex gap-2">
+                <input
+                  type="date"
+                  className="field"
+                  value={moveForm.startDate}
+                  onChange={(e) => setMoveForm({ ...moveForm, startDate: e.target.value })}
+                  data-field="move-start-date"
+                />
+                <input
+                  type="time"
+                  step={60}
+                  className="field w-28"
+                  value={moveForm.startTime}
+                  onChange={(e) => setMoveForm({ ...moveForm, startTime: e.target.value })}
+                  data-field="move-start-hour"
+                />
+              </div>
+              <SlotHints value={moveForm.startTime} onPick={(t) => setMoveForm({ ...moveForm, startTime: t })} />
+            </Field>
+            <Field label="Окончание стоянки" hint="когда судно уходит; слоты на сетке — только шкала">
+              <div className="flex gap-2">
+                <input
+                  type="date"
+                  className="field"
+                  value={moveForm.endDate}
+                  onChange={(e) => setMoveForm({ ...moveForm, endDate: e.target.value })}
+                  data-field="move-end-date"
+                />
+                <input
+                  type="time"
+                  step={60}
+                  className="field w-28"
+                  value={moveForm.endTime}
+                  onChange={(e) => setMoveForm({ ...moveForm, endTime: e.target.value })}
+                  data-field="move-end-hour"
+                />
+              </div>
+              <SlotHints value={moveForm.endTime} onPick={(t) => setMoveForm({ ...moveForm, endTime: t })} />
+            </Field>
+          </div>
+          <Notice
+            text={`Копия: ${moveBerth?.code ?? "?"}${
+              moveForm.spill_berth_id
+                ? ` + корпус на ${berths.find((b) => b.id === Number(moveForm.spill_berth_id))?.code ?? "?"}`
+                : ""
+            } · ${toIso(moveForm.startDate, moveForm.startTime).slice(0, 16).replace("T", " ")} — ${toIso(
+              moveForm.endDate,
+              moveForm.endTime,
+            ).slice(0, 16).replace("T", " ")} · ${moveForm.offset_m || 0} м`}
+          />
+        </Modal>
+      ) : null}
     </AppShell>
   );
 }

@@ -90,8 +90,8 @@ def test_static_assets_are_cached_immutable():
 
 def test_frontend_api_upload_is_not_buffered():
     """Файл отчёта должен уходить в бэкенд потоком, а не ложиться сначала на диск nginx."""
-    block = _location_body(_text(FRONTEND_CONF), r"/api/")
-    assert block, "frontend/nginx.conf: не найден `location /api/ { ... }`"
+    block = _location_body(_text(FRONTEND_CONF), r"\^~ /api/")
+    assert block, "frontend/nginx.conf: не найден `location ^~ /api/ { ... }`"
     assert re.search(r"proxy_request_buffering[ \t]+off[ \t]*;", block), (
         "frontend/nginx.conf: в location /api/ нужен `proxy_request_buffering off;`"
     )
@@ -107,3 +107,88 @@ def test_vhost_gzip_covers_proxied_responses():
         "statcab.vhost.conf: нужен `gzip_proxied any;` — без него проксируемые ответы "
         "не сжимаются, даже когда gzip включён"
     )
+
+
+def test_backend_address_resolves_at_request_time():
+    """nginx резолвил proxy_pass один раз при старте: после пересоздания контейнера
+    backend весь /api отвечал 502, а deploy.sh отменял успешный выкат (п. 20).
+    Динамический резолв живёт в upstream (`server … resolve` + resolver), а не в
+    переменной proxy_pass: только с upstream-формой работает keepalive."""
+    text = _text(FRONTEND_CONF)
+    assert re.search(r"(?m)^\s*upstream\s+statcab_backend\s*\{", text), \
+        "frontend/nginx.conf: нет блока upstream statcab_backend"
+    assert re.search(r"(?m)^\s*server\s+backend:8000\s+resolve\s*;", text), \
+        "frontend/nginx.conf: в upstream нет `server backend:8000 resolve` — " \
+        "после пересоздания контейнера nginx уйдёт в старый IP"
+    assert re.search(r"(?m)^\s*resolver\s+127\.0\.0\.11\s+valid=10s", text), \
+        "frontend/nginx.conf: нет resolver 127.0.0.11 valid=10s — адрес контейнера не обновится"
+    assert re.search(r"(?m)^\s*zone\s+statcab_backend\b", text), \
+        "frontend/nginx.conf: в upstream нет zone — с `server … resolve` без общей памяти nginx не стартует"
+    assert re.search(r"(?m)^\s*proxy_pass\s+http://statcab_backend", text), \
+        "frontend/nginx.conf: proxy_pass не идёт в upstream statcab_backend"
+    assert not re.search(r"(?m)^\s*proxy_pass\s+http://backend:8000;", text), \
+        "frontend/nginx.conf: proxy_pass литералом — имя разовьётся один раз при старте"
+    assert "$statcab_backend" not in text, \
+        "frontend/nginx.conf: proxy_pass через переменную не переиспользует соединения"
+
+
+def test_upstream_keepalive_is_used_by_proxies():
+    """keepalive в upstream без proxy_http_version 1.1 + `Connection ""` в location
+    — мёртвая настройка: HTTP/1.0 без keepalive-заголовка рвёт соединение на каждом
+    запросе, и весь смысл пула соединений теряется (п. 20 TASKS2.md)."""
+    text = _text(FRONTEND_CONF)
+    assert re.search(r"(?m)^\s*keepalive\s+16\s*;", text), \
+        "frontend/nginx.conf: в upstream нет keepalive 16"
+    for loc in (r"=\s*/healthz", r"=\s*/api/readyz", r"=\s*/readyz",
+                r"=\s*/api/auth/login", r"\^~\s*/api/admin/sync/run",
+                r"\^~\s*/api/admin/dispatcher/import", r"\^~\s*/api/"):
+        block = _location_body(text, loc)
+        assert block, f"frontend/nginx.conf: не найден location {loc}"
+        assert re.search(r"proxy_http_version[ \t]+1\.1[ \t]*;", block), \
+            f"frontend/nginx.conf: в location {loc} нет proxy_http_version 1.1 — keepalive не работает"
+        assert re.search(r'proxy_set_header[ \t]+Connection[ \t]+""[ \t]*;', block), \
+            f"frontend/nginx.conf: в location {loc} нет `Connection \"\"` — keepalive не работает"
+
+
+def test_readyz_token_is_not_logged():
+    """Мониторинг ходит в /api/readyz?token=…, а combined-лог пишет $request
+    целиком: без access_log off секрет лежал бы в `docker logs` (п. 19, дефект D1)."""
+    text = _text(FRONTEND_CONF)
+    for loc in (r"=\s*/api/readyz", r"=\s*/readyz"):
+        block = _location_body(text, loc)
+        assert block, f"frontend/nginx.conf: нет `location {loc}` — проба с токеном попадёт в общий лог"
+        assert re.search(r"access_log[ \t]+off[ \t]*;", block), \
+            f"frontend/nginx.conf: в location {loc} нет access_log off — токен уйдёт в docker logs"
+
+
+def test_healthz_probe_has_short_timeouts():
+    """Цикл готовности deploy.sh рассчитывает на ~2 с между попытками: location
+    живости без proxy_connect_timeout/proxy_read_timeout висит дефолтные 60 с
+    на попытку вместо быстрого отказа (дефект D8)."""
+    block = _location_body(_text(FRONTEND_CONF), r"=\s*/healthz")
+    assert block, "frontend/nginx.conf: не найден `location = /healthz`"
+    assert re.search(r"proxy_connect_timeout[ \t]+2s[ \t]*;", block), \
+        "frontend/nginx.conf: /healthz без proxy_connect_timeout 2s"
+    assert re.search(r"proxy_read_timeout[ \t]+5s[ \t]*;", block), \
+        "frontend/nginx.conf: /healthz без proxy_read_timeout 5s"
+
+
+def test_login_is_rate_limited_at_proxy():
+    """Счётчик приложения живёт в памяти процесса и обнуляется рестартом контейнера."""
+    text = _text(FRONTEND_CONF)
+    assert re.search(r"(?m)^\s*limit_req_zone[ \t]+\$binary_remote_addr[ \t]+zone=\w+:10m", text), \
+        "frontend/nginx.conf: нет limit_req_zone для входа"
+    login = _location_body(text, r"= /api/auth/login")
+    assert login and "limit_req zone=" in login, \
+        "frontend/nginx.conf: location входа без limit_req — подбор пароля не ограничен"
+
+
+def test_long_operations_get_more_time():
+    """Ручная синхронизация и импорт отчёта идут прямо в запросе: на 60 с браузер
+    получал 504, пока синк продолжался в фоне."""
+    text = _text(FRONTEND_CONF)
+    for path in ("/api/admin/sync/run", "/api/admin/dispatcher/import"):
+        block = _location_body(text, rf"\^~ {re.escape(path)}")
+        assert block, f"frontend/nginx.conf: нет location для {path}"
+        assert re.search(r"proxy_read_timeout[ \t]+300s[ \t]*;", block), \
+            f"frontend/nginx.conf: {path} без увеличенного proxy_read_timeout"

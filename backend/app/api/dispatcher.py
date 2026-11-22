@@ -45,6 +45,7 @@ from ..onec.dispatcher_xlsm import describe, parse_workbook
 from ..services import app_settings
 from ..services import data_cache
 from ..services import dispatcher as svc
+from ..services import job_lock
 from .csv_export import to_csv_response
 
 router = APIRouter(prefix="/api/dispatcher", tags=["dispatcher"])
@@ -63,6 +64,11 @@ CACHE_CONTROL = "private, no-cache"
 # выборка — за всем периодом адресован `/rows.csv`, а не экран.
 ROWS_LIMIT_DEFAULT = 500
 ROWS_LIMIT_MAX = 2000
+
+# Потолок тела импорта в символах base64: 22 МиБ ≈ 16 МиБ файла, тот же предел,
+# что стоит в `nginx.conf` (`client_max_body_size 16m`), — чтобы кабинету было
+# одинаково тяжело и за прокси, и без него (п. 15 TASKS2.md).
+MAX_CONTENT_B64_CHARS = 22 * 1024 * 1024
 
 
 def _bounds(db: Session) -> tuple[date | None, date | None]:
@@ -316,7 +322,13 @@ class ImportIn(BaseModel):
     """Файл можно указать путём на сервере (dev) или прислать base64 (прод)."""
 
     path: str | None = Field(default=None, max_length=500)
-    content_base64: str | None = None
+    # Потолок тела импорта (п. 15 TASKS2.md): месячный отчёт диспетчера — единицы
+    # мегабайт, base64 — примерно на треть больше. Без потолка один запрос с
+    # «файлом» на гигабайт стоит кабинету ровно столько памяти, сколько в него
+    # положили, и кончается это не аккуратной ошибкой, а OOM внутри json.loads.
+    # 22 МиБ символов ≈ 16 МиБ файла — тот же предел, что стоит в nginx
+    # (client_max_body_size 16m), чтобы за прокси и без него было одинаково.
+    content_base64: str | None = Field(default=None, max_length=MAX_CONTENT_B64_CHARS)
     filename: str | None = Field(default=None, max_length=200)
 
 
@@ -329,8 +341,24 @@ def _counts(db: Session) -> dict:
     }
 
 
+IMPORT_BUSY = ("Кабинет сейчас пишет витрину: идёт загрузка из 1С или другой импорт. "
+               "Дождитесь окончания и повторите загрузку файла.")
+
+
 def import_file(db: Session, source: bytes | str | Path, *, source_name: str = "xlsm") -> dict:
-    """Разобрать файл и сложить в витрину. Ошибку разбора превращаем в 400."""
+    """Разобрать файл и сложить в витрину. Ошибку разбора превращаем в 400.
+
+    Импорт пишет те же таблицы витрины, что синхронизация и push из 1С, поэтому
+    берёт общую аренду: 409 значит «кабинет сейчас грузит что-то ещё» (п. 8 TASKS2.md).
+    """
+    with job_lock.held(db, job_lock.VITRINA, note=f"импорт отчёта: {source_name}") as free:
+        if not free:
+            raise HTTPException(409, IMPORT_BUSY)
+        return _apply_file(db, source, source_name=source_name)
+
+
+def _apply_file(db: Session, source: bytes | str | Path, *, source_name: str) -> dict:
+    """Разбор файла и запись в витрину. Аренда витрины к этому моменту взята."""
     try:
         snapshot: DispatcherSnapshot = parse_workbook(source)
     except Exception as exc:                       # битый файл, не xlsm, нет листов

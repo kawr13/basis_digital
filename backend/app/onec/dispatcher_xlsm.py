@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import io
 import re
+from collections import namedtuple
 from datetime import date, datetime, time
 from pathlib import Path
 from typing import Any, Callable
@@ -83,6 +84,39 @@ ROW_PLAT_TERMINAL = 59
 ROW_PLAT_ARRIVED = 60
 
 NUM_RE = re.compile(r"\d+(?:[.,]\d+)?")
+
+# --- слепок листа ------------------------------------------------------------
+# В read_only-режиме openpyxl нет случайного доступа (`ws.cell()`, `ws["W9"]`),
+# но вся раскладка отчёта влезает в строки 1..60 и столбцы A..Y — это 1500
+# значений. Забираем ровно этот прямоугольник сырыми значениями: месячный
+# объём ячеек не разворачивается в объекты, а функции блоков сохраняют
+# привычный интерфейс `cell(r, c).value` / `ws["W9"]`.
+GRID_MAX_ROW = ROW_PLAT_ARRIVED   # 60 — нижняя строка отчёта
+GRID_MAX_COL = 25                 # Y — правый край данных (W/X/Y блока судов)
+
+_Cell = namedtuple("_Cell", "value")
+
+
+class _Grid:
+    """Значения листа в прямоугольнике GRID_MAX_ROW × GRID_MAX_COL, (строка, колонка) → значение."""
+
+    __slots__ = ("title", "_cells")
+
+    def __init__(self, ws, max_row: int = GRID_MAX_ROW, max_col: int = GRID_MAX_COL):
+        self.title = ws.title
+        self._cells: dict[tuple[int, int], Any] = {}
+        rows = ws.iter_rows(min_row=1, max_row=max_row, max_col=max_col, values_only=True)
+        for r, row in enumerate(rows, 1):
+            for c, v in enumerate(row, 1):
+                if v is not None:
+                    self._cells[(r, c)] = v
+
+    def cell(self, row: int, column: int) -> _Cell:
+        return _Cell(self._cells.get((row, column)))
+
+    def __getitem__(self, coord: str) -> _Cell:
+        row, column = openpyxl.utils.coordinate_to_tuple(coord)
+        return _Cell(self._cells.get((row, column)))
 
 
 # ------------------------------------------------------------------ утилиты ----
@@ -480,7 +514,13 @@ def _platforms(ws) -> list[PlatformRec]:
 # ------------------------------------------------------------------ лист ----
 
 def parse_sheet(ws, name: str | None = None) -> ShiftRec | None:
-    """Один лист → одна смена. Пустой/нераспознанный лист → None."""
+    """Один лист → одна смена. Пустой/нераспознанный лист → None.
+
+    Принимает и лист openpyxl (любого режима), и готовый `_Grid`; лист
+    один раз сворачивается в слепок значений, дальше блоки читают его.
+    """
+    if not isinstance(ws, _Grid):
+        ws = _Grid(ws)
     name = name or ws.title
     sheet_date = _sheet_date(ws, name)
     if sheet_date is None:
@@ -506,19 +546,28 @@ def parse_sheet(ws, name: str | None = None) -> ShiftRec | None:
 
 
 def parse_workbook(source: str | Path | bytes | io.IOBase) -> DispatcherSnapshot:
-    """Файл (путь или bytes) → снимок витрины. Скрытые листы не читаем."""
+    """Файл (путь или bytes) → снимок витрины. Скрытые листы не читаем.
+
+    read_only + values_only: обычный режим разворачивает месяц порта в
+    объекты ячеек всех листов — на этом стоит пик RAM кабинета. Каждый лист
+    читается один раз значениями (`_Grid`), книга закрывается в `finally`:
+    в read_only-режиме без close() висит дескриптор zip-архива.
+    """
     data = io.BytesIO(source) if isinstance(source, bytes) else source
-    wb = openpyxl.load_workbook(data, data_only=True, keep_vba=False)
-    shifts: dict[tuple[date, str], ShiftRec] = {}
-    for ws in wb.worksheets:
-        if ws.sheet_state != "visible":
-            continue
-        try:
-            rec = parse_sheet(ws)
-        except Exception:                       # лист-исключение не роняет импорт
-            continue
-        if rec:
-            shifts[(rec.report_date, rec.shift)] = rec
+    wb = openpyxl.load_workbook(data, read_only=True, data_only=True, keep_vba=False)
+    try:
+        shifts: dict[tuple[date, str], ShiftRec] = {}
+        for ws in wb.worksheets:
+            if ws.sheet_state != "visible":
+                continue
+            try:
+                rec = parse_sheet(ws)
+            except Exception:                   # лист-исключение не роняет импорт
+                continue
+            if rec:
+                shifts[(rec.report_date, rec.shift)] = rec
+    finally:
+        wb.close()
     return DispatcherSnapshot(shifts=[shifts[k] for k in sorted(shifts)], source="xlsm")
 
 

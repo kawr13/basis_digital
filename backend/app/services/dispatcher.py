@@ -871,6 +871,7 @@ def auto_import(db: Session) -> str:
     """
     from ..onec.dispatcher import apply_snapshot
     from ..onec.dispatcher_xlsm import describe, parse_workbook
+    from . import job_lock
 
     if not app_settings.get(db, "dispatcher.auto_import"):
         return "автоимпорт выключен настройкой"
@@ -886,11 +887,16 @@ def auto_import(db: Session) -> str:
     if last and mtime <= last:
         return f"файл не менялся с последней загрузки ({path.name})"
 
-    snapshot = parse_workbook(path)
-    if not snapshot.shifts:
-        return f"в файле {path.name} не найдено листов отчёта"
-    apply_snapshot(db, snapshot)
-    # Причина та же, что в `api/dispatcher.import_file`: витрина изменилась,
-    # собранные ответы больше не действительны.
-    data_cache.invalidate()
-    return f"импортировано из {path.name}: {describe(snapshot)}"
+    # Общая аренда витрины: автоимпорт стартует в тот же момент, что и первая
+    # синхронизация, а две параллельные записи витрины — это дубликаты (п. 8 TASKS2.md).
+    with job_lock.held(db, job_lock.VITRINA, note=f"автоимпорт: {path.name}") as free:
+        if not free:
+            return "витрина занята другой загрузкой — автоимпорт пропущен, файл ждёт следующей загрузки"
+        snapshot = parse_workbook(path)
+        if not snapshot.shifts:
+            return f"в файле {path.name} не найдено листов отчёта"
+        apply_snapshot(db, snapshot)
+        # Причина та же, что в `api/dispatcher.import_file`: витрина изменилась,
+        # собранные ответы больше не действительны.
+        data_cache.invalidate()
+        return f"импортировано из {path.name}: {describe(snapshot)}"

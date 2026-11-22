@@ -1,3 +1,16 @@
+# Имя проекта фиксируем явно (п. 21 TASKS2.md). Без него имя = имя папки, том
+# называется `<папка>_pgdata`, и запуск из соседнего каталога (или после
+# переименования) поднимает РЯДОМ с боевой пустую базу: «пропали пользователи».
+name: statcab
+
+# Логи контейнеров по умолчанию не ротируются: json-file растёт, пока не забьёт
+# /var/lib/docker, а дальше PostgreSQL падает на «no space left on device».
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "20m"
+    max-file: "5"
+
 services:
   db:
     image: postgres:16-alpine
@@ -7,12 +20,16 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?укажите POSTGRES_PASSWORD в .env}
     volumes:
       - pgdata:/var/lib/postgresql/data
+    # 64 МиБ общей памяти из коробки — это `could not resize shared memory
+    # segment` на первом же параллельном VACUUM или CREATE INDEX.
+    shm_size: 256mb
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-statcab}"]
       interval: 5s
       timeout: 5s
       retries: 10
     restart: unless-stopped
+    logging: *default-logging
 
   backend:
     build:
@@ -21,8 +38,11 @@ services:
     environment:
       ENVIRONMENT: ${ENVIRONMENT:-prod}
       DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-statcab}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-statcab}
-      # воркеры uvicorn (передаются в CMD образа); ориентир — 2 × vCPU + 1
-      UVICORN_WORKERS: ${UVICORN_WORKERS:-2}
+      # воркеры uvicorn (передаются в CMD образа); ориентир — 2 × vCPU + 1.
+      # По умолчанию ОДИН: планировщик и синхронизация живут в процессе, а
+      # `threading.Lock` из sync.py не видит соседний воркер — при двух воркерах
+      # синк проходил дважды за интервал (п. 7–8 TASKS2.md).
+      UVICORN_WORKERS: ${UVICORN_WORKERS:-1}
       # пул SQLAlchemy на каждый воркер: UVICORN_WORKERS × (pool + overflow)
       # не должно превышать max_connections PostgreSQL (по умолчанию 100)
       DB_POOL_SIZE: ${DB_POOL_SIZE:-10}
@@ -35,6 +55,12 @@ services:
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8080}
       # пусто = авто (Secure, когда ENVIRONMENT=prod); false — для внутреннего HTTP-сервера
       COOKIE_SECURE: ${COOKIE_SECURE:-}
+      # X-Forwarded-For принимаем: перед backend всегда стоит web (nginx), поэтому
+      # аудит и лимит подбора пароля видят настоящие IP клиентов. Выключить — значит
+      # собрать все попытки на 127.0.0.1; включать — только когда снаружи действительно
+      # наш прокси, иначе клиент сампишет себе любой адрес в AuditLog (п. 19–21).
+      TRUST_PROXY_HEADERS: ${TRUST_PROXY_HEADERS:-true}
+      TRUST_PROXY_HOPS: ${TRUST_PROXY_HOPS:-1}
       ONE_C_SOURCE: ${ONE_C_SOURCE:-mock}
       ONE_C_BASE_URL: ${ONE_C_BASE_URL:-}
       ONE_C_LOGIN: ${ONE_C_LOGIN:-}
@@ -49,22 +75,57 @@ services:
       ADMIN_LOGIN: ${ADMIN_LOGIN:-admin}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
       SEED_DEMO_DATA: ${SEED_DEMO_DATA:-false}
+      # Токен пробы готовности (п. 19 TASKS2.md): /readyz принимает значение из
+      # стора настроек (service.readyz_token в админке) ИЛИ отсюда — заводить
+      # токен в двух местах не нужно, а healthcheck контейнера и вовсе проходит
+      # без токена (403 для него — «приложение живо»). Порог возраста витрины
+      # здесь не нужен: он в сторе настроек (sync.age_limit_sec).
+      READY_TOKEN: ${READY_TOKEN:-}
     depends_on:
       db:
         condition: service_healthy
     volumes:
       - statcab_data:/app/data
+    # Готовность, а не живость (п. 19 TASKS2.md): /readyz отвечает 503, когда база
+    # лежит или витрина устарела, — это видно в `docker compose ps` и у внешнего
+    # мониторинга. python + http.client: curl в образе больше не нужен. start_period
+    # 5 минут — первый запуск с миграциями и первой загрузкой из 1С занимает минуты.
+    # Команда обязана совпадать с HEALTHCHECK из backend/Dockerfile символ в символ:
+    # compose перекрывает образ, и расхождение было бы незаметно (проверяет тест
+    # test_probe_command_is_identical_in_image_and_compose).
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import os,urllib.parse as p,http.client as h; t=os.environ.get('READY_TOKEN',''); c=h.HTTPConnection('127.0.0.1',8000,timeout=4); c.request('GET','/readyz'+('?token='+p.quote(t,safe='') if t else '')); raise SystemExit(c.getresponse().status not in (200,403))\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 300s
     restart: unless-stopped
+    logging: *default-logging
 
   web:
     build:
       context: ./frontend
       dockerfile: Dockerfile
     ports:
-      - "${WEB_PORT:-8080}:80"
+      # Привязка к loopback: режим «всё за хостовым nginx с TLS» не должен
+      # дополнительно отдавать HTTP-кабинет на 0.0.0.0 в обход TLS. Кабинет
+      # наружу без обратного прокси — WEB_BIND=0.0.0.0 (см. .env.example).
+      - "${WEB_BIND:-127.0.0.1}:${WEB_PORT:-8080}:80"
     depends_on:
-      - backend
+      # service_started, а не service_healthy: готовность бэкенда — это свежесть
+      # витрины (п. 19 TASKS2.md), а nginx обязан подняться и при уснувшей 1С —
+      # иначе админу нечем чинить источник: кабинет с устаревшими данными хотя бы
+      # открывается, а с выключенным web починка возможна только с консоли сервера.
+      backend:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     restart: unless-stopped
+    logging: *default-logging
 
 volumes:
   pgdata:

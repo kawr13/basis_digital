@@ -14,6 +14,14 @@
 её, и собранный ответ сам становится промахом. Версию переспрашиваем не чаще,
 чем раз в `VERSION_TTL` секунд: запрос к девяти таблицам дешёвый, но не бесплатный.
 
+Почему single-flight и потолок в байтах (п. 32 TASKS2.md). Одну и ту же
+величину витрины спрашивают несколько параллельных запросов (виджеты
+«Статистики», опрос страницы, двойной клик): без single-flight N потоков
+считали бы один и тот же агрегат N раз. Одинаковые ключ и версия теперь
+ждут первого считавшего и забирают его результат, причём ждущий не держит
+замок кэша. А `MAX_BYTES` ограничивает RAM кэша независимо от того, сколько
+накачает очередной `capacity-trend`.
+
 Когда переезжать в Redis. Кэш живёт в процессе, поэтому при `--workers N`
 каждая копия держит свои `MAX_ENTRIES` записей и свой счётчик попаданий: после
 инвалидации первый запрос в каждый воркер считается заново. Пока витрина
@@ -50,10 +58,26 @@ from ..models import (
 # немного — иначе кэш начинает вытеснять сам себя между переключениями пресета.
 MAX_ENTRIES = 8
 
+# Потолок суммарного размера хранимых ответов (п. 32 TASKS2.md — «лимит по
+# байтам»). Цифра из замеров того же файла: годовой `overview` — ~740 КБ,
+# `capacity-trend` на дефолтном окне — 344 КБ. 8 МиБ — потолок RAM кэша
+# одного воркера: хватает и на восемь коротких периодов, и на годовые
+# ответы с запасом, а дальше LRU вытесняет по суммарному размеру, а не
+# только по числу записей.
+MAX_BYTES = 8 * 1024 * 1024
+
 # На сколько секунд верим посчитанной версии данных. Это и есть цена свежести:
 # после импорта `.xlsm` в чужом воркере кабинет отдаёт старые цифры максимум
 # столько же. Ставить 0 нельзя — версии будут спрашиваться на каждый запрос.
 VERSION_TTL = 2.0
+
+# Сколько секунд ждущие разрешают лидеру single-flight считать ключ
+# (п. 32 TASKS2.md). Самый долгий расчёт — годовой `overview` — ~1.2 с по
+# замерам TASKS2.md, то есть запас десятикратный. Умри лидер с исключением
+# и не позови `put` — ждущие отдают себе ключ по истечении этого срока:
+# замок кэша на время вычислений никто не держит, поэтому взаимной
+# блокировки нет по построению.
+INFLIGHT_TTL = 10.0
 
 # Ключ служебных значений внутри кэша короткоживущих величин (`cached_value`).
 VERSION_VALUE = ("__version__",)
@@ -77,7 +101,77 @@ _bodies: "OrderedDict[tuple, tuple[str, bytes]]" = OrderedDict()
 # ключ → (monotonic, значение) для `cached_value`: считаем не чаще ttl.
 _values: dict[tuple, tuple[float, Any]] = {}
 
-_counters = {"hits": 0, "misses": 0}
+# ("body"|"value", ключ[, версия]) → _Flight: идёт общее вычисление
+# (single-flight, п. 32 TASKS2.md). Два префикса, чтобы ключи байтовых
+# ответов и ключей короткоживущих величин не сталкивались между собой.
+_inflight: dict[tuple, "_Flight"] = {}
+
+_counters = {"hits": 0, "misses": 0, "inflight_joined": 0}
+
+
+class _Flight:
+    """Одно вычисление на всех, кто спросил один и тот же ключ (single-flight).
+
+    Первый поток создаёт полёт и считает; остальные ждут на `done`, отпустив
+    `_lock`, — ожидание под замком отказало бы весь кэш всем остальным.
+    `owner` сторожит рекурсивный вызов: поток не ждёт собственный полёт (иначе
+    повторный `get` того же ключа из того же потока умер бы в дедлоке).
+    `deadline` страхует случай «лидер упал и не позвал `put`»: пережидя его,
+    следующий поток становится лидером и считает сам.
+    """
+
+    __slots__ = ("done", "result", "owner", "deadline")
+
+    def __init__(self) -> None:
+        self.done = threading.Event()
+        self.result: Any = None           # None = результата нет (лидер упал)
+        self.owner = threading.get_ident()
+        self.deadline = time.monotonic() + INFLIGHT_TTL
+
+
+def _flight_acquire(fkey: tuple) -> "tuple[_Flight, bool]":
+    """Под `_lock`: взять полёт ключа. Возвращает (полёт, мы_ли_лидеры).
+
+    Чужой живой полёт — сигнал ждать; просроченный или свой собственный —
+    замещаем новым и считаем сами.
+    """
+    flight = _inflight.get(fkey)
+    if (flight is not None and flight.owner != threading.get_ident()
+            and time.monotonic() < flight.deadline):
+        return flight, False
+    flight = _Flight()
+    _inflight[fkey] = flight
+    return flight, True
+
+
+def _flight_wait(fkey: tuple, flight: "_Flight") -> "tuple[str, Any]":
+    """Дождаться результата лидера вне `_lock`.
+
+    ("result", значение) — получили (запись могли и вытеснить из кэша —
+    байты всё равно в руках). ("leader", новый полёт) — лидер умер или не
+    уложился в `INFLIGHT_TTL`, считать теперь нам. ("again", None) — нас
+    опередил третий поток, переспрашиваем.
+    """
+    if (flight.done.wait(max(0.0, flight.deadline - time.monotonic()))
+            and flight.result is not None):
+        with _lock:
+            _counters["inflight_joined"] += 1
+        return "result", flight.result
+    with _lock:
+        if _inflight.get(fkey) is flight:
+            fresh = _Flight()
+            _inflight[fkey] = fresh
+            return "leader", fresh
+    return "again", None
+
+
+def _flight_finish(fkey: tuple, flight: "_Flight", result: Any) -> None:
+    """Снять полёт с публикации и разбудить ждущих (или отпустить ни с чем)."""
+    with _lock:
+        if _inflight.get(fkey) is flight:
+            del _inflight[fkey]
+    flight.result = result
+    flight.done.set()
 
 
 # --------------------------------------------------------------- сериализация ----
@@ -142,15 +236,36 @@ def cached_value(key: tuple, ttl: float, build: Callable[[], Any]) -> Any:
     (версия данных, границы витрины): запрос идёт к БД, но не на каждый хит.
     Сессию в залоченной секции не держим — под замком только чтение и запись
     словаря, сам запрос работает параллельно с другими потоками.
+
+    Параллельные промахи считают значение один раз: первый поток становится
+    лидером, остальные ждут его результат (single-flight, п. 32 TASKS2.md).
+    Лидер, упавший с исключением, ждущих не вешает — полёт освобождается без
+    результата, и каждый считает сам (со своей ошибкой).
     """
-    with _lock:
-        cached = _values.get(key)
-        if cached is not None and time.monotonic() - cached[0] < ttl:
-            return cached[1]
-    fresh = build()               # вне блокировки: запрос не должен ждать замок
-    with _lock:
-        _values[key] = (time.monotonic(), fresh)
-    return fresh
+    fkey = ("value", key)
+    while True:
+        with _lock:
+            cached = _values.get(key)
+            if cached is not None and time.monotonic() - cached[0] < ttl:
+                return cached[1]
+            flight, leader = _flight_acquire(fkey)
+        if not leader:
+            state, value = _flight_wait(fkey, flight)
+            if state == "result":
+                return value
+            if state == "leader":
+                flight = value          # лидер не отдал результат — считаем сами
+            else:
+                continue                # полёт перехватил другой — переспрашиваем
+        try:
+            fresh = build()             # вне блокировки: запрос не должен ждать замок
+        except BaseException:
+            _flight_finish(fkey, flight, None)
+            raise
+        with _lock:
+            _values[key] = (time.monotonic(), fresh)
+        _flight_finish(fkey, flight, fresh)
+        return fresh
 
 
 # ------------------------------------------------------------------ байты ----
@@ -160,27 +275,68 @@ def get(key: tuple, version: str) -> bytes | None:
 
     Запись, собранная на ушедшую версию, не просто промах — её выбрасываем,
     иначе LRU набивал бы предыдущими поколениями одного и того же периода.
+
+    Промах регистрирует полёт: первый не попавший поток получает `None` и
+    обязан посчитать и вызвать `put`, а пришедшие следом за тот же ключ и ту
+    же версию ждут полёт и забирают его байты (single-flight, п. 32
+    TASKS2.md). Вызывающему коду об этом знать не нужно — `None` по-прежнему
+    означает «считай сам».
     """
-    with _lock:
-        entry = _bodies.get(key)
-        if entry is not None and entry[0] == version:
-            _bodies.move_to_end(key)
-            _counters["hits"] += 1
-            return entry[1]
-        if entry is not None:
-            del _bodies[key]
-        _counters["misses"] += 1
-    return None
+    fkey = ("body", key, version)
+    while True:
+        with _lock:
+            entry = _bodies.get(key)
+            if entry is not None and entry[0] == version:
+                _bodies.move_to_end(key)
+                _counters["hits"] += 1
+                return entry[1]
+            if entry is not None:
+                del _bodies[key]
+            _counters["misses"] += 1
+            flight, leader = _flight_acquire(fkey)
+        if leader:
+            return None                 # считающий код сам вызовет put()
+        state, body = _flight_wait(fkey, flight)
+        if state == "result":
+            return body
+        if state == "leader":
+            return None                 # дождались — лидер теперь мы
+        # полёт перехватил третий поток — смотрим в кэш заново
+
+
+def _stored_bytes() -> int:
+    """Суммарный размер хранимых ответов. Вызывать только под `_lock`."""
+    return sum(len(entry[1]) for entry in _bodies.values())
+
+
+def _evict_locked() -> None:
+    """Вытеснение LRU: по числу записей и по суммарным байтам (п. 32 TASKS2.md).
+
+    Одна запись остаётся живой даже сверх `MAX_BYTES`: иначе единственный
+    годовой `overview` (~740 КБ по замерам TASKS2.md) вытеснялся бы в момент
+    добавления, и кэш переставал бы работать вместо того, чтобы ограничиваться.
+    """
+    while len(_bodies) > 1 and (len(_bodies) > MAX_ENTRIES
+                                or _stored_bytes() > MAX_BYTES):
+        _bodies.popitem(last=False)
 
 
 def put(key: tuple, version: str, payload: dict) -> bytes:
-    """Сериализовать payload и положить в кэш; вернуть байты (их отдадут наружу)."""
+    """Сериализовать payload и положить в кэш; вернуть байты (их отдадут наружу).
+
+    Вторая половина single-flight: `get` зарегистрировал полёт, `put` отдаёт
+    байты всем, кто на него ждал (счётчик `inflight_joined` в `stats()`).
+    """
     body = dumps(payload)           # сериализация — вне блокировки, она самая долгая
+    fkey = ("body", key, version)
     with _lock:
         _bodies[key] = (version, body)
         _bodies.move_to_end(key)
-        while len(_bodies) > MAX_ENTRIES:
-            _bodies.popitem(last=False)
+        _evict_locked()
+        flight = _inflight.pop(fkey, None)
+    if flight is not None:
+        flight.result = body
+        flight.done.set()
     return body
 
 
@@ -194,16 +350,28 @@ def invalidate() -> None:
     with _lock:
         _bodies.clear()
         _values.clear()
+        # _inflight не трогаем: идущие вычисления принадлежат ушедшим версиям,
+        # их `put` разбудит ждущих сам, а просроченные полёты и так живут не
+        # дольше `INFLIGHT_TTL`.
 
 
-def info() -> dict:
-    """Диагностика для админки и тестов: сколько записей и сколько попаданий."""
+def stats() -> dict:
+    """Диагностика для админки и тестов: записи, байты, попадания, single-flight.
+
+    `inflight_joined` — сколько раз поток получил уже считаемый кем-то ответ,
+    не считая его сам (эффект single-flight, п. 32 TASKS2.md); `bytes` —
+    текущая занятость кэша относительно потолка `MAX_BYTES`.
+    """
     with _lock:
         return {
             "entries": len(_bodies),
             "max_entries": MAX_ENTRIES,
+            "bytes": _stored_bytes(),
+            "max_bytes": MAX_BYTES,
             "hits": _counters["hits"],
             "misses": _counters["misses"],
+            "inflight_joined": _counters["inflight_joined"],
+            "inflight": len(_inflight),
             "version_ttl": VERSION_TTL,
             "tables": [m.__tablename__ for m in FACT_TABLES],
         }

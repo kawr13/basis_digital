@@ -19,7 +19,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..db import get_db
-from ..deps import current_user, require_roles
+from ..deps import client_ip, current_user, require_roles
 from ..models import AuditLog, Berth, Role, User, VesselPlacement
 from ..schemas import (
     BerthOut, BerthUpsert, PlacementIn, PlacementOut, PlacementUpdate,
@@ -51,7 +51,7 @@ def _allow(db: Session, user: User, right: str, what: str) -> None:
 
 def _audit(db: Session, user: User, action: str, detail: str, request: Request) -> None:
     db.add(AuditLog(user_id=user.id, login=user.login, action=action,
-                    ip=request.client.host if request.client else None, detail=detail))
+                    ip=client_ip(request), detail=detail))
 
 
 def _placement_out(p: VesselPlacement) -> PlacementOut:
@@ -123,7 +123,8 @@ def delete_berth(
     db: Session = Depends(get_db),
     user: User = Depends(admin_only),
 ):
-    """Удалить причал можно, только если на нём нет ни одной постановки.
+    """Удалить причал можно, только если на нём нет ни одной постановки и ни
+    одно чужое судно на него не выходит.
 
     Иначе история плана повиснет на несуществующем причале. Такой причал нужно
     снять с линии (`is_active=false`) — он уйдёт из сетки, а строки останутся.
@@ -140,6 +141,18 @@ def delete_berth(
             f"На причале {berth.code} постановок: {used}. Удалить нельзя — снимите его с линии, "
             "он скроется из плана, а история останется",
         )
+    # Чужой нахлёст — это тоже занятое место: 20 м этого причала стоят чужие
+    # корпуса, и удаление причала молча превратило бы их в «судно в пустоте».
+    spilled = db.execute(
+        select(func.count()).select_from(VesselPlacement).where(VesselPlacement.spill_berth_id == berth_id)
+    ).scalar_one()
+    if spilled:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"На причал {berth.code} выходит чужих судов: {spilled}. Сначала снимите нахлёст — "
+            "иначе эти метры повиснут на несуществующем причале",
+        )
+
     code = berth.code
     db.delete(berth)
     _audit(db, user, "vessels.berth_delete", code, request)
@@ -263,6 +276,7 @@ def create_placement(
         svc.validate(
             db, berth_id=payload.berth_id, starts_at=payload.starts_at, ends_at=payload.ends_at,
             offset_m=payload.offset_m, length_m=payload.length_m,
+            spill_berth_id=payload.spill_berth_id,
         )
     except svc.Conflict as e:
         raise HTTPException(status.HTTP_409_CONFLICT, str(e)) from e
@@ -275,6 +289,7 @@ def create_placement(
     row = VesselPlacement(
         berth_id=payload.berth_id, lane=payload.lane,
         length_m=payload.length_m, offset_m=payload.offset_m,
+        spill_berth_id=payload.spill_berth_id,
         vessel=payload.vessel.strip(), volume=(payload.volume or "").strip() or None,
         cargo=(payload.cargo or "").strip() or None, note=(payload.note or "").strip() or None,
         starts_at=svc.normalize(payload.starts_at), ends_at=svc.normalize(payload.ends_at),
@@ -308,12 +323,26 @@ def update_placement(
     lane = payload.lane if payload.lane is not None else row.lane
     length_m = payload.length_m if "length_m" in payload.model_fields_set else row.length_m
     offset_m = payload.offset_m if payload.offset_m is not None else row.offset_m
+    # нахлёст: null в теле означает «снять нахлёст», отсутствие поля — «не трогать»;
+    # различает их model_fields_set — так же, как length_m
+    spill_explicit = "spill_berth_id" in payload.model_fields_set
+    spill_berth_id = (
+        payload.spill_berth_id if spill_explicit else row.spill_berth_id
+    )
+    if not spill_explicit:
+        # поле не трогали: если после переезда нахлёста уже нет, висящую ссылку
+        # на соседа снимаем, иначе она и дальше занимала бы чужие метры
+        spill_berth_id = svc.normalize_spill(
+            db, berth_id=berth_id, offset_m=offset_m, length_m=length_m,
+            spill_berth_id=spill_berth_id,
+        )
     starts_at = payload.starts_at or row.starts_at
     ends_at = payload.ends_at or row.ends_at
     try:
         svc.validate(
             db, berth_id=berth_id, starts_at=starts_at, ends_at=ends_at,
-            offset_m=offset_m, length_m=length_m, exclude_id=row.id,
+            offset_m=offset_m, length_m=length_m, spill_berth_id=spill_berth_id,
+            spill_explicit=spill_explicit, exclude_id=row.id,
         )
     except svc.Conflict as e:
         raise HTTPException(status.HTTP_409_CONFLICT, str(e)) from e
@@ -322,6 +351,7 @@ def update_placement(
 
     row.berth_id, row.lane = berth_id, lane
     row.length_m, row.offset_m = length_m, offset_m
+    row.spill_berth_id = spill_berth_id
     row.starts_at, row.ends_at = svc.normalize(starts_at), svc.normalize(ends_at)
     if payload.vessel is not None:
         row.vessel = payload.vessel.strip()

@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 
 import jwt
 
+from . import db
 from .config import get_settings
 from .models import RefreshToken, utcnow
 
@@ -86,6 +87,8 @@ def create_access_token(user_id: int, role: str, extra: dict | None = None) -> t
         "iat": now,
         "exp": now + ttl,
         "jti": uuid.uuid4().hex,
+        # «какая база меня подписала»: после переезда токен протухает сам
+        "db": db.realm(),
     }
     if extra:
         payload.update(extra)
@@ -99,6 +102,10 @@ def decode_access_token(token: str) -> dict | None:
     except jwt.PyJWTError:
         return None
     if payload.get("typ") != "access":
+        return None
+    # Токен выдан под другую базу: кабинет переехал (п. 27 TASKS2.md), и прежний
+    # вход больше ничего не стоит — на новой базе свой список людей.
+    if payload.get("db") != db.realm():
         return None
     return payload
 
