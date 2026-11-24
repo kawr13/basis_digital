@@ -584,27 +584,90 @@ export function isAbortError(e: unknown): boolean {
 const REQUEST_TIMEOUT_MS = 30_000;
 
 /**
- * Таймаут и сигнал вызывающей стороны в одном: `AbortSignal.any`. Ручной
- * relay-вариант (слушатель `{once: true}` на сигнале вызывающей стороны)
- * убран (TASKS2.md п.24): он не снимался по завершении fetch, а страницы
- * держат один контроллер на всю жизнь — слушатель копился бы на сигнале
- * до его гибели. `AbortSignal.any` есть во всех целевых браузерах кабинета,
- * тип — в DOM-библиотеке TS 5.6, так что ветка отката не нужна.
+ * Один запрос: «таймаут ИЛИ отмена вызывающей стороной» (TASKS2.md п. 24).
+ *
+ * `AbortSignal.any` — это Chrome/Edge 116+, Firefox 124+, Safari 17.4+. В
+ * браузере старше вызов падал с «AbortSignal.any is not a function» и ронял
+ * КАЖДЫЙ запрос, то есть кабинет не открывался вовсе. Поэтому нативная склейка
+ * берётся, только если она есть, а иначе сигнал собирается relay-ом вручную.
+ * Таймер и слушателя сигнала страницы убирает `settle`: `raw` зовёт его в
+ * `finally`, потому что страницы держат по одному контроллеру на всю жизнь и
+ * копить на их сигнале слушателей нельзя.
  */
-function withTimeout(signal: AbortSignal | null | undefined): AbortSignal {
-  const timeout = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
-  return signal ? AbortSignal.any([signal, timeout]) : timeout;
+interface RequestSignal {
+  /** Сигнал, который отдаём `fetch`. */
+  signal: AbortSignal;
+  /** Он сработал — значит ошибка это таймаут (408), а не отмена страницы. */
+  timeout: AbortSignal;
+  /** Снять таймер и слушателя; можно звать повторно. */
+  settle: () => void;
+}
+
+function withTimeout(caller: AbortSignal | null | undefined): RequestSignal {
+  const hooks: Array<[AbortSignal, () => void]> = [];
+  let timer: number | null = null;
+
+  const settle = () => {
+    if (timer !== null) {
+      clearTimeout(timer);
+      timer = null;
+    }
+    for (const [s, fn] of hooks) s.removeEventListener("abort", fn);
+    hooks.length = 0;
+  };
+  // Подписка на чужой сигнал: уже снят — реагируем сразу, иначе `{once: true}`
+  // и обязательная отписка в `settle`.
+  const follow = (s: AbortSignal, react: (reason?: unknown) => void) => {
+    if (s.aborted) {
+      react(s.reason);
+      return;
+    }
+    const fn = () => react(s.reason);
+    s.addEventListener("abort", fn, { once: true });
+    hooks.push([s, fn]);
+  };
+
+  const nativeTimeout = typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function";
+  const nativeAny = typeof AbortSignal !== "undefined" && typeof AbortSignal.any === "function";
+
+  if (nativeTimeout) {
+    const timeout = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
+    if (!caller) return { signal: timeout, timeout, settle };
+    if (nativeAny) return { signal: AbortSignal.any([caller, timeout]), timeout, settle };
+    // Таймер нативный, а склейки нет — relay за обоими сигналами свой.
+    const relay = new AbortController();
+    follow(timeout, (reason) => relay.abort(reason));
+    follow(caller, (reason) => relay.abort(reason));
+    return { signal: relay.signal, timeout, settle };
+  }
+
+  // Совсем старый браузер: ни `AbortSignal.timeout`, ни `AbortSignal.any`.
+  // Причина отмены нужна, чтобы `fetch` отклонился `TimeoutError`; в браузере
+  // без `abort(reason)` лишний аргумент просто игнорируется — там таймаут
+  // опознаётся по `timeout.aborted`.
+  const timeoutCtl = new AbortController();
+  const relayCtl = new AbortController();
+  const abortWith = (reason: unknown, ...controllers: AbortController[]) => {
+    for (const c of controllers) c.abort(reason);
+    settle();
+  };
+  timer = setTimeout(
+    () => abortWith(new DOMException("Сервер не ответил", "TimeoutError"), timeoutCtl, relayCtl),
+    REQUEST_TIMEOUT_MS,
+  );
+  if (caller) follow(caller, (reason) => abortWith(reason, relayCtl));
+  return { signal: relayCtl.signal, timeout: timeoutCtl.signal, settle };
 }
 
 async function raw(path: string, init: RequestInit = {}) {
   // `init.signal` — отмена вызывающей стороны; доходит сюда через `init`
   // из `request`/`requestBlob`, повторяющих запрос транзитом.
-  const signal = withTimeout(init.signal);
+  const req = withTimeout(init.signal);
   try {
     return await fetch(path, {
       credentials: "include",
       ...init,
-      signal,
+      signal: req.signal,
       headers: {
         Accept: "application/json",
         ...(init.body ? { "Content-Type": "application/json" } : {}),
@@ -613,10 +676,14 @@ async function raw(path: string, init: RequestInit = {}) {
       },
     });
   } catch (e) {
-    if (e instanceof DOMException && e.name === "TimeoutError") {
+    // Таймаут — ошибка для пользователя, отмена — нет: её страница гасит сама
+    // через `isAbortError`.
+    if (req.timeout.aborted) {
       throw new ApiError(408, `Сервер не ответил за ${REQUEST_TIMEOUT_MS / 1000} с — попробуйте ещё раз`);
     }
     throw e;
+  } finally {
+    req.settle();
   }
 }
 

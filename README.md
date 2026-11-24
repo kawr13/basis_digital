@@ -369,6 +369,7 @@ node tools/ui_customization.mjs           # drag&drop, размеры плаше
 node tools/ui_drilldown.mjs               # клики по графику/строке, панель деталей, Esc/Enter, права (28 проверок)
 node tools/ui_shots.mjs                   # скриншоты входа/дашборда/отчётов для проверки темы
 node tools/ui_perf.mjs                    # замеры: длинные задачи, FCP, вес ресурсов (прод-сборка!)
+node tools/ui_legacy_abort.mjs          # браузер без AbortSignal.any/timeout: данные, отмена, таймаут (24 проверки)
 ```
 
 Нужен установленный Chromium для Playwright: задайте `PW_CHROMIUM=<путь к chrome.exe>`.

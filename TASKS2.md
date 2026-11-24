@@ -220,9 +220,12 @@ statcab_backend` c `server … resolve` + `zone` + `keepalive 16` — динам
 периода показывает цифры прежнего окна. `DashboardPage` собирал четыре эндпоинта
 через `Promise.all`: отказ одной метрики терял весь дашборд.
 
-**Сделано.** `raw()` склеивает сигнал вызывающей стороны с `AbortSignal.timeout()`
-(таймаут → `ApiError(408)`), склейка — через `AbortSignal.any`, чтобы на сигнале
-страницы не копились слушатели. `signal?: AbortSignal` проброшен во все «периодные»
+**Сделано.** `raw()` склеивает сигнал вызывающей стороны с таймаутом (таймаут →
+`ApiError(408)`). Склейка — `AbortSignal.any`, чтобы на сигнале страницы не копились
+слушатели, но только если он есть: в Chrome/Edge < 116, Firefox < 124 и Safari < 17.4
+такого метода нет, и безусловно вызванный `AbortSignal.any` ронял каждый запрос
+(«is not a function», кабинет не открывался вовсе) — там сигнал собирается relay-ом,
+таймер и слушатель снимает `settle` в `finally`. `signal?: AbortSignal` проброшен во все «периодные»
 ручки `api.*` (`summary`/`cargo`/`capacity`/`dynamics`, три отчёта, `dispatcherOverview`/
 `dispatcherDay`/`dispatcherRows`, `vesselPlan`); пользовательские выгрузки (`downloadCsv`,
 `dispatcherRowsCsv`, `planPdf`) и общий промис `refresh` — без отмены намеренно.
