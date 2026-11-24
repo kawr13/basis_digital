@@ -500,6 +500,8 @@ export type DbCandidate = {
   user: string;
   database: string;
   password: string | null;
+  /** Разовая просьба создать базу, если её нет (галка в форме, в настройки не едет). */
+  create_missing?: boolean;
 };
 
 export type DbConfig = {
@@ -517,6 +519,9 @@ export type DbTestResult = {
   version: string | null;
   error: string | null;
   url: string;
+  /** false — базы нет на сервере; null — проверить не удалось (не путать с «нет»). */
+  exists: boolean | null;
+  note: string | null;
 };
 
 export type AuditEntry = {

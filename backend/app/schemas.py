@@ -247,7 +247,12 @@ class DbParts(BaseModel):
 
 
 class DbCandidate(BaseModel):
-    """Кандидат из формы: те же части, но пароль может прийти (или маска)."""
+    """Кандидат из формы: те же части, но пароль может прийти (или маска).
+
+    `create_missing` — разовая просьба завести базу, если её нет (галка в форме).
+    В стор настроек она не попадает: переезд завтра на другой хост не обязан
+    молча плодить пустые базы.
+    """
 
     dialect: str = Field(default="postgresql", max_length=16)
     host: str = Field(default="", max_length=200)
@@ -255,6 +260,7 @@ class DbCandidate(BaseModel):
     user: str = Field(default="", max_length=200)
     password: str | None = Field(default=None, max_length=200)
     database: str = Field(default="", max_length=500)
+    create_missing: bool = False
 
 
 class DbConfigOut(BaseModel):
@@ -272,6 +278,8 @@ class DbTestOut(BaseModel):
     version: str | None = None
     error: str | None = None
     url: str
+    exists: bool | None = None       # False — базы нет; None — проверить не удалось
+    note: str | None = None          # что делать админу при exists == False
 
 
 class RestartOut(BaseModel):

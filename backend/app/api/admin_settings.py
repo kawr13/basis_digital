@@ -177,13 +177,17 @@ def apply_db(payload: DbCandidate, request: Request,
     кабинет остаётся на прежней базе и отвечает 400 с объяснением: опечатка в
     порте не имеет права оставлять порт без кабинета.
 
+    С `create_missing` кабинет сначала заводит базу на сервере (право `CREATEDB`
+    на роли из формы), и только потом переезжает; не хватило прав — 422 с тем,
+    что именно дать роли.
+
     Внимание: начатые в эту секунду запросы падают — соединения прежней базы
     закрываются. Об этом предупреждает форма.
     """
     candidate = dbconfig.with_password(db, payload.model_dump())
     shown = dbconfig.masked(candidate)
     try:
-        dbconfig.apply(db, candidate, actor)
+        result = dbconfig.apply(db, candidate, actor)
     except ValueError as exc:                       # конфигурация собрана неверно
         _audit(db, actor, request, "admin.db_apply", f"{shown}: отказ — {exc}")
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
@@ -193,7 +197,13 @@ def apply_db(payload: DbCandidate, request: Request,
     # Сессия запроса привязана к прежней базе — аудит переезда пишем там же, где
     # лежит указатель на новую (bootstrap-база), иначе запись о переезде уедет
     # в базу, которую кабинет уже не использует.
-    _audit(db, actor, request, "admin.db_apply", f"{shown}: применено")
+    note = []
+    if result.get("created"):
+        note.append("создали базу")
+    if result.get("admin_created"):
+        note.append("создали администратора")
+    _audit(db, actor, request, "admin.db_apply",
+           f"{shown}: применено" + (f" ({', '.join(note)})" if note else ""))
     # Расписание перечитывает НОВАЯ база: интервал синхронизации лежит в её
     # настройках, а сессия запроса привязана к прежней.
     with SessionLocal() as fresh:

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import pytest
 from sqlalchemy import func, select, text
+from sqlalchemy.engine import make_url
 
 from app import db as db_module
 from app.db import SessionLocal, current_url
@@ -243,3 +244,74 @@ def test_restart_ne_rvet_zagruzku(client, admin_hdr):
             assert r.status_code == 409, r.text
         finally:
             job_lock.release(lock_db, job_lock.VITRINA)
+
+
+# ------------------------------------------------------- создание базы (п. 35) ----
+
+def pg_candidate(**fields) -> dict:
+    """Кандидат PostgreSQL; по умолчанию — заведомо мёртвый порт, чтобы тест не ждал."""
+    base = {"dialect": "postgresql", "host": "127.0.0.1", "port": 1, "user": "statcab",
+            "password": "pw", "database": "kabinet"}
+    return base | fields
+
+
+def test_quote_ident_ne_otpuskaet_kavychku():
+    """`CREATE DATABASE` не принимает параметров: экранирование — единственная защита."""
+    assert dbconfig.quote_ident("statcab") == '"statcab"'
+    assert dbconfig.quote_ident('we"ird;drop database "x') == '"we""ird;drop database ""x"'
+    for bad in ("", "a" * 64, "имя\0с"):
+        with pytest.raises(ValueError):
+            dbconfig.quote_ident(bad)
+
+
+def test_sluzhebnaya_baza_menyaet_tolko_imya_bazy():
+    """Создавать базу ходим в `postgres` того же кластера той же ролью."""
+    cand = {"dialect": "postgresql", "host": "db.internal", "port": 6543, "user": "statcab",
+            "password": "p@ss:100%", "database": "kabinet"}
+    url = make_url(dbconfig.maintenance_url(cand))
+    assert (url.database, url.host, url.port, url.username, url.password) == (
+        "postgres", "db.internal", 6543, "statcab", "p@ss:100%")
+    with pytest.raises(ValueError):
+        dbconfig.maintenance_url(sqlite_candidate("x.db"))
+
+
+def test_est_baza_ili_net(tmp_path):
+    there = tmp_path / "there.db"
+    there.write_bytes(b"")
+    assert dbconfig.database_exists(sqlite_candidate(there)) == (True, None)
+    assert dbconfig.database_exists(sqlite_candidate(tmp_path / "нет.db")) == (False, None)
+
+
+def test_mertvyysya_server_ne_vydaet_sebya_za_otsutstvie_bazy():
+    result = dbconfig.test(pg_candidate())
+    assert result["ok"] is False
+    assert result["exists"] is None, "отказ соединения — не «базы нет»: советовать создание нельзя"
+    assert "pw" not in (result["error"] or "")
+
+
+def test_sqlite_ne_vymyslyaet_sozdaniya_bazy(tmp_path):
+    outcome = dbconfig.create_database(sqlite_candidate(tmp_path / "driver.db"))
+    assert outcome["created"] is False and outcome["error"] is None
+
+
+def test_flag_create_missing_ne_osedaet_v_stor(tmp_path, restore_engine, original_url):
+    """Разовая просьба не должна становиться постоянным настроечным состоянием."""
+    candidate = sqlite_candidate(tmp_path / "store.db") | {"create_missing": True}
+    with SessionLocal() as db:
+        assert dbconfig.apply(db, candidate)["created"] is False
+    db_module.rebuild_engine(original_url)          # возвращаемся к базе с указателем
+    with SessionLocal() as db:
+        assert dbconfig.pointer(db) is True, "указатель на новую базу обязан сохраниться"
+        # ключ не зарегистрирован в сторе — но и строкой в таблицу он осесть не должен
+        stored = db.scalars(select(AppSetting).where(AppSetting.key.like("%create_missing%"))).all()
+        assert stored == [], f"разовый флаг уехал в настройки: {[r.key for r in stored]}"
+
+
+def test_sozdat_bazu_na_mertvom_servere_otkaz_do_periezda(client, admin_hdr, restore_engine):
+    """Не удалось создать — кабинет не сдвинулся, пароль не показан, текст внятный."""
+    before = client.get("/api/admin/db", headers=admin_hdr).json()["url"]
+    r = client.put("/api/admin/db", json=dead_candidate() | {"create_missing": True},
+                   headers=admin_hdr)
+    assert r.status_code == 422, r.text
+    assert "super-secret-pw" not in r.text
+    assert client.get("/api/admin/db", headers=admin_hdr).json()["url"] == before

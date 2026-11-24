@@ -49,6 +49,9 @@ export function DatabaseTab() {
   const [actionError, setActionError] = useState("");
   const [test, setTest] = useState<DbTestResult | null>(null);
   const [confirm, setConfirm] = useState<"" | "apply" | "revert" | "restart">("");
+  // разовая просьба создать базу: в отличие от частей URL, она не сохраняется
+  const [createMissing, setCreateMissing] = useState(true);
+  const sqlite = form.dialect === "sqlite";
 
   const load = useCallback(async () => {
     setLoadError("");
@@ -81,6 +84,8 @@ export function DatabaseTab() {
     database: form.database.trim(),
     // пустое поле = «пароль не меняли»; бэкенд подставит сохранённый
     password: form.password ? form.password : null,
+    // у sqlite нечего создавать: файл создаёт драйвер
+    create_missing: !sqlite && createMissing,
   });
 
   const run = async (what: Busy, fn: () => Promise<void>) => {
@@ -123,7 +128,6 @@ export function DatabaseTab() {
       setNotice(res.note || "Сервис перезапускается.");
     });
 
-  const sqlite = form.dialect === "sqlite";
 
   return (
     <div className="space-y-5" data-tab-panel="database">
@@ -251,6 +255,18 @@ export function DatabaseTab() {
         </div>
 
         <div className="mt-3 flex flex-wrap items-center gap-2">
+          {!sqlite && (
+            <label className="flex items-center gap-2 text-sm text-ink-200">
+              <input
+                type="checkbox"
+                checked={createMissing}
+                onChange={(e) => setCreateMissing(e.target.checked)}
+                disabled={busy !== ""}
+                data-db-field="create-missing"
+              />
+              создать базу, если её нет
+            </label>
+          )}
           <button
             className="btn-ghost text-sm"
             onClick={onTest}
@@ -294,7 +310,13 @@ export function DatabaseTab() {
           <div className="mt-3">
             <ConfirmInline
               action="db-apply-yes"
-              text="Переезд закроет текущие соединения: начатые запросы упадут, а вам придётся войти заново. Применить?"
+              text={
+                "Переезд закроет текущие соединения: начатые запросы упадут, а вам придётся войти заново. " +
+                (!sqlite && createMissing
+                  ? `Базу «${form.database.trim() || "…"}», если её нет, кабинет создаст на сервере. `
+                  : "") +
+                "Применить?"
+              }
               onYes={onApply}
               onNo={() => setConfirm("")}
             />
@@ -317,11 +339,13 @@ export function DatabaseTab() {
           {test && (
             <div data-db-test>
               <StatusChip tone={test.ok ? "ok" : "crit"} text={test.ok ? "отвечает" : "отказ"} />
+              {test.exists === false && <StatusChip tone="warn" text="базы нет" />}
               <span className="num ml-2 text-sm text-ink-300" data-db-test-url>
                 {test.url}
               </span>
               {test.ok && <span className="num ml-2 text-sm text-ink-100">{test.version}</span>}
               {!test.ok && <div className="mt-1 text-sm text-crit">{test.error}</div>}
+              {test.note && <div className="mt-1 text-sm text-ink-200">{test.note}</div>}
             </div>
           )}
           <InfoNote
@@ -330,7 +354,9 @@ export function DatabaseTab() {
               "Меняет только «Применить» — и то остаётся на прежней базе, если новая не " +
               "ответила или на ней не поднялась схема. Пустая база без входа не оставит: " +
               "если пользователей на ней нет, кабинет заведёт администратора из `.env` " +
-              "(если он не задан — с паролем из журнала)."
+              "(если он не задан — с паролем из журнала). Галка «создать базу, если её нет» " +
+              "заводит саму базу на сервере (право CREATEDB на роли из формы): таблицы, " +
+              "колонки и индексы поднимаются при переезде и без неё."
             }
           />
         </div>
